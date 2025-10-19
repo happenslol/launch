@@ -1,0 +1,33 @@
+cargo-features = ["codegen-backend"]
+
+[package]
+name = "launch"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tracing = "0.1.41"
+include-fs = "0.2.0"
+anyhow = "1.0.100"
+unicode-segmentation = "1.12.0"
+xdg = "3.0.0"
+
+[dependencies.gpui]
+# path = "../zed/crates/gpui"
+git = "https://github.com/happenslol/zed"
+branch = "reintroduce-layer-shell"
+default-features = false
+features = ["wayland"]
+
+[build-dependencies]
+include-fs = "0.2.0"
+
+[profile.dev]
+debug = 1
+codegen-backend = "cranelift"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
