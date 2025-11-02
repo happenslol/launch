@@ -11,12 +11,14 @@ tracing = "0.1.41"
 include-fs = "0.2.0"
 anyhow = "1.0.100"
 unicode-segmentation = "1.12.0"
-xdg = "3.0.0"
+walkdir = "2.5.0"
+freedesktop-file-parser = "0.3.1"
+nucleo-matcher = "0.3.1"
 
 [dependencies.gpui]
-# path = "../zed/crates/gpui"
 git = "https://github.com/happenslol/zed"
 branch = "reintroduce-layer-shell"
+# path = "../zed/crates/gpui"
 default-features = false
 features = ["wayland"]
 

@@ -1,3 +1,4 @@
+#![allow(unused)]
 use gpui::{Div, Styled, div};
 
 pub trait StyledExt: Styled + Sized {
