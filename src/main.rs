@@ -1,19 +1,28 @@
 mod assets;
+mod audio;
 mod logging;
 mod text_input;
 mod util;
+mod xdg;
 
-use std::cmp::Reverse;
+use std::{
+  ops::Range,
+  sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+  },
+};
 
 use anyhow::Result;
 use freedesktop_file_parser::DesktopEntry;
 use gpui::{
-  App, Application, Bounds, Entity, FocusHandle, Focusable, KeyBinding, Size, Subscription, Window,
-  WindowBounds, WindowKind, WindowOptions, actions, div,
+  App, Application, Bounds, Entity, FocusHandle, Focusable, KeyBinding, ScrollStrategy,
+  SharedString, Size, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
+  WindowKind, WindowOptions, actions, div,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
-  px, rgb, rgba, white,
+  px, rgb, rgba, uniform_list, white,
 };
 use nucleo_matcher::{Config, Matcher, Utf32Str, pattern::Pattern};
 use tracing::error;
@@ -65,22 +74,50 @@ fn show_launcher(cx: &mut App) {
   }
 }
 
-actions!(root, [Quit]);
+actions!(root, [Quit, SelectNext, SelectPrev]);
+
+enum ItemAction {
+  Launch(DesktopEntry),
+  None,
+}
+
+pub struct Item {
+  name: SharedString,
+  action: ItemAction,
+}
 
 struct Launcher {
   focus_handle: FocusHandle,
   search_input: Entity<TextInput>,
-  query: String,
-  entries: Vec<DesktopEntry>,
-  matches: Vec<(usize, u32)>,
+  current_query: String,
+  selected_item: Option<usize>,
+  scroll_handle: UniformListScrollHandle,
+
+  items: Arc<Vec<Item>>,
+  matches: Option<Vec<(usize, u32)>>,
   matcher: Matcher,
+
   subscriptions: Vec<Subscription>,
+
+  // Picker (maybe pull this out?)
+  // The id currently displayed search
+  search_id: Option<usize>,
+  // Sequence used to generate new search ids
+  next_search_id: usize,
+  // Condition var to signal old search tasks to stop
+  cancel_flag: Arc<AtomicBool>,
+  // In-progress search task (drop to cancel)
+  search_task: Option<Task<()>>,
 }
 
 impl Launcher {
   pub fn init(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.bind_keys([KeyBinding::new("escape", Quit, None)]);
+    cx.bind_keys([
+      KeyBinding::new("escape", Quit, None),
+      KeyBinding::new("down", SelectNext, None),
+      KeyBinding::new("up", SelectPrev, None),
+    ]);
   }
 
   pub fn view(window: &mut Window, cx: &mut App) -> Entity<Self> {
@@ -90,68 +127,161 @@ impl Launcher {
   fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     let focus_handle = cx.focus_handle();
     let search_input = cx.new(|cx| TextInput::new(window, cx));
-    let entries = find_all_desktop_entries().unwrap();
     let matcher = Matcher::new(Config::DEFAULT);
+
+    let mut items = vec![];
+
+    items.extend(xdg::get_items().unwrap());
+    items.extend(audio::get_items().unwrap());
 
     let mut this = Self {
       search_input: search_input.clone(),
+      selected_item: None,
       focus_handle,
-      entries,
-      matches: Vec::new(),
+      items: Arc::new(items),
+      matches: None,
       matcher,
-      query: String::new(),
+      current_query: String::new(),
+      scroll_handle: UniformListScrollHandle::new(),
       subscriptions: Vec::new(),
+
+      search_id: None,
+      next_search_id: 0,
+      cancel_flag: Arc::new(AtomicBool::new(false)),
+      search_task: None,
     };
 
     this
       .subscriptions
       .extend([cx.subscribe_in(&search_input, window, {
         let search_input = search_input.clone();
-        move |this, _, ev: &TextInputEvent, _window, cx| {
+        move |this, _, ev: &TextInputEvent, window, cx| {
+          // Serach only updates on text changes
           if *ev != TextInputEvent::Change {
             return;
           }
 
-          let value = &search_input.read(cx).content;
-          if this.query == *value {
+          // See if something actually changed
+          let new_value = &search_input.read(cx).content.trim();
+          if &this.current_query == new_value {
             return;
           }
 
-          // We're gonna re-match, so we clear in any case
-          this.matches.clear();
-          this.query = value.to_string();
-
-          if this.query.is_empty() {
-            return;
-          }
-
-          let pattern = Pattern::new(
-            value,
-            nucleo_matcher::pattern::CaseMatching::Smart,
-            nucleo_matcher::pattern::Normalization::Smart,
-            nucleo_matcher::pattern::AtomKind::Fuzzy,
-          );
-
-          let mut buf = Vec::new();
-
-          for (i, entry) in this.entries.iter().enumerate() {
-            if let Some(score) = pattern.score(
-              Utf32Str::new(&entry.name.default, &mut buf),
-              &mut this.matcher,
-            ) {
-              this.matches.push((i, score));
-            }
-          }
-
-          this
-            .matches
-            .sort_unstable_by_key(|(_, score)| Reverse(*score));
-
-          cx.notify();
+          // Update our search results
+          this.current_query = new_value.to_string();
+          this.update_matches(window, cx);
         }
       })]);
 
     this
+  }
+
+  // Uses current_query to kick off a search task
+  fn update_matches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    // Cancel ongoing search
+    self.cancel_flag.store(true, Ordering::Release);
+    self.cancel_flag = Arc::new(AtomicBool::new(false));
+    self.search_task = None;
+
+    let current_search_id = self.next_search_id;
+    self.next_search_id += 1;
+
+    // Show all items
+    if self.current_query.is_empty() {
+      println!("Empty, showing all items");
+      self.search_id = Some(current_search_id);
+      self.matches = None;
+      cx.notify();
+      return;
+    }
+
+    let items = self.items.clone();
+    let cancel_flag = self.cancel_flag.clone();
+    let query = self.current_query.clone();
+
+    self.search_task = Some(cx.spawn_in(window, async move |this, cx| {
+      let matches = cx
+        .background_spawn(async move {
+          if cancel_flag.load(Ordering::Acquire) {
+            return None;
+          }
+
+          let matches = get_matches(&items, &query);
+
+          if cancel_flag.load(Ordering::Acquire) {
+            return None;
+          }
+
+          Some(matches)
+        })
+        .await;
+
+      let Some(matches) = matches else {
+        return;
+      };
+
+      let _ = this.update(cx, |this, cx| {
+        // Check if the search id is still valid right before we synchronously update the matches
+        if this.search_id.is_some_and(|id| id > current_search_id) {
+          return;
+        }
+
+        // Clamp the selected item, the item count might have changed
+        // TODO: Fix this
+        this.selected_item = this.selected_item.map(|i| i.min(matches.len() - 1));
+        this.search_id = Some(current_search_id);
+        this.matches = Some(matches);
+
+        cx.notify();
+      });
+    }));
+  }
+
+  fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
+    if self
+      .matches
+      .as_ref()
+      .is_some_and(|matches| matches.is_empty())
+    {
+      return;
+    }
+
+    let item_count = self.matches.as_ref().map_or(self.items.len(), |matches| matches.len());
+
+    // Wrap around to first item
+    match self.selected_item {
+      Some(i) => self.selected_item = Some((i + 1) % item_count),
+      None => self.selected_item = Some(0),
+    }
+
+    self
+      .scroll_handle
+      .scroll_to_item(self.selected_item.unwrap(), ScrollStrategy::Bottom);
+
+    cx.notify();
+  }
+
+  fn select_prev(&mut self, _: &SelectPrev, _window: &mut Window, cx: &mut Context<Self>) {
+    if self
+      .matches
+      .as_ref()
+      .is_some_and(|matches| matches.is_empty())
+    {
+      return;
+    }
+
+    let item_count = self.matches.as_ref().map_or(self.items.len(), |matches| matches.len());
+
+    match self.selected_item {
+      Some(0) | None => self.selected_item = Some(item_count - 1),
+      Some(i) => self.selected_item = Some(i - 1),
+    }
+
+    self
+      .scroll_handle
+      .scroll_to_item(self.selected_item.unwrap(), ScrollStrategy::Top);
+
+    cx.notify();
   }
 }
 
@@ -162,89 +292,50 @@ impl Focusable for Launcher {
 }
 
 impl Render for Launcher {
-  fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-    let children: Vec<String> = if self.matches.is_empty() {
-      if self.query.is_empty() {
-        self
-          .entries
-          .iter()
-          .map(|entry| entry.name.default.clone())
-          .collect()
-      } else {
-        Vec::new()
-      }
-    } else {
-      self
-        .matches
-        .iter()
-        .map(|(i, _)| self.entries[*i].name.default.clone())
-        .collect()
-    };
-
+  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
+      .track_focus(&self.focus_handle)
+      .on_action(cx.listener(Self::select_next))
+      .on_action(cx.listener(Self::select_prev))
       .size_full()
       .bg(rgba(0x00000015))
       .child(self.search_input.clone())
       .child(
-        v_flex()
-          .bg(rgb(0x333333))
-          .id("results")
-          .overflow_y_scroll()
-          .max_h_full()
-          .children(
-            children
-              .into_iter()
-              .map(|entry| div().bg(rgb(0x333333)).text_color(white()).child(entry)),
-          ),
+        uniform_list(
+          "results",
+          self
+            .matches
+            .as_ref()
+            .map_or_else(|| self.items.len(), |matches| matches.len()),
+          cx.processor(move |this, range: Range<usize>, _window, _cx| {
+            range
+              .map(|i| {
+                let is_selected = this
+                  .selected_item
+                  .is_some_and(|selected_idx| selected_idx == i);
+
+                let item_index = this.matches.as_ref().map_or(i, |matches| matches[i].0);
+                let item = &this.items[item_index];
+
+                div()
+                  .id(i)
+                  .px_3()
+                  .py_2()
+                  .cursor_pointer()
+                  .bg(white())
+                  .when(is_selected, |div| div.bg(rgb(0xDDDDDD)))
+                  .when(!is_selected, |div| div.hover(|div| div.bg(rgb(0xAAAAAA))))
+                  .child(item.name.clone())
+              })
+              .collect()
+          }),
+        )
+        .track_scroll(self.scroll_handle.clone())
+        .h_full(),
       )
   }
 }
 
-fn find_all_desktop_entries() -> Result<Vec<DesktopEntry>> {
-  let data_dirs = std::env::var("XDG_DATA_DIRS").ok().map(|p| {
-    std::env::split_paths(&p)
-      .filter(|p| p.is_absolute())
-      .collect::<Vec<_>>()
-  });
-
-  let app_dirs = data_dirs.map(|dirs| {
-    dirs
-      .iter()
-      .map(|dir| dir.join("applications"))
-      .filter(|dir| dir.try_exists().unwrap_or_default())
-      .collect::<Vec<_>>()
-  });
-
-  let Some(app_dirs) = app_dirs else {
-    return Ok(Vec::new());
-  };
-
-  let mut applications = Vec::new();
-
-  for dir in app_dirs {
-    let walker = walkdir::WalkDir::new(&dir).into_iter();
-
-    // TODO: Deduplicate by dektop id
-    for entry in walker.filter_entry(|e| {
-      e.file_type().is_dir()
-        || e
-          .file_name()
-          .to_str()
-          .is_some_and(|s| s.ends_with(".desktop"))
-    }) {
-      let Ok(entry) = entry else {
-        continue;
-      };
-
-      if entry.file_type().is_dir() {
-        continue;
-      }
-
-      let contents = std::fs::read_to_string(entry.path())?;
-      let parsed = freedesktop_file_parser::parse(&contents)?;
-      applications.push(parsed.entry);
-    }
-  }
-
-  Ok(applications)
+fn get_matches(items: &[Item], query: &str) -> Vec<(usize, u32)> {
+  vec![]
 }
