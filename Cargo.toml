@@ -14,6 +14,7 @@ unicode-segmentation = "1.12.0"
 walkdir = "2.5.0"
 freedesktop-file-parser = "0.3.1"
 nucleo-matcher = "0.3.1"
+async-lock = "3.4.1"
 
 [dependencies.gpui]
 git = "https://github.com/happenslol/zed"

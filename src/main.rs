@@ -14,6 +14,7 @@ use std::{
 };
 
 use anyhow::Result;
+use async_lock::Mutex;
 use freedesktop_file_parser::DesktopEntry;
 use gpui::{
   App, Application, Bounds, Entity, FocusHandle, Focusable, KeyBinding, ScrollStrategy,
@@ -24,7 +25,10 @@ use gpui::{
   prelude::*,
   px, rgb, rgba, uniform_list, white,
 };
-use nucleo_matcher::{Config, Matcher, Utf32Str, pattern::Pattern};
+use nucleo_matcher::{
+  Config, Matcher, Utf32Str,
+  pattern::{CaseMatching, Normalization, Pattern},
+};
 use tracing::error;
 
 use crate::{
@@ -77,7 +81,7 @@ fn show_launcher(cx: &mut App) {
 actions!(root, [Quit, SelectNext, SelectPrev]);
 
 enum ItemAction {
-  Launch(DesktopEntry),
+  Launch(Box<DesktopEntry>),
   None,
 }
 
@@ -95,7 +99,7 @@ struct Launcher {
 
   items: Arc<Vec<Item>>,
   matches: Option<Vec<(usize, u32)>>,
-  matcher: Matcher,
+  matcher: Arc<Mutex<Matcher>>,
 
   subscriptions: Vec<Subscription>,
 
@@ -140,7 +144,7 @@ impl Launcher {
       focus_handle,
       items: Arc::new(items),
       matches: None,
-      matcher,
+      matcher: Arc::new(Mutex::new(matcher)),
       current_query: String::new(),
       scroll_handle: UniformListScrollHandle::new(),
       subscriptions: Vec::new(),
@@ -188,7 +192,6 @@ impl Launcher {
 
     // Show all items
     if self.current_query.is_empty() {
-      println!("Empty, showing all items");
       self.search_id = Some(current_search_id);
       self.matches = None;
       cx.notify();
@@ -198,6 +201,7 @@ impl Launcher {
     let items = self.items.clone();
     let cancel_flag = self.cancel_flag.clone();
     let query = self.current_query.clone();
+    let matcher = self.matcher.clone();
 
     self.search_task = Some(cx.spawn_in(window, async move |this, cx| {
       let matches = cx
@@ -206,7 +210,12 @@ impl Launcher {
             return None;
           }
 
-          let matches = get_matches(&items, &query);
+          let matches = {
+            // TODO: Should find a better solution, maybe have a pool of matchers? Or a queue that
+            // just takes jobs?
+            let mut matcher = matcher.lock().await;
+            get_matches(&mut matcher, &items, &query)
+          };
 
           if cancel_flag.load(Ordering::Acquire) {
             return None;
@@ -227,8 +236,12 @@ impl Launcher {
         }
 
         // Clamp the selected item, the item count might have changed
-        // TODO: Fix this
-        this.selected_item = this.selected_item.map(|i| i.min(matches.len() - 1));
+        this.selected_item = if !matches.is_empty() {
+          this.selected_item.map(|i| i.min(matches.len() - 1))
+        } else {
+          None
+        };
+
         this.search_id = Some(current_search_id);
         this.matches = Some(matches);
 
@@ -238,15 +251,13 @@ impl Launcher {
   }
 
   fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
-    if self
+    let item_count = self
       .matches
       .as_ref()
-      .is_some_and(|matches| matches.is_empty())
-    {
+      .map_or(self.items.len(), |matches| matches.len());
+    if item_count == 0 {
       return;
     }
-
-    let item_count = self.matches.as_ref().map_or(self.items.len(), |matches| matches.len());
 
     // Wrap around to first item
     match self.selected_item {
@@ -262,15 +273,13 @@ impl Launcher {
   }
 
   fn select_prev(&mut self, _: &SelectPrev, _window: &mut Window, cx: &mut Context<Self>) {
-    if self
+    let item_count = self
       .matches
       .as_ref()
-      .is_some_and(|matches| matches.is_empty())
-    {
+      .map_or(self.items.len(), |matches| matches.len());
+    if item_count == 0 {
       return;
     }
-
-    let item_count = self.matches.as_ref().map_or(self.items.len(), |matches| matches.len());
 
     match self.selected_item {
       Some(0) | None => self.selected_item = Some(item_count - 1),
@@ -336,6 +345,16 @@ impl Render for Launcher {
   }
 }
 
-fn get_matches(items: &[Item], query: &str) -> Vec<(usize, u32)> {
-  vec![]
+fn get_matches(matcher: &mut Matcher, items: &[Item], query: &str) -> Vec<(usize, u32)> {
+  let mut matches = Vec::new();
+
+  let needle = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+  let mut buf = Vec::new();
+  for (i, item) in items.iter().enumerate() {
+    if let Some(score) = needle.score(Utf32Str::new(item.name.as_ref(), &mut buf), matcher) {
+      matches.push((i, score));
+    };
+  }
+
+  matches
 }

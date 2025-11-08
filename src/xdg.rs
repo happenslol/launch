@@ -2,7 +2,7 @@ use anyhow::Result;
 use freedesktop_file_parser::DesktopEntry;
 use gpui::SharedString;
 
-use crate::{ItemAction, Item};
+use crate::{Item, ItemAction};
 
 pub fn get_items() -> Result<Vec<Item>> {
   let desktop_entries = find_all_desktop_entries()?;
@@ -10,7 +10,7 @@ pub fn get_items() -> Result<Vec<Item>> {
     .iter()
     .map(|entry| Item {
       name: SharedString::from(entry.name.default.clone()),
-      action: ItemAction::Launch(entry.clone()),
+      action: ItemAction::Launch(Box::new(entry.clone())),
     })
     .collect();
 
