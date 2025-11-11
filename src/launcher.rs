@@ -9,9 +9,9 @@ use std::{
 use async_lock::Mutex;
 use freedesktop_file_parser::DesktopEntry;
 use gpui::{
-  App, Bounds, Entity, FocusHandle, Focusable, KeyBinding, ScrollStrategy, SharedString, Size,
-  Subscription, Task, UniformListScrollHandle, Window, WindowBounds, WindowKind, WindowOptions,
-  actions, div,
+  AnyView, App, Bounds, Entity, FocusHandle, Focusable, KeyBinding, ScrollStrategy, SharedString,
+  Size, Subscription, Task, UniformListScrollHandle, Window, WindowBounds, WindowKind,
+  WindowOptions, actions, div,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -31,9 +31,11 @@ use crate::{
 
 actions!(root, [Quit, SelectNext, SelectPrev]);
 
+type SectionView = dyn Fn(&mut Window, &mut App) -> AnyView + Send + Sync;
+
 pub enum ItemAction {
   Launch(Box<DesktopEntry>),
-  None,
+  Section(Box<SectionView>),
 }
 
 pub struct Item {
@@ -47,6 +49,7 @@ pub struct Launcher {
   current_query: String,
   selected_item: Option<usize>,
   scroll_handle: UniformListScrollHandle,
+  active_section: Option<AnyView>,
 
   items: Arc<Vec<Item>>,
   matches: Option<Vec<(usize, u32)>>,
@@ -78,23 +81,14 @@ impl Launcher {
       kind: WindowKind::LayerShell(LayerShellOptions {
         namespace: "launch".to_string(),
         layer: Layer::Overlay,
-        anchor: Anchor::TOP | Anchor::RIGHT,
+        anchor: Anchor::all(),
         exclusive_zone: None,
         exclusive_edge: None,
-        margin: Some((px(100.), px(100.), px(0.), px(0.))),
+        margin: None,
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
       }),
       ..Default::default()
     }
-  }
-
-  pub fn init(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.bind_keys([
-      KeyBinding::new("escape", Quit, None),
-      KeyBinding::new("down", SelectNext, None),
-      KeyBinding::new("up", SelectPrev, None),
-    ]);
   }
 
   pub fn view(window: &mut Window, cx: &mut App) -> Entity<Self> {
@@ -102,6 +96,12 @@ impl Launcher {
   }
 
   fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    cx.bind_keys([
+      KeyBinding::new("escape", Quit, None),
+      KeyBinding::new("down", SelectNext, None),
+      KeyBinding::new("up", SelectPrev, None),
+    ]);
+
     let focus_handle = cx.focus_handle();
     let search_input = cx.new(|cx| TextInput::new(window, cx));
     let matcher = Matcher::new(Config::DEFAULT);
@@ -115,12 +115,13 @@ impl Launcher {
       search_input: search_input.clone(),
       selected_item: None,
       focus_handle,
+      subscriptions: Vec::new(),
       items: Arc::new(items),
       matches: None,
       matcher: Arc::new(Mutex::new(matcher)),
       current_query: String::new(),
       scroll_handle: UniformListScrollHandle::new(),
-      subscriptions: Vec::new(),
+      active_section: None,
 
       search_id: None,
       next_search_id: 0,
@@ -132,21 +133,20 @@ impl Launcher {
       .subscriptions
       .extend([cx.subscribe_in(&search_input, window, {
         let search_input = search_input.clone();
-        move |this, _, ev: &TextInputEvent, window, cx| {
-          // Serach only updates on text changes
-          if *ev != TextInputEvent::Change {
-            return;
-          }
+        move |this, _, ev: &TextInputEvent, window, cx| match *ev {
+          TextInputEvent::Submit => this.launch(window, cx),
+          TextInputEvent::Change => {
+            // See if something actually changed
+            let new_value = &search_input.read(cx).content.trim();
+            if &this.current_query == new_value {
+              return;
+            }
 
-          // See if something actually changed
-          let new_value = &search_input.read(cx).content.trim();
-          if &this.current_query == new_value {
-            return;
+            // Update our search results
+            this.current_query = new_value.to_string();
+            this.update_matches(window, cx);
           }
-
-          // Update our search results
-          this.current_query = new_value.to_string();
-          this.update_matches(window, cx);
+          _ => {}
         }
       })]);
 
@@ -210,7 +210,12 @@ impl Launcher {
 
         // Clamp the selected item, the item count might have changed
         this.selected_item = if !matches.is_empty() {
-          this.selected_item.map(|i| i.min(matches.len() - 1))
+          Some(
+            this
+              .selected_item
+              .map(|i| i.min(matches.len() - 1))
+              .unwrap_or(0),
+          )
         } else {
           None
         };
@@ -265,6 +270,35 @@ impl Launcher {
 
     cx.notify();
   }
+
+  fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+    if self.active_section.take().is_some() {
+      cx.focus_view(&self.search_input, window);
+      cx.notify();
+      return;
+    }
+
+    cx.quit();
+  }
+
+  fn launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(item) = self.selected_item.map(|i| {
+      self
+        .matches
+        .as_ref()
+        .map_or_else(|| &self.items[i], |matches| &self.items[matches[i].0])
+    }) else {
+      return;
+    };
+
+    match &item.action {
+      ItemAction::Launch(entry) => xdg::start(entry),
+      ItemAction::Section(make_section) => {
+        self.active_section = Some(make_section(window, cx));
+        cx.notify();
+      }
+    }
+  }
 }
 
 impl Focusable for Launcher {
@@ -277,44 +311,49 @@ impl Render for Launcher {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
       .track_focus(&self.focus_handle)
+      .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::select_next))
       .on_action(cx.listener(Self::select_prev))
       .size_full()
       .bg(rgba(0x00000015))
-      .child(self.search_input.clone())
-      .child(
-        uniform_list(
-          "results",
-          self
-            .matches
-            .as_ref()
-            .map_or_else(|| self.items.len(), |matches| matches.len()),
-          cx.processor(move |this, range: Range<usize>, _window, _cx| {
-            range
-              .map(|i| {
-                let is_selected = this
-                  .selected_item
-                  .is_some_and(|selected_idx| selected_idx == i);
+      .when_some(self.active_section.as_ref(), |this, section| {
+        this.child(section.clone())
+      })
+      .when_none(&self.active_section, |this| {
+        this.child(self.search_input.clone()).child(
+          uniform_list(
+            "results",
+            self
+              .matches
+              .as_ref()
+              .map_or_else(|| self.items.len(), |matches| matches.len()),
+            cx.processor(move |this, range: Range<usize>, _window, _cx| {
+              range
+                .map(|i| {
+                  let is_selected = this
+                    .selected_item
+                    .is_some_and(|selected_idx| selected_idx == i);
 
-                let item_index = this.matches.as_ref().map_or(i, |matches| matches[i].0);
-                let item = &this.items[item_index];
+                  let item_index = this.matches.as_ref().map_or(i, |matches| matches[i].0);
+                  let item = &this.items[item_index];
 
-                div()
-                  .id(i)
-                  .px_3()
-                  .py_2()
-                  .cursor_pointer()
-                  .bg(white())
-                  .when(is_selected, |div| div.bg(rgb(0xDDDDDD)))
-                  .when(!is_selected, |div| div.hover(|div| div.bg(rgb(0xAAAAAA))))
-                  .child(item.name.clone())
-              })
-              .collect()
-          }),
+                  div()
+                    .id(i)
+                    .px_3()
+                    .py_2()
+                    .cursor_pointer()
+                    .bg(white())
+                    .when(is_selected, |div| div.bg(rgb(0xDDDDDD)))
+                    .when(!is_selected, |div| div.hover(|div| div.bg(rgb(0xAAAAAA))))
+                    .child(item.name.clone())
+                })
+                .collect()
+            }),
+          )
+          .track_scroll(self.scroll_handle.clone())
+          .h_full(),
         )
-        .track_scroll(self.scroll_handle.clone())
-        .h_full(),
-      )
+      })
   }
 }
 

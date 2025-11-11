@@ -49,7 +49,13 @@
         inherit src;
         strictDeps = true;
         nativeBuildInputs = with pkgs; [pkg-config mold makeWrapper];
-        buildInputs = with pkgs; [libxkbcommon];
+        buildInputs = with pkgs; [
+          rustPlatform.bindgenHook
+          libxkbcommon
+          pipewire
+          wireplumber
+          pulseaudio
+        ];
       };
 
       cargoArtifacts = craneLib.buildDepsOnly args;
@@ -65,6 +71,8 @@
         libxkbcommon
         vulkan-loader
         wayland
+        pipewire
+        pulseaudio
       ]);
     in {
       devShells.default = craneLib.devShell {

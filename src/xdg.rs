@@ -65,3 +65,7 @@ fn find_all_desktop_entries() -> Result<Vec<DesktopEntry>> {
 
   Ok(applications)
 }
+
+pub fn start(entry: &DesktopEntry) {
+  println!("launching {}", entry.name.default);
+}

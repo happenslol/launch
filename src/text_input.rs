@@ -42,6 +42,7 @@ pub struct TextInput {
 }
 
 impl TextInput {
+  // TODO: What's the impact of doing this in new, instead of here once?
   pub fn init(cx: &mut App) {
     cx.bind_keys([
       KeyBinding::new("backspace", Backspace, None),

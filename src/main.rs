@@ -1,5 +1,6 @@
 mod assets;
 mod audio;
+mod dbus;
 mod launcher;
 mod logging;
 mod text_input;
@@ -20,7 +21,7 @@ fn main() -> Result<()> {
   logging::init();
 
   Application::new().with_assets(Assets).run(move |cx| {
-    Launcher::init(cx);
+    dbus::init(cx);
     TextInput::init(cx);
 
     load_embedded_fonts(cx).unwrap();
