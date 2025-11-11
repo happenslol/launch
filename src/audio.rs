@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::Item;
+use crate::launcher::Item;
 
 pub fn get_items() -> Result<Vec<Item>> {
   Ok(vec![])

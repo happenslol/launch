@@ -2,7 +2,7 @@ use anyhow::Result;
 use freedesktop_file_parser::DesktopEntry;
 use gpui::SharedString;
 
-use crate::{Item, ItemAction};
+use crate::launcher::{Item, ItemAction};
 
 pub fn get_items() -> Result<Vec<Item>> {
   let desktop_entries = find_all_desktop_entries()?;
