@@ -2,7 +2,12 @@
 // Copyright 2024 System76 <info@system76.com>
 // SPDX-License-Identifier: MPL-2.0
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, thread::JoinHandle};
+use std::{
+  cell::RefCell,
+  collections::HashMap,
+  rc::Rc,
+  thread::{self, JoinHandle},
+};
 
 use pipewire::{
   context::ContextRc as PwContext,
@@ -13,8 +18,6 @@ use pipewire::{
 };
 use thiserror::Error;
 
-pub(crate) type ShutdownChannel = pipewire::channel::Sender<()>;
-
 #[derive(Debug, Error)]
 pub enum PipewireError {
   #[error(transparent)]
@@ -23,7 +26,7 @@ pub enum PipewireError {
 
 /// Device event
 #[derive(Debug)]
-pub(crate) enum Event {
+pub enum Event {
   /// The pipewire thread unexpectedly exited
   Exited(PipewireError),
   /// A device was added or removed
@@ -41,7 +44,7 @@ pub enum DeviceEvent {
 /// Device information
 #[must_use]
 #[derive(Clone, Debug)]
-pub(crate) struct Device {
+pub struct Device {
   pub object_id: u32,
   pub variant: DeviceVariant,
   pub media_class: MediaClass,
@@ -51,14 +54,14 @@ pub(crate) struct Device {
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) enum DeviceVariant {
+pub enum DeviceVariant {
   Alsa { alsa_card: u32 },
   Bluez5 { address: String },
   Unknown {},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DeviceState {
+pub enum DeviceState {
   Idle,
   Running,
   Creating,
@@ -67,7 +70,7 @@ pub(crate) enum DeviceState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MediaClass {
+pub enum MediaClass {
   Source,
   Sink,
 }
@@ -129,30 +132,18 @@ impl Device {
   }
 }
 
-pub(crate) fn spawn_thread(tx: flume::Sender<Event>) -> (JoinHandle<()>, ShutdownChannel) {
-  let (pw_tx, pw_rx) = pipewire::channel::channel();
-
-  let handle = std::thread::spawn(move || {
-    if let Err(err) = thread_main(pw_rx, tx.clone()) {
+pub fn spawn_thread(tx: flume::Sender<Event>) -> JoinHandle<()> {
+  thread::spawn(move || {
+    if let Err(err) = thread_main(tx.clone()) {
       let _ = tx.send(Event::Exited(err));
     }
-  });
-
-  (handle, pw_tx)
+  })
 }
 
-fn thread_main(
-  shutdown: pipewire::channel::Receiver<()>,
-  tx: flume::Sender<Event>,
-) -> Result<(), PipewireError> {
+fn thread_main(tx: flume::Sender<Event>) -> Result<(), PipewireError> {
   let main_loop = PwMainLoop::new(None)?;
   let context = PwContext::new(&main_loop, None)?;
   let core = context.connect_rc(None)?;
-
-  let _ = shutdown.attach(main_loop.loop_(), {
-    let main_loop = main_loop.clone();
-    move |_| main_loop.quit()
-  });
 
   let registry = Rc::new(core.get_registry_rc()?);
   let registry_weak = Rc::downgrade(&registry);

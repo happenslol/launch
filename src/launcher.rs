@@ -109,7 +109,7 @@ impl Launcher {
     let mut items = vec![];
 
     items.extend(xdg::get_items().unwrap());
-    items.extend(audio::get_items().unwrap());
+    // items.extend(audio::get_items().unwrap());
 
     let mut this = Self {
       search_input: search_input.clone(),

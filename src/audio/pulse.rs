@@ -14,7 +14,7 @@ use std::{
   rc::Rc,
   str::FromStr,
   sync::mpsc,
-  thread::JoinHandle,
+  thread::{self, JoinHandle},
 };
 
 use pulse::{
@@ -46,7 +46,7 @@ pub enum PulseError {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Event {
+pub enum Event {
   Exited(PulseError),
   CardInfo(Card),
   DefaultSink(String),
@@ -58,8 +58,8 @@ pub(crate) enum Event {
   SourceMute(bool),
 }
 
-pub(crate) fn spawn_thread(tx: flume::Sender<Event>) -> JoinHandle<()> {
-  std::thread::spawn(move || {
+pub fn spawn_thread(tx: flume::Sender<Event>) -> JoinHandle<()> {
+  thread::spawn(move || {
     if let Err(err) = thread_main(tx.clone()) {
       let _ = tx.send(Event::Exited(err));
     }
@@ -139,7 +139,7 @@ enum Request {
 }
 
 #[derive(Debug)]
-pub(crate) struct PulseChannels {
+pub struct PulseChannels {
   tx: mpsc::Sender<Request>,
   pipe_tx: std::fs::File,
   index: u32,
@@ -286,7 +286,7 @@ impl PulseChannels {
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) struct Card {
+pub struct Card {
   pub object_id: u32,
   pub name: String,
   pub product_name: String,
@@ -297,7 +297,7 @@ pub(crate) struct Card {
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) struct CardPort {
+pub struct CardPort {
   pub name: String,
   pub description: String,
   pub direction: Direction,
@@ -309,7 +309,7 @@ pub(crate) struct CardPort {
 }
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) enum Availability {
+pub enum Availability {
   Unknown,
   No,
   Yes,
@@ -326,7 +326,7 @@ impl From<PortAvailable> for Availability {
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) struct CardProfile {
+pub struct CardProfile {
   pub name: String,
   pub description: String,
   pub available: bool,
@@ -336,20 +336,20 @@ pub(crate) struct CardProfile {
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) enum DeviceVariant {
+pub enum DeviceVariant {
   Alsa { alsa_card: u32 },
   Bluez5 { address: String },
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) enum Direction {
+pub enum Direction {
   Input,
   Output,
   Both,
 }
 
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) enum PortType {
+pub enum PortType {
   Mic,
   Speaker,
   Headphones,

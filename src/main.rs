@@ -22,6 +22,7 @@ fn main() -> Result<()> {
 
   Application::new().with_assets(Assets).run(move |cx| {
     dbus::init(cx);
+    audio::init(cx);
     TextInput::init(cx);
 
     load_embedded_fonts(cx).unwrap();

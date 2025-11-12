@@ -2,7 +2,7 @@
 
 use super::audio::AudioError;
 
-pub(crate) async fn pactl_set_card_profile(id: String, profile: String) -> Result<(), AudioError> {
+pub async fn pactl_set_card_profile(id: String, profile: String) -> Result<(), AudioError> {
   tracing::debug!("pactl set-card-profile {id} {profile}");
   let output = async_process::Command::new("pactl")
     .args(["set-card-profile", id.as_str(), profile.as_str()])
@@ -22,7 +22,7 @@ pub(crate) async fn pactl_set_card_profile(id: String, profile: String) -> Resul
   Ok(())
 }
 
-pub(crate) async fn wpctl_set_default(id: u32) -> Result<(), AudioError> {
+pub async fn wpctl_set_default(id: u32) -> Result<(), AudioError> {
   tracing::debug!("wpctl set-default {id}");
   let id_str = id.to_string();
   let output = async_process::Command::new("wpctl")
@@ -43,7 +43,7 @@ pub(crate) async fn wpctl_set_default(id: u32) -> Result<(), AudioError> {
   Ok(())
 }
 
-pub(crate) async fn wpctl_set_mute(id: u32, mute: bool) -> Result<(), AudioError> {
+pub async fn wpctl_set_mute(id: u32, mute: bool) -> Result<(), AudioError> {
   tracing::debug!("wpctl set-mute {id} {}", if mute { "1" } else { "0" });
   let id_str = id.to_string();
   let output = async_process::Command::new("wpctl")
@@ -64,7 +64,7 @@ pub(crate) async fn wpctl_set_mute(id: u32, mute: bool) -> Result<(), AudioError
   Ok(())
 }
 
-pub(crate) async fn wpctl_set_volume(id: u32, volume: u32) -> Result<(), AudioError> {
+pub async fn wpctl_set_volume(id: u32, volume: u32) -> Result<(), AudioError> {
   tracing::debug!("wpctl set-volume {id} {volume}");
   let id_str = id.to_string();
   let volume_str = format!("{}.{:02}", volume / 100, volume % 100);
