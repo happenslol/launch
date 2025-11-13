@@ -1,4 +1,5 @@
 use std::{
+  cell::RefCell,
   fs::File,
   io::{Read, Write},
   os::fd::{AsRawFd, OwnedFd},
@@ -8,17 +9,19 @@ use std::{
 
 use flume::{Receiver, Sender};
 use pulse::{
-  context::{Context, FlagSet as ContextFlagSet, subscribe::InterestMaskSet},
-  def::Retval,
-  mainloop::{
+  callbacks::ListResult, context::{
+    Context, FlagSet as ContextFlagSet,
+    introspect::Introspector,
+    subscribe::{Facility, InterestMaskSet, Operation},
+  }, def::Retval, mainloop::{
     api::Mainloop as _,
     events::io::FlagSet as EventFlagSet,
     standard::{IterateResult, Mainloop},
-  },
-  volume::ChannelVolumes,
+  }, volume::ChannelVolumes
 };
 use rustix::pipe::PipeFlags;
 use thiserror::Error;
+use tracing::debug;
 
 #[derive(Debug)]
 pub enum Event {
@@ -47,7 +50,7 @@ pub struct PulseThread {
   handle: JoinHandle<()>,
   event_rx: Receiver<Event>,
 
-  // We use a pipe to notify the pulse main loop when we have sent new commands.
+  // We use a pipe to notify the pulse main loop when we have sent new commands
   notify_fd: File,
   command_tx: Sender<Command>,
 }
@@ -57,6 +60,7 @@ impl PulseThread {
     let (reader, writer) =
       rustix::pipe::pipe_with(PipeFlags::CLOEXEC).expect("failed to create pipe");
 
+    // Are these limits reasonable? How fast do we get events when changing volume?
     let (event_tx, event_rx) = flume::bounded(20);
     let (command_tx, command_rx) = flume::bounded(20);
 
@@ -94,7 +98,6 @@ fn thread_main(
   let mut main_loop = Mainloop::new().ok_or(PulseError::MainLoopCreate)?;
   let mut context = Context::new(&main_loop, "launch").ok_or(PulseError::ContextCreate)?;
 
-  context.set_subscribe_callback(Some(Box::new(move |facility, operation, index| {})));
   context.connect(None, ContextFlagSet::NOFAIL, None)?;
 
   // Wait for context to become ready
@@ -117,6 +120,26 @@ fn thread_main(
       | InterestMaskSet::CARD,
     |_| {},
   );
+
+  let introspector = context.introspect();
+
+  introspector.get_sink_info_list(|result| {
+    let ListResult::Item(item) = result else {
+      return;
+    };
+
+    // TODO: Emit sink event
+  });
+
+  introspector.get_source_info_list(|result| {
+    let ListResult::Item(item) = result else {
+      return;
+    };
+  });
+
+  context.set_subscribe_callback(Some(Box::new(move |facility, operation, index| {
+    handle_event(&event_tx, &introspector, facility, operation, index);
+  })));
 
   // We have to hold this handle to keep the event source alive
   let mut notify_fd = File::from(notify_fd);
@@ -161,4 +184,25 @@ fn handle_command(main_loop: &mut Mainloop, context: &mut Context, command: Comm
       );
     }
   }
+}
+
+fn handle_event(
+  event_tx: &Sender<Event>,
+  introspector: &Introspector,
+  facility: Option<Facility>,
+  operation: Option<Operation>,
+  index: u32,
+) {
+  let (Some(facility), Some(operation)) = (facility, operation) else {
+    debug!(?facility, ?operation, index, "handle_event: invalid event");
+    return;
+  };
+
+  match facility {
+    Facility::Sink => {}
+    Facility::Source => {}
+    _ => {}
+  }
+
+  // println!("handle_event: {:?} {:?} {}", facility, operation, index);
 }

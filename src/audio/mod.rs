@@ -1,13 +1,12 @@
-use futures::stream::StreamExt;
-use gpui::{App, AsyncApp, Entity, Global, prelude::*};
-
-use crate::audio::pulse::PulseThread;
-
-mod pipewire;
 mod pulse;
 mod sections;
-mod temp;
 mod types;
+
+use futures::stream::StreamExt;
+use gpui::{App, AsyncApp, Entity, EventEmitter, Global, prelude::*};
+use tracing::error;
+
+use crate::audio::pulse::PulseThread;
 
 pub fn init(cx: &mut App) {
   let state = cx.new(|_| AudioState::new());
@@ -33,9 +32,16 @@ impl AudioStateAppExt for App {
   }
 }
 
+pub enum AudioEvent {
+  SinkVolumeChanged,
+  SourceVolumeChanged,
+}
+
 pub struct AudioState {
   pulse: PulseThread,
 }
+
+impl EventEmitter<AudioEvent> for AudioState {}
 
 impl AudioState {
   fn new() -> Self {
@@ -59,6 +65,9 @@ impl AudioState {
   }
 
   fn handle_pulse_event(_this: &Entity<Self>, ev: pulse::Event, _cx: &mut AsyncApp) {
-    println!("pulse event: {ev:?}");
+    use pulse::Event;
+    match ev {
+      Event::Exited(err) => error!(?err, "Pulse thread exited"),
+    }
   }
 }
