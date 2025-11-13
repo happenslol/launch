@@ -124,14 +124,14 @@ impl From<&pipewire::DeviceVariant> for DeviceId {
   }
 }
 
-impl From<&pulse::DeviceVariant> for DeviceId {
-  fn from(variant: &pulse::DeviceVariant) -> Self {
-    match variant {
-      pulse::DeviceVariant::Alsa { alsa_card } => DeviceId::Alsa(*alsa_card),
-      pulse::DeviceVariant::Bluez5 { address } => DeviceId::Bluez5(address.clone()),
-    }
-  }
-}
+// impl From<&pulse::DeviceVariant> for DeviceId {
+//   fn from(variant: &pulse::DeviceVariant) -> Self {
+//     match variant {
+//       pulse::DeviceVariant::Alsa { alsa_card } => DeviceId::Alsa(*alsa_card),
+//       pulse::DeviceVariant::Bluez5 { address } => DeviceId::Bluez5(address.clone()),
+//     }
+//   }
+// }
 
 impl From<&DeviceId> for DeviceType {
   fn from(id: &DeviceId) -> Self {

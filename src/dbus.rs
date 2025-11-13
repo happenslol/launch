@@ -55,7 +55,7 @@ impl DbusConnectionAppExt for App {
   fn session_dbus(&self) -> Option<zbus::Connection> {
     self
       .try_global::<GlobalDbusConnection>()
-      .and_then(|conn| conn.0.read(self).system.clone())
+      .and_then(|conn| conn.0.read(self).session.clone())
   }
 }
 

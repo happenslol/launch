@@ -23,7 +23,7 @@ use nucleo_matcher::{
 };
 
 use crate::{
-  audio,
+  audio::{self, AudioStateAppExt},
   text_input::{TextInput, TextInputEvent},
   util::v_flex,
   xdg,
@@ -282,22 +282,24 @@ impl Launcher {
   }
 
   fn launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(item) = self.selected_item.map(|i| {
-      self
-        .matches
-        .as_ref()
-        .map_or_else(|| &self.items[i], |matches| &self.items[matches[i].0])
-    }) else {
-      return;
-    };
+    let audio = cx.audio();
 
-    match &item.action {
-      ItemAction::Launch(entry) => xdg::start(entry),
-      ItemAction::Section(make_section) => {
-        self.active_section = Some(make_section(window, cx));
-        cx.notify();
-      }
-    }
+    // let Some(item) = self.selected_item.map(|i| {
+    //   self
+    //     .matches
+    //     .as_ref()
+    //     .map_or_else(|| &self.items[i], |matches| &self.items[matches[i].0])
+    // }) else {
+    //   return;
+    // };
+    //
+    // match &item.action {
+    //   ItemAction::Launch(entry) => xdg::start(entry),
+    //   ItemAction::Section(make_section) => {
+    //     self.active_section = Some(make_section(window, cx));
+    //     cx.notify();
+    //   }
+    // }
   }
 }
 

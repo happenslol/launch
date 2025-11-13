@@ -1,6 +1,6 @@
 use std::{
-  cell::RefCell,
   fs::File,
+  io::{Read, Write},
   os::fd::{AsRawFd, OwnedFd},
   rc::Rc,
   thread::{self, JoinHandle},
@@ -8,15 +8,14 @@ use std::{
 
 use flume::{Receiver, Sender};
 use pulse::{
-  context::{
-    Context, FlagSet as ContextFlagSet,
-    subscribe::{Facility, Operation},
-  },
+  context::{Context, FlagSet as ContextFlagSet, subscribe::InterestMaskSet},
+  def::Retval,
   mainloop::{
-    api::{Mainloop as _, MainloopInner},
-    events::io::{FlagSet as EventFlagSet, IoEvent, IoEventRef},
-    standard::{Mainloop, MainloopInternal},
+    api::Mainloop as _,
+    events::io::FlagSet as EventFlagSet,
+    standard::{IterateResult, Mainloop},
   },
+  volume::ChannelVolumes,
 };
 use rustix::pipe::PipeFlags;
 use thiserror::Error;
@@ -28,6 +27,7 @@ pub enum Event {
 
 #[derive(Debug)]
 pub enum Command {
+  SetVolume(u32, u16),
   Quit,
 }
 
@@ -37,14 +37,19 @@ pub enum PulseError {
   MainLoopCreate,
   #[error("Failed to create PA context")]
   ContextCreate,
+  #[error("Main loop quit before context became ready")]
+  QuitBeforeReady,
   #[error("PA error: {0}")]
   PAErr(#[from] pulse::error::PAErr),
 }
 
 pub struct PulseThread {
   handle: JoinHandle<()>,
-  notify_fd: File,
   event_rx: Receiver<Event>,
+
+  // We use a pipe to notify the pulse main loop when we have sent new commands.
+  notify_fd: File,
+  command_tx: Sender<Command>,
 }
 
 impl PulseThread {
@@ -67,11 +72,17 @@ impl PulseThread {
       handle,
       event_rx,
       notify_fd,
+      command_tx,
     }
   }
 
   pub fn get_event_rx(&self) -> Receiver<Event> {
     self.event_rx.clone()
+  }
+
+  pub fn send_command(&self, cmd: Command) {
+    let _ = self.command_tx.send(cmd);
+    let _ = self.notify_fd.try_clone().unwrap().write(&[1u8]);
   }
 }
 
@@ -82,34 +93,56 @@ fn thread_main(
 ) -> Result<(), PulseError> {
   let mut main_loop = Mainloop::new().ok_or(PulseError::MainLoopCreate)?;
   let mut context = Context::new(&main_loop, "launch").ok_or(PulseError::ContextCreate)?;
-  let state = PulseState::new(event_tx);
 
-  *state.notify_io.borrow_mut() =
-    main_loop.new_io_event(notify_fd.as_raw_fd(), EventFlagSet::INPUT, {
-      let state = state.clone();
-      let notify_fd = File::from(notify_fd);
-      let command_rx = command_rx.clone();
-
-      Box::new(
-        move |ev, fd, _| {
-          while let Ok(cmd) = command_rx.try_recv() {}
-        },
-      )
-    });
-
-  context.set_subscribe_callback({
-    let state = state.clone();
-    Some(Box::new(move |facility, operation, index| {
-      state.on_subscribe(facility, operation, index)
-    }))
-  });
-
-  context.set_state_callback({
-    let state = state.clone();
-    Some(Box::new(move || state.on_state()))
-  });
-
+  context.set_subscribe_callback(Some(Box::new(move |facility, operation, index| {})));
   context.connect(None, ContextFlagSet::NOFAIL, None)?;
+
+  // Wait for context to become ready
+  loop {
+    match main_loop.iterate(true) {
+      IterateResult::Success(_) => {}
+      IterateResult::Err(err) => return Err(err.into()),
+      IterateResult::Quit(_) => return Err(PulseError::QuitBeforeReady),
+    }
+
+    if context.get_state() == pulse::context::State::Ready {
+      break;
+    }
+  }
+
+  context.subscribe(
+    InterestMaskSet::SERVER
+      | InterestMaskSet::SINK
+      | InterestMaskSet::SOURCE
+      | InterestMaskSet::CARD,
+    |_| {},
+  );
+
+  // We have to hold this handle to keep the event source alive
+  let mut notify_fd = File::from(notify_fd);
+  let _io_handle = main_loop.new_io_event(notify_fd.as_raw_fd(), EventFlagSet::INPUT, {
+    let mut main_loop = Mainloop {
+      _inner: Rc::clone(&main_loop._inner),
+    };
+
+    Box::new(move |_, _, flags| {
+      // TODO: The mask doesn't seem to be respected here, we get all events and not just input.
+      // Is that a bug in libpulse-binding?
+      if !flags.contains(EventFlagSet::INPUT) {
+        return;
+      }
+
+      // It's possible that multiple notifies happened before we read, so just drain a few more
+      // to be safe.
+      let mut buf = [0; 16];
+      let _ = notify_fd.read(&mut buf);
+
+      while let Ok(cmd) = command_rx.try_recv() {
+        handle_command(&mut main_loop, &mut context, cmd);
+      }
+    })
+  });
+
   if let Err((err, _)) = main_loop.run() {
     return Err(err.into());
   }
@@ -117,28 +150,15 @@ fn thread_main(
   Ok(())
 }
 
-struct PulseState {
-  event_tx: Sender<Event>,
-  notify_io: RefCell<Option<IoEvent<MainloopInner<MainloopInternal>>>>,
-}
-
-impl PulseState {
-  fn new(event_tx: Sender<Event>) -> Rc<Self> {
-    Rc::new(Self {
-      event_tx,
-      notify_io: RefCell::new(None),
-    })
+fn handle_command(main_loop: &mut Mainloop, context: &mut Context, command: Command) {
+  match command {
+    Command::Quit => main_loop.quit(Retval(0)),
+    Command::SetVolume(index, _volume) => {
+      let _ = context.introspect().set_sink_volume_by_index(
+        index,
+        &ChannelVolumes::default(),
+        Some(Box::new(|_| {})),
+      );
+    }
   }
-
-  fn on_subscribe(
-    self: &Rc<Self>,
-    facility: Option<Facility>,
-    operation: Option<Operation>,
-    index: u32,
-  ) {
-  }
-
-  fn on_state(self: &Rc<Self>) {}
-
-  fn on_command(self: &Rc<Self>, ev: IoEventRef<MainloopInner<MainloopInternal>>) {}
 }

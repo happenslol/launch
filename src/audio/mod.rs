@@ -1,6 +1,4 @@
-use std::thread::JoinHandle;
-
-use futures::{stream::StreamExt, stream_select};
+use futures::stream::StreamExt;
 use gpui::{App, AsyncApp, Entity, Global, prelude::*};
 
 use crate::audio::pulse::PulseThread;
@@ -21,59 +19,46 @@ struct GlobalAudioState(Entity<AudioState>);
 
 impl Global for GlobalAudioState {}
 
+pub trait AudioStateAppExt {
+  fn audio(&self) -> &AudioState;
+}
+
+impl AudioStateAppExt for App {
+  fn audio(&self) -> &AudioState {
+    self
+      .try_global::<GlobalAudioState>()
+      .expect("audio state not initialized")
+      .0
+      .read(self)
+  }
+}
+
 pub struct AudioState {
-  pipewire_handle: Option<JoinHandle<()>>,
-  pulse_thread: PulseThread,
+  pulse: PulseThread,
 }
 
 impl AudioState {
-  pub fn new() -> Self {
-    let (pipewire_tx, pipewire_rx) = flume::unbounded();
+  fn new() -> Self {
+    let pulse = PulseThread::spawn();
 
-    let pipewire_handle = pipewire::spawn_thread(pipewire_tx);
-    let pulse_thread = PulseThread::spawn();
-
-    Self {
-      pipewire_handle: Some(pipewire_handle),
-      pulse_thread,
-    }
+    Self { pulse }
   }
 
   fn init(this: Entity<Self>, cx: &mut App) {
-    let pulse_rx = this.read(cx).pulse_thread.get_event_rx();
+    let mut pulse_rx = this.read(cx).pulse.get_event_rx().into_stream();
 
-    let (_, pipewire_rx) = flume::unbounded();
-
-    // TODO: This feels like a background spawn thing, how are streams usually handled in zed?
     cx.spawn({
       let this = this.clone();
       async move |cx| {
-        enum Event {
-          Pipewire(pipewire::Event),
-          Pulse(pulse::Event),
-        }
-
-        let mut stream = stream_select!(
-          pipewire_rx.into_stream().map(Event::Pipewire),
-          pulse_rx.into_stream().map(Event::Pulse)
-        );
-
-        while let Some(ev) = stream.next().await {
-          match ev {
-            Event::Pipewire(ev) => Self::handle_pipewire_event(this.clone(), ev, cx),
-            Event::Pulse(ev) => Self::handle_pulse_event(this.clone(), ev, cx),
-          }
+        while let Some(ev) = pulse_rx.next().await {
+          Self::handle_pulse_event(&this, ev, cx);
         }
       }
     })
     .detach();
   }
 
-  fn handle_pipewire_event(this: Entity<Self>, ev: pipewire::Event, cx: &mut AsyncApp) {
-    println!("pipewire event: {ev:?}");
-  }
-
-  fn handle_pulse_event(this: Entity<Self>, ev: pulse::Event, cx: &mut AsyncApp) {
+  fn handle_pulse_event(_this: &Entity<Self>, ev: pulse::Event, _cx: &mut AsyncApp) {
     println!("pulse event: {ev:?}");
   }
 }
