@@ -128,13 +128,15 @@ fn thread_main(
       return;
     };
 
-    // TODO: Emit sink event
+    // TODO: Emit event
   });
 
   introspector.get_source_info_list(|result| {
     let ListResult::Item(item) = result else {
       return;
     };
+
+    // TODO: Emit event
   });
 
   context.set_subscribe_callback(Some(Box::new(move |facility, operation, index| {
