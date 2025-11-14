@@ -4,7 +4,7 @@ mod types;
 
 use futures::stream::StreamExt;
 use gpui::{App, AsyncApp, Entity, EventEmitter, Global, prelude::*};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::audio::pulse::PulseThread;
 
@@ -32,10 +32,7 @@ impl AudioStateAppExt for App {
   }
 }
 
-pub enum AudioEvent {
-  SinkVolumeChanged,
-  SourceVolumeChanged,
-}
+pub enum AudioEvent {}
 
 pub struct AudioState {
   pulse: PulseThread,
@@ -67,6 +64,10 @@ impl AudioState {
   fn handle_pulse_event(_this: &Entity<Self>, ev: pulse::Event, _cx: &mut AsyncApp) {
     use pulse::Event;
     match ev {
+      Event::SinkVolumeChanged(id, volume) => info!(?id, ?volume, "pulse: sink volume changed"),
+      Event::SinkNameChanged(id, name) => info!(?id, ?name, "pulse: sink name changed"),
+      Event::SinkRemoved(id) => info!(?id, "pulse: sink removed"),
+      Event::SourceRemoved(id) => info!(?id, "pulse: source removed"),
       Event::Exited(err) => error!(?err, "Pulse thread exited"),
     }
   }

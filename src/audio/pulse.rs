@@ -1,5 +1,6 @@
 use std::{
   cell::RefCell,
+  collections::HashMap,
   fs::File,
   io::{Read, Write},
   os::fd::{AsRawFd, OwnedFd},
@@ -9,22 +10,31 @@ use std::{
 
 use flume::{Receiver, Sender};
 use pulse::{
-  callbacks::ListResult, context::{
+  callbacks::ListResult,
+  context::{
     Context, FlagSet as ContextFlagSet,
-    introspect::Introspector,
+    introspect::{self, Introspector},
     subscribe::{Facility, InterestMaskSet, Operation},
-  }, def::Retval, mainloop::{
+  },
+  def::Retval,
+  mainloop::{
     api::Mainloop as _,
     events::io::FlagSet as EventFlagSet,
     standard::{IterateResult, Mainloop},
-  }, volume::ChannelVolumes
+  },
 };
 use rustix::pipe::PipeFlags;
 use thiserror::Error;
 use tracing::debug;
 
+use super::types::{ChannelVolumes, SinkId, SourceId};
+
 #[derive(Debug)]
 pub enum Event {
+  SinkVolumeChanged(SinkId, ChannelVolumes),
+  SinkNameChanged(SinkId, Option<String>),
+  SinkRemoved(SinkId),
+  SourceRemoved(SourceId),
   Exited(PulseError),
 }
 
@@ -86,7 +96,7 @@ impl PulseThread {
 
   pub fn send_command(&self, cmd: Command) {
     let _ = self.command_tx.send(cmd);
-    let _ = self.notify_fd.try_clone().unwrap().write(&[1u8]);
+    let _ = self.notify_fd.try_clone().unwrap().write(&[1]);
   }
 }
 
@@ -95,6 +105,7 @@ fn thread_main(
   event_tx: Sender<Event>,
   command_rx: Receiver<Command>,
 ) -> Result<(), PulseError> {
+  let state = Rc::new(RefCell::new(PulseState::new(event_tx.clone())));
   let mut main_loop = Mainloop::new().ok_or(PulseError::MainLoopCreate)?;
   let mut context = Context::new(&main_loop, "launch").ok_or(PulseError::ContextCreate)?;
 
@@ -122,25 +133,8 @@ fn thread_main(
   );
 
   let introspector = context.introspect();
-
-  introspector.get_sink_info_list(|result| {
-    let ListResult::Item(item) = result else {
-      return;
-    };
-
-    // TODO: Emit event
-  });
-
-  introspector.get_source_info_list(|result| {
-    let ListResult::Item(item) = result else {
-      return;
-    };
-
-    // TODO: Emit event
-  });
-
   context.set_subscribe_callback(Some(Box::new(move |facility, operation, index| {
-    handle_event(&event_tx, &introspector, facility, operation, index);
+    handle_event(&state, &event_tx, &introspector, facility, operation, index);
   })));
 
   // We have to hold this handle to keep the event source alive
@@ -179,16 +173,17 @@ fn handle_command(main_loop: &mut Mainloop, context: &mut Context, command: Comm
   match command {
     Command::Quit => main_loop.quit(Retval(0)),
     Command::SetVolume(index, _volume) => {
-      let _ = context.introspect().set_sink_volume_by_index(
-        index,
-        &ChannelVolumes::default(),
-        Some(Box::new(|_| {})),
-      );
+      // let _ = context.introspect().set_sink_volume_by_index(
+      //   index,
+      //   &ChannelVolumes::default(),
+      //   Some(Box::new(|_| {})),
+      // );
     }
   }
 }
 
 fn handle_event(
+  state: &Rc<RefCell<PulseState>>,
   event_tx: &Sender<Event>,
   introspector: &Introspector,
   facility: Option<Facility>,
@@ -196,15 +191,96 @@ fn handle_event(
   index: u32,
 ) {
   let (Some(facility), Some(operation)) = (facility, operation) else {
-    debug!(?facility, ?operation, index, "handle_event: invalid event");
+    debug!(?facility, ?operation, index, "Skipping event");
     return;
   };
 
-  match facility {
-    Facility::Sink => {}
-    Facility::Source => {}
-    _ => {}
+  match operation {
+    Operation::New | Operation::Changed => match facility {
+      Facility::Sink => {
+        introspector.get_sink_info_by_index(index, {
+          let state = state.clone();
+          move |item| PulseState::handle_sink_info(&state, item)
+        });
+      }
+      Facility::Source => {
+        introspector.get_source_info_by_index(index, {
+          let state = state.clone();
+          move |item| PulseState::handle_source_info(&state, item)
+        });
+      }
+      _ => debug!(?facility, ?operation, index, "Skipping event"),
+    },
+    Operation::Removed => match facility {
+      Facility::Sink if state.borrow_mut().sinks.remove(&index).is_some() => {
+        let _ = event_tx.send(Event::SinkRemoved(SinkId(index)));
+      }
+      Facility::Source if state.borrow_mut().sources.remove(&index).is_some() => {
+        let _ = event_tx.send(Event::SourceRemoved(SourceId(index)));
+      }
+      _ => debug!(?facility, index, "Skipping remove event"),
+    },
+  }
+}
+
+#[derive(Debug)]
+struct ManagedSink {
+  name: Option<String>,
+  volume: ChannelVolumes,
+}
+
+#[derive(Debug)]
+struct ManagedSource {}
+
+#[derive(Debug)]
+struct PulseState {
+  event_tx: Sender<Event>,
+  sinks: HashMap<u32, ManagedSink>,
+  sources: HashMap<u32, ManagedSource>,
+}
+
+impl PulseState {
+  fn new(event_tx: Sender<Event>) -> Self {
+    Self {
+      event_tx,
+      sinks: Default::default(),
+      sources: Default::default(),
+    }
   }
 
-  // println!("handle_event: {:?} {:?} {}", facility, operation, index);
+  fn handle_sink_info(this: &Rc<RefCell<Self>>, info: ListResult<&introspect::SinkInfo>) {
+    let ListResult::Item(info) = info else { return };
+
+    let mut this = this.borrow_mut();
+    let event_tx = this.event_tx.clone();
+
+    if let Some(sink) = this.sinks.get_mut(&info.index) {
+      if sink.name.as_deref() != info.name.as_deref() {
+        sink.name = info.name.as_ref().map(ToString::to_string);
+        let _ = event_tx.send(Event::SinkNameChanged(
+          SinkId(info.index),
+          sink.name.clone(),
+        ));
+      }
+
+      if sink.volume != info.volume {
+        sink.volume = info.volume.into();
+        let _ = event_tx.send(Event::SinkVolumeChanged(
+          SinkId(info.index),
+          sink.volume.clone(),
+        ));
+      }
+    } else {
+      let managed = ManagedSink {
+        name: info.name.as_ref().map(ToString::to_string),
+        volume: info.volume.into(),
+      };
+
+      this.sinks.insert(info.index, managed);
+    }
+  }
+
+  fn handle_source_info(this: &Rc<RefCell<Self>>, info: ListResult<&introspect::SourceInfo>) {
+    let ListResult::Item(info) = info else { return };
+  }
 }
