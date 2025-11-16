@@ -133,6 +133,18 @@ fn thread_main(
   );
 
   let introspector = context.introspect();
+
+  // Get the initial state by requesting all sinks and sources once
+  introspector.get_sink_info_list({
+    let state = state.clone();
+    move |result| PulseState::handle_sink_info(&state, result)
+  });
+
+  introspector.get_source_info_list({
+    let state = state.clone();
+    move |result| PulseState::handle_source_info(&state, result)
+  });
+
   context.set_subscribe_callback(Some(Box::new(move |facility, operation, index| {
     handle_event(&state, &event_tx, &introspector, facility, operation, index);
   })));
