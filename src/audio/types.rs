@@ -1,3 +1,5 @@
+use gpui::SharedString;
+
 #[derive(Debug, Clone)]
 pub struct ChannelVolumes(
   // TODO: SmallVec[2]?
@@ -42,7 +44,7 @@ pub struct SinkId(pub u32);
 #[derive(Debug, Clone)]
 pub struct SinkInfo {
   pub id: SinkId,
-  pub name: Option<String>,
+  pub name: Option<SharedString>,
   pub volume: ChannelVolumes,
   pub mute: bool,
 }
@@ -53,7 +55,7 @@ pub struct SourceId(pub u32);
 #[derive(Debug, Clone)]
 pub struct SourceInfo {
   pub id: SourceId,
-  pub name: Option<String>,
+  pub name: Option<SharedString>,
   pub volume: ChannelVolumes,
   pub mute: bool,
 }

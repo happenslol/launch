@@ -4,9 +4,9 @@ mod types;
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use futures::{channel::oneshot, stream::StreamExt};
-use gpui::{App, AsyncApp, Entity, EventEmitter, Global, prelude::*};
+use gpui::{App, AsyncApp, Entity, EventEmitter, Global, Task, prelude::*};
 use tracing::error;
 
 use crate::audio::{
@@ -24,37 +24,31 @@ pub struct GlobalAudioState(Entity<AudioState>);
 
 impl Global for GlobalAudioState {}
 
-pub trait AudioStateAppExt {
-  fn audio(&self) -> &AudioState;
-}
-
-impl AudioStateAppExt for App {
-  fn audio(&self) -> &AudioState {
-    self
-      .try_global::<GlobalAudioState>()
-      .expect("audio state not initialized")
-      .0
-      .read(self)
-  }
-}
-
 pub enum AudioEvent {}
 
 pub struct AudioState {
   pulse: PulseThread,
   sinks: BTreeMap<SinkId, SinkInfo>,
   sources: BTreeMap<SourceId, SourceInfo>,
+  default_sink: Option<SinkId>,
+  default_source: Option<SourceId>,
 }
 
 impl EventEmitter<AudioEvent> for AudioState {}
 
 impl AudioState {
+  pub fn global(cx: &App) -> Entity<Self> {
+    cx.global::<GlobalAudioState>().0.clone()
+  }
+
   fn new() -> Self {
     let pulse = PulseThread::spawn();
     let sinks = BTreeMap::new();
     let sources = BTreeMap::new();
 
     Self {
+      default_sink: None,
+      default_source: None,
       pulse,
       sinks,
       sources,
@@ -136,9 +130,9 @@ impl AudioState {
     Ok(())
   }
 
-  pub fn set_default_sink(&self, sink: SinkId) -> oneshot::Receiver<bool> {
+  pub fn set_default_sink(&self, sink: SinkId, cx: &mut Context<Self>) -> Task<Result<()>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::SetDefaultSink(sink, tx));
-    rx
+    cx.spawn(async move |_, _| rx.await?.ok_or(anyhow!("Failed to set default sink")))
   }
 }

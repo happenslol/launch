@@ -9,11 +9,12 @@ use std::{
 };
 
 use flume::{Receiver, Sender};
+use gpui::SharedString;
 use pulse::{
   callbacks::ListResult,
   context::{
     Context, FlagSet as ContextFlagSet,
-    introspect::{self, Introspector},
+    introspect::{self, Introspector, ServerInfo},
     subscribe::{Facility, InterestMaskSet, Operation},
   },
   def::Retval,
@@ -158,6 +159,13 @@ fn thread_main(
     move |result| PulseState::handle_source_info(&state, result)
   });
 
+  // Make sure to request server info after sinks and sources so we can match default sink and
+  // source up
+  introspector.get_server_info({
+    let state = state.clone();
+    move |result| PulseState::handle_server_info(&state, result)
+  });
+
   context.set_subscribe_callback(Some(Box::new({
     let state = state.clone();
     move |facility, operation, index| {
@@ -243,6 +251,12 @@ fn handle_event(
 
   match operation {
     Operation::New | Operation::Changed => match facility {
+      Facility::Server => {
+        introspector.get_server_info({
+          let state = state.clone();
+          move |item| PulseState::handle_server_info(&state, item)
+        });
+      }
       Facility::Sink => {
         introspector.get_sink_info_by_index(index, {
           let state = state.clone();
@@ -285,6 +299,9 @@ impl PulseState {
     }
   }
 
+  // TODO: wip
+  fn handle_server_info(this: &Rc<RefCell<Self>>, info: &ServerInfo) {}
+
   fn handle_sink_info(this: &Rc<RefCell<Self>>, info: ListResult<&introspect::SinkInfo>) {
     let ListResult::Item(info) = info else { return };
 
@@ -305,14 +322,20 @@ impl PulseState {
         let _ = event_tx.send(Event::SinkMuteChanged(SinkId(info.index), info.mute));
       }
 
-      if sink.name.as_deref() != info.name.as_deref() {
-        sink.name = info.name.as_ref().map(ToString::to_string);
+      if sink.name.as_ref().map(|s| s.as_str()) != info.name.as_deref() {
+        sink.name = info
+          .name
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string()));
         let _ = event_tx.send(Event::SinkInfoChanged(sink.clone()));
       }
     } else {
       let managed = SinkInfo {
         id: SinkId(info.index),
-        name: info.name.as_ref().map(ToString::to_string),
+        name: info
+          .name
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string())),
         volume: info.volume.into(),
         mute: info.mute,
       };
@@ -339,17 +362,23 @@ impl PulseState {
 
       if source.mute != info.mute {
         source.mute = info.mute;
-        let _ = event_tx.send(Event::SinkMuteChanged(SinkId(info.index), info.mute));
+        let _ = event_tx.send(Event::SourceMuteChanged(SourceId(info.index), info.mute));
       }
 
-      if source.name.as_deref() != info.name.as_deref() {
-        source.name = info.name.as_ref().map(ToString::to_string);
+      if source.name.as_ref().map(|s| s.as_str()) != info.name.as_deref() {
+        source.name = info
+          .name
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string()));
         let _ = event_tx.send(Event::SourceInfoChanged(source.clone()));
       }
     } else {
       let managed = SourceInfo {
         id: SourceId(info.index),
-        name: info.name.as_ref().map(ToString::to_string),
+        name: info
+          .name
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string())),
         volume: info.volume.into(),
         mute: info.mute,
       };

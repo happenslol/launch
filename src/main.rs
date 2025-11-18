@@ -1,3 +1,5 @@
+#![feature(bool_to_result)]
+
 mod assets;
 mod audio;
 mod dbus;
