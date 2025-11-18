@@ -20,7 +20,7 @@ pub fn init(cx: &mut App) {
   AudioState::init(state, cx);
 }
 
-struct GlobalAudioState(Entity<AudioState>);
+pub struct GlobalAudioState(Entity<AudioState>);
 
 impl Global for GlobalAudioState {}
 
@@ -136,13 +136,9 @@ impl AudioState {
     Ok(())
   }
 
-  pub async fn set_default_sink(&self, sink: SinkId) {
+  pub fn set_default_sink(&self, sink: SinkId) -> oneshot::Receiver<bool> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::SetDefaultSink(sink, tx));
-    match rx.await {
-      Ok(false) => error!("Failed to set default sink"),
-      Err(err) => error!(?err, "Failed to set default sink"),
-      _ => {}
-    };
+    rx
   }
 }

@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::{
-  audio::AudioStateAppExt,
+  audio::{AudioState, AudioStateAppExt, GlobalAudioState},
   launcher::{Item, ItemAction},
   text_input::{TextInput, TextInputEvent},
   util::{h_flex, v_flex},
@@ -80,6 +80,18 @@ impl Render for AudioSection {
               .take(range.len())
               .map(|sink| {
                 h_flex()
+                  .id(sink.id.0 as usize)
+                  .on_click({
+                    let sink = sink.clone();
+                    cx.listener(move |_, _, _, cx| {
+                      let result = cx.audio().set_default_sink(sink.id);
+                      cx.spawn(async move |this, cx| {
+                        let _ = result.await;
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                      })
+                      .detach();
+                    })
+                  })
                   .bg(white())
                   .w_full()
                   .gap_2()
