@@ -62,7 +62,7 @@ impl Focusable for AudioSection {
 
 impl Render for AudioSection {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let sinks = &cx.audio().sinks;
+    let count = cx.audio().sinks.len();
 
     v_flex()
       .track_focus(&self.focus_handle)
@@ -71,20 +71,15 @@ impl Render for AudioSection {
       .child(
         uniform_list(
           "sinks",
-          sinks.len(),
+          count,
           cx.processor(move |_this, range: Range<usize>, _window, cx| {
-            range
-              .map(move |i| {
-                let sinks = &cx.audio().sinks;
-                let keys = sinks.keys().collect::<Vec<_>>();
-                let sink = sinks[keys[i]]
-                  .name
-                  .as_ref()
-                  .map(|name| name.to_string())
-                  .unwrap_or_default();
-
+            cx.audio()
+              .sinks
+              .values()
+              .skip(range.start.saturating_sub(1))
+              .take(range.len())
+              .map(|sink| {
                 h_flex()
-                  .id(i)
                   .bg(white())
                   .w_full()
                   .gap_2()
@@ -93,9 +88,9 @@ impl Render for AudioSection {
                       .text_ellipsis()
                       .overflow_x_hidden()
                       .flex_1()
-                      .child(sink),
+                      .child(sink.name.clone().unwrap_or_default()),
                   )
-                  .child(div().child(format!("{}%", sinks[keys[i]].volume.clone().0[0])))
+                  .child(div().child(format!("{}%", sink.volume.0[0])))
               })
               .collect()
           }),
