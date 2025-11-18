@@ -23,7 +23,7 @@ use nucleo_matcher::{
 };
 
 use crate::{
-  audio::{self, AudioStateAppExt},
+  audio::{self, sections::AudioSection},
   text_input::{TextInput, TextInputEvent},
   util::v_flex,
   xdg,
@@ -109,7 +109,9 @@ impl Launcher {
     let mut items = vec![];
 
     items.extend(xdg::get_items().unwrap());
-    // items.extend(audio::get_items().unwrap());
+    items.extend(audio::sections::get_items().unwrap());
+
+    let audio_section = AudioSection::view(window, cx);
 
     let mut this = Self {
       search_input: search_input.clone(),
@@ -121,7 +123,7 @@ impl Launcher {
       matcher: Arc::new(Mutex::new(matcher)),
       current_query: String::new(),
       scroll_handle: UniformListScrollHandle::new(),
-      active_section: None,
+      active_section: Some(audio_section),
 
       search_id: None,
       next_search_id: 0,
@@ -282,24 +284,22 @@ impl Launcher {
   }
 
   fn launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let audio = cx.audio();
+    let Some(item) = self.selected_item.map(|i| {
+      self
+        .matches
+        .as_ref()
+        .map_or_else(|| &self.items[i], |matches| &self.items[matches[i].0])
+    }) else {
+      return;
+    };
 
-    // let Some(item) = self.selected_item.map(|i| {
-    //   self
-    //     .matches
-    //     .as_ref()
-    //     .map_or_else(|| &self.items[i], |matches| &self.items[matches[i].0])
-    // }) else {
-    //   return;
-    // };
-    //
-    // match &item.action {
-    //   ItemAction::Launch(entry) => xdg::start(entry),
-    //   ItemAction::Section(make_section) => {
-    //     self.active_section = Some(make_section(window, cx));
-    //     cx.notify();
-    //   }
-    // }
+    match &item.action {
+      ItemAction::Launch(entry) => xdg::start(entry),
+      ItemAction::Section(make_section) => {
+        self.active_section = Some(make_section(window, cx));
+        cx.notify();
+      }
+    }
   }
 }
 

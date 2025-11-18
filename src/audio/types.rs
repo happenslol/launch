@@ -36,7 +36,7 @@ impl From<pulse::volume::ChannelVolumes> for ChannelVolumes {
   }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
 pub struct SinkId(pub u32);
 
 #[derive(Debug, Clone)]
@@ -44,13 +44,16 @@ pub struct SinkInfo {
   pub id: SinkId,
   pub name: Option<String>,
   pub volume: ChannelVolumes,
+  pub mute: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
 pub struct SourceId(pub u32);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SourceInfo {
   pub id: SourceId,
   pub name: Option<String>,
+  pub volume: ChannelVolumes,
+  pub mute: bool,
 }

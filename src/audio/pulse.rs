@@ -25,14 +25,22 @@ use pulse::{
 };
 use rustix::pipe::PipeFlags;
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, warn};
 
-use super::types::{ChannelVolumes, SinkId, SourceId};
+use super::types::{ChannelVolumes, SinkId, SinkInfo, SourceId, SourceInfo};
+
+type ResponseChannel<T> = futures::channel::oneshot::Sender<T>;
 
 #[derive(Debug)]
 pub enum Event {
+  SinkFound(SinkInfo),
+  SourceFound(SourceInfo),
+  SinkInfoChanged(SinkInfo),
+  SourceInfoChanged(SourceInfo),
   SinkVolumeChanged(SinkId, ChannelVolumes),
-  SinkNameChanged(SinkId, Option<String>),
+  SourceVolumeChanged(SourceId, ChannelVolumes),
+  SinkMuteChanged(SinkId, bool),
+  SourceMuteChanged(SourceId, bool),
   SinkRemoved(SinkId),
   SourceRemoved(SourceId),
   Exited(PulseError),
@@ -40,7 +48,12 @@ pub enum Event {
 
 #[derive(Debug)]
 pub enum Command {
-  SetVolume(u32, u16),
+  SetSinkVolume(SinkId, u16),
+  SetSourceVolume(SourceId, u16),
+  SetSinkMute(SinkId, bool),
+  SetSourceMute(SourceId, bool),
+  SetDefaultSink(SinkId, ResponseChannel<bool>),
+  SetDefaultSource(SourceId),
   Quit,
 }
 
@@ -145,8 +158,11 @@ fn thread_main(
     move |result| PulseState::handle_source_info(&state, result)
   });
 
-  context.set_subscribe_callback(Some(Box::new(move |facility, operation, index| {
-    handle_event(&state, &event_tx, &introspector, facility, operation, index);
+  context.set_subscribe_callback(Some(Box::new({
+    let state = state.clone();
+    move |facility, operation, index| {
+      handle_event(&state, &event_tx, &introspector, facility, operation, index);
+    }
   })));
 
   // We have to hold this handle to keep the event source alive
@@ -169,7 +185,7 @@ fn thread_main(
       let _ = notify_fd.read(&mut buf);
 
       while let Ok(cmd) = command_rx.try_recv() {
-        handle_command(&mut main_loop, &mut context, cmd);
+        handle_command(&state, &mut main_loop, &mut context, cmd);
       }
     })
   });
@@ -181,16 +197,34 @@ fn thread_main(
   Ok(())
 }
 
-fn handle_command(main_loop: &mut Mainloop, context: &mut Context, command: Command) {
+fn handle_command(
+  state: &Rc<RefCell<PulseState>>,
+  main_loop: &mut Mainloop,
+  context: &mut Context,
+  command: Command,
+) {
   match command {
     Command::Quit => main_loop.quit(Retval(0)),
-    Command::SetVolume(index, _volume) => {
-      // let _ = context.introspect().set_sink_volume_by_index(
-      //   index,
-      //   &ChannelVolumes::default(),
-      //   Some(Box::new(|_| {})),
-      // );
+    Command::SetDefaultSink(id, res) => {
+      let state = state.borrow();
+      let Some(sink) = state.sinks.get(&id.0) else {
+        warn!(?id, "No such sink");
+        return;
+      };
+
+      let Some(name) = sink.name.as_ref() else {
+        warn!(?id, "Sink has no name");
+        return;
+      };
+
+      let mut res = Some(res);
+      context.set_default_sink(name, move |success| {
+        if let Some(res) = res.take() {
+          let _ = res.send(success);
+        }
+      });
     }
+    _ => {}
   }
 }
 
@@ -236,19 +270,10 @@ fn handle_event(
 }
 
 #[derive(Debug)]
-struct ManagedSink {
-  name: Option<String>,
-  volume: ChannelVolumes,
-}
-
-#[derive(Debug)]
-struct ManagedSource {}
-
-#[derive(Debug)]
 struct PulseState {
   event_tx: Sender<Event>,
-  sinks: HashMap<u32, ManagedSink>,
-  sources: HashMap<u32, ManagedSource>,
+  sinks: HashMap<u32, SinkInfo>,
+  sources: HashMap<u32, SourceInfo>,
 }
 
 impl PulseState {
@@ -267,14 +292,6 @@ impl PulseState {
     let event_tx = this.event_tx.clone();
 
     if let Some(sink) = this.sinks.get_mut(&info.index) {
-      if sink.name.as_deref() != info.name.as_deref() {
-        sink.name = info.name.as_ref().map(ToString::to_string);
-        let _ = event_tx.send(Event::SinkNameChanged(
-          SinkId(info.index),
-          sink.name.clone(),
-        ));
-      }
-
       if sink.volume != info.volume {
         sink.volume = info.volume.into();
         let _ = event_tx.send(Event::SinkVolumeChanged(
@@ -282,17 +299,63 @@ impl PulseState {
           sink.volume.clone(),
         ));
       }
+
+      if sink.mute != info.mute {
+        sink.mute = info.mute;
+        let _ = event_tx.send(Event::SinkMuteChanged(SinkId(info.index), info.mute));
+      }
+
+      if sink.name.as_deref() != info.name.as_deref() {
+        sink.name = info.name.as_ref().map(ToString::to_string);
+        let _ = event_tx.send(Event::SinkInfoChanged(sink.clone()));
+      }
     } else {
-      let managed = ManagedSink {
+      let managed = SinkInfo {
+        id: SinkId(info.index),
         name: info.name.as_ref().map(ToString::to_string),
         volume: info.volume.into(),
+        mute: info.mute,
       };
 
-      this.sinks.insert(info.index, managed);
+      this.sinks.insert(info.index, managed.clone());
+      let _ = event_tx.send(Event::SinkFound(managed));
     }
   }
 
   fn handle_source_info(this: &Rc<RefCell<Self>>, info: ListResult<&introspect::SourceInfo>) {
     let ListResult::Item(info) = info else { return };
+
+    let mut this = this.borrow_mut();
+    let event_tx = this.event_tx.clone();
+
+    if let Some(source) = this.sources.get_mut(&info.index) {
+      if source.volume != info.volume {
+        source.volume = info.volume.into();
+        let _ = event_tx.send(Event::SourceVolumeChanged(
+          SourceId(info.index),
+          source.volume.clone(),
+        ));
+      }
+
+      if source.mute != info.mute {
+        source.mute = info.mute;
+        let _ = event_tx.send(Event::SinkMuteChanged(SinkId(info.index), info.mute));
+      }
+
+      if source.name.as_deref() != info.name.as_deref() {
+        source.name = info.name.as_ref().map(ToString::to_string);
+        let _ = event_tx.send(Event::SourceInfoChanged(source.clone()));
+      }
+    } else {
+      let managed = SourceInfo {
+        id: SourceId(info.index),
+        name: info.name.as_ref().map(ToString::to_string),
+        volume: info.volume.into(),
+        mute: info.mute,
+      };
+
+      this.sources.insert(info.index, managed.clone());
+      let _ = event_tx.send(Event::SourceFound(managed));
+    }
   }
 }
