@@ -69,70 +69,99 @@ impl AudioState {
       }
     })
     .detach();
+
+    cx.on_app_quit({
+      let this = this.clone();
+      move |cx| this.update(cx, |this, cx| this.pulse.quit(cx))
+    })
+    .detach();
   }
 
   fn handle_pulse_event(this: &Entity<Self>, ev: pulse::Event, cx: &mut AsyncApp) -> Result<()> {
-    use pulse::Event;
+    use pulse::Event::*;
+
     match ev {
-      Event::SinkFound(sink) => this.update(cx, |this, cx| {
+      // Sink events
+      SinkFound(sink) => this.update(cx, |this, cx| {
         this.sinks.insert(sink.id, sink);
         cx.notify();
       })?,
-      Event::SourceFound(source) => this.update(cx, |this, cx| {
-        this.sources.insert(source.id, source);
-        cx.notify()
-      })?,
-
-      Event::SinkInfoChanged(sink) => this.update(cx, |this, cx| {
+      SinkInfoChanged(sink) => this.update(cx, |this, cx| {
         this.sinks.insert(sink.id, sink);
         cx.notify()
       })?,
-      Event::SourceInfoChanged(source) => this.update(cx, |this, cx| {
-        this.sources.insert(source.id, source);
-        cx.notify()
-      })?,
-      Event::SinkVolumeChanged(sink, volume) => this.update(cx, |this, cx| {
+      SinkVolumeChanged(sink, volume) => this.update(cx, |this, cx| {
         if let Some(sink) = this.sinks.get_mut(&sink) {
           sink.volume = volume;
           cx.notify();
         }
       })?,
-      Event::SourceVolumeChanged(source, volume) => this.update(cx, |this, cx| {
-        if let Some(source) = this.sources.get_mut(&source) {
-          source.volume = volume;
-          cx.notify();
-        }
-      })?,
-      Event::SinkMuteChanged(sink, muted) => this.update(cx, |this, cx| {
+      SinkMuteChanged(sink, muted) => this.update(cx, |this, cx| {
         if let Some(sink) = this.sinks.get_mut(&sink) {
           sink.mute = muted;
           cx.notify();
         }
       })?,
-      Event::SourceMuteChanged(source, muted) => this.update(cx, |this, cx| {
+      SinkRemoved(sink) => this.update(cx, |this, cx| {
+        this.sinks.remove(&sink);
+        cx.notify();
+      })?,
+      DefaultSinkChanged(default) => this.update(cx, |this, cx| {
+        this.default_sink = default;
+        cx.notify();
+      })?,
+
+      // Source events
+      SourceFound(source) => this.update(cx, |this, cx| {
+        this.sources.insert(source.id, source);
+        cx.notify()
+      })?,
+      SourceInfoChanged(source) => this.update(cx, |this, cx| {
+        this.sources.insert(source.id, source);
+        cx.notify()
+      })?,
+      SourceVolumeChanged(source, volume) => this.update(cx, |this, cx| {
+        if let Some(source) = this.sources.get_mut(&source) {
+          source.volume = volume;
+          cx.notify();
+        }
+      })?,
+      SourceMuteChanged(source, muted) => this.update(cx, |this, cx| {
         if let Some(source) = this.sources.get_mut(&source) {
           source.mute = muted;
           cx.notify();
         }
       })?,
-      Event::SinkRemoved(sink) => this.update(cx, |this, cx| {
-        this.sinks.remove(&sink);
-        cx.notify();
-      })?,
-      Event::SourceRemoved(source) => this.update(cx, |this, cx| {
+      SourceRemoved(source) => this.update(cx, |this, cx| {
         this.sources.remove(&source);
         cx.notify();
       })?,
+      DefaultSourceChanged(default) => this.update(cx, |this, cx| {
+        this.default_source = default;
+        cx.notify();
+      })?,
 
-      Event::Exited(err) => error!(?err, "Pulse thread exited"),
+      Exited(err) => error!(?err, "Pulse thread exited"),
     }
 
     Ok(())
   }
 
+  fn async_command(
+    &self,
+    cx: &mut Context<Self>,
+    make_cmd: impl FnOnce(oneshot::Sender<bool>) -> Command,
+  ) -> Task<Result<()>> {
+    let (tx, rx) = oneshot::channel::<bool>();
+    self.pulse.send_command(make_cmd(tx));
+    cx.spawn(async move |_, _| rx.await?.ok_or(anyhow!("Command failed")))
+  }
+
   pub fn set_default_sink(&self, sink: SinkId, cx: &mut Context<Self>) -> Task<Result<()>> {
-    let (tx, rx) = oneshot::channel();
-    self.pulse.send_command(Command::SetDefaultSink(sink, tx));
-    cx.spawn(async move |_, _| rx.await?.ok_or(anyhow!("Failed to set default sink")))
+    self.async_command(cx, |tx| Command::SetDefaultSink(sink, tx))
+  }
+
+  pub fn set_default_source(&self, source: SourceId, cx: &mut Context<Self>) -> Task<Result<()>> {
+    self.async_command(cx, |tx| Command::SetDefaultSource(source, tx))
   }
 }

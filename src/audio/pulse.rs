@@ -9,7 +9,8 @@ use std::{
 };
 
 use flume::{Receiver, Sender};
-use gpui::SharedString;
+use futures::channel::oneshot;
+use gpui::{App, AppContext, SharedString, Task};
 use pulse::{
   callbacks::ListResult,
   context::{
@@ -26,24 +27,28 @@ use pulse::{
 };
 use rustix::pipe::PipeFlags;
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, error, info, warn};
 
 use super::types::{ChannelVolumes, SinkId, SinkInfo, SourceId, SourceInfo};
 
-type ResponseChannel<T> = futures::channel::oneshot::Sender<T>;
-
 #[derive(Debug)]
 pub enum Event {
+  // Sink events
   SinkFound(SinkInfo),
-  SourceFound(SourceInfo),
   SinkInfoChanged(SinkInfo),
-  SourceInfoChanged(SourceInfo),
   SinkVolumeChanged(SinkId, ChannelVolumes),
-  SourceVolumeChanged(SourceId, ChannelVolumes),
   SinkMuteChanged(SinkId, bool),
-  SourceMuteChanged(SourceId, bool),
   SinkRemoved(SinkId),
+  DefaultSinkChanged(Option<SinkId>),
+
+  // Source events
+  SourceFound(SourceInfo),
+  SourceInfoChanged(SourceInfo),
+  SourceVolumeChanged(SourceId, ChannelVolumes),
+  SourceMuteChanged(SourceId, bool),
   SourceRemoved(SourceId),
+  DefaultSourceChanged(Option<SourceId>),
+
   Exited(PulseError),
 }
 
@@ -53,9 +58,9 @@ pub enum Command {
   SetSourceVolume(SourceId, u16),
   SetSinkMute(SinkId, bool),
   SetSourceMute(SourceId, bool),
-  SetDefaultSink(SinkId, ResponseChannel<bool>),
-  SetDefaultSource(SourceId),
-  Quit,
+  SetDefaultSink(SinkId, oneshot::Sender<bool>),
+  SetDefaultSource(SourceId, oneshot::Sender<bool>),
+  Quit(oneshot::Sender<()>),
 }
 
 #[derive(Debug, Clone, Error)]
@@ -71,10 +76,10 @@ pub enum PulseError {
 }
 
 pub struct PulseThread {
-  handle: JoinHandle<()>,
+  handle: Option<JoinHandle<()>>,
   event_rx: Receiver<Event>,
 
-  // We use a pipe to notify the pulse main loop when we have sent new commands
+  // Pipe to notify the pulse main loop when we have sent new commands
   notify_fd: File,
   command_tx: Sender<Command>,
 }
@@ -97,7 +102,7 @@ impl PulseThread {
     let notify_fd = File::from(writer);
 
     Self {
-      handle,
+      handle: Some(handle),
       event_rx,
       notify_fd,
       command_tx,
@@ -111,6 +116,18 @@ impl PulseThread {
   pub fn send_command(&self, cmd: Command) {
     let _ = self.command_tx.send(cmd);
     let _ = self.notify_fd.try_clone().unwrap().write(&[1]);
+  }
+
+  pub fn quit(&mut self, cx: &mut App) -> Task<()> {
+    let (tx, rx) = oneshot::channel::<()>();
+    self.send_command(Command::Quit(tx));
+    let handle = self.handle.take().expect("Pulse thread already quit");
+
+    cx.background_spawn(async move {
+      // TODO: Timeout?
+      let _ = rx.await;
+      let _ = handle.join();
+    })
   }
 }
 
@@ -141,6 +158,7 @@ fn thread_main(
   context.subscribe(
     InterestMaskSet::SERVER
       | InterestMaskSet::SINK
+      | InterestMaskSet::SINK_INPUT
       | InterestMaskSet::SOURCE
       | InterestMaskSet::CARD,
     |_| {},
@@ -176,6 +194,7 @@ fn thread_main(
   // We have to hold this handle to keep the event source alive
   let mut notify_fd = File::from(notify_fd);
   let _io_handle = main_loop.new_io_event(notify_fd.as_raw_fd(), EventFlagSet::INPUT, {
+    let state = state.clone();
     let mut main_loop = Mainloop {
       _inner: Rc::clone(&main_loop._inner),
     };
@@ -202,6 +221,10 @@ fn thread_main(
     return Err(err.into());
   }
 
+  if let Some(tx) = state.borrow_mut().shutdown_tx.take() {
+    let _ = tx.send(());
+  }
+
   Ok(())
 }
 
@@ -212,7 +235,10 @@ fn handle_command(
   command: Command,
 ) {
   match command {
-    Command::Quit => main_loop.quit(Retval(0)),
+    Command::Quit(tx) => {
+      state.borrow_mut().shutdown_tx = Some(tx);
+      main_loop.quit(Retval(0));
+    }
     Command::SetDefaultSink(id, res) => {
       let state = state.borrow();
       let Some(sink) = state.sinks.get(&id.0) else {
@@ -285,22 +311,72 @@ fn handle_event(
 
 #[derive(Debug)]
 struct PulseState {
+  shutdown_tx: Option<oneshot::Sender<()>>,
   event_tx: Sender<Event>,
   sinks: HashMap<u32, SinkInfo>,
   sources: HashMap<u32, SourceInfo>,
+  default_sink_id: Option<SinkId>,
+  default_source_id: Option<SourceId>,
 }
 
 impl PulseState {
   fn new(event_tx: Sender<Event>) -> Self {
     Self {
+      shutdown_tx: None,
       event_tx,
       sinks: Default::default(),
       sources: Default::default(),
+      default_sink_id: None,
+      default_source_id: None,
     }
   }
 
-  // TODO: wip
-  fn handle_server_info(this: &Rc<RefCell<Self>>, info: &ServerInfo) {}
+  fn handle_server_info(this: &Rc<RefCell<Self>>, info: &ServerInfo) {
+    let mut this = this.borrow_mut();
+    let event_tx = this.event_tx.clone();
+
+    let default_sink_id = info
+      .default_sink_name
+      .as_ref()
+      .and_then(|default_sink_name| {
+        this
+          .sinks
+          .values()
+          .find(|sink| {
+            sink
+              .name
+              .as_ref()
+              .is_some_and(|name| name.as_str() == default_sink_name)
+          })
+          .map(|sink| sink.id)
+      });
+
+    if default_sink_id != this.default_sink_id {
+      this.default_sink_id = default_sink_id;
+      let _ = event_tx.send(Event::DefaultSinkChanged(default_sink_id));
+    }
+
+    let default_source_id = info
+      .default_source_name
+      .as_ref()
+      .and_then(|default_source_name| {
+        this
+          .sources
+          .values()
+          .find(|source| {
+            source
+              .name
+              .as_ref()
+              .is_some_and(|name| name.as_str() == default_source_name)
+          })
+          .map(|source| source.id)
+      });
+
+    if default_source_id != this.default_source_id {
+      this.default_source_id = default_source_id;
+      let _ = event_tx.send(Event::DefaultSourceChanged(default_source_id));
+    }
+  }
 
   fn handle_sink_info(this: &Rc<RefCell<Self>>, info: ListResult<&introspect::SinkInfo>) {
     let ListResult::Item(info) = info else { return };
@@ -311,6 +387,7 @@ impl PulseState {
     if let Some(sink) = this.sinks.get_mut(&info.index) {
       if sink.volume != info.volume {
         sink.volume = info.volume.into();
+        sink.base_volume = info.base_volume.into();
         let _ = event_tx.send(Event::SinkVolumeChanged(
           SinkId(info.index),
           sink.volume.clone(),
@@ -322,9 +399,15 @@ impl PulseState {
         let _ = event_tx.send(Event::SinkMuteChanged(SinkId(info.index), info.mute));
       }
 
-      if sink.name.as_ref().map(|s| s.as_str()) != info.name.as_deref() {
+      if sink.name.as_ref().map(|s| s.as_str()) != info.name.as_deref()
+        || sink.description.as_ref().map(|s| s.as_str()) != info.description.as_deref()
+      {
         sink.name = info
           .name
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string()));
+        sink.description = info
+          .description
           .as_ref()
           .map(|s| SharedString::from(s.to_string()));
         let _ = event_tx.send(Event::SinkInfoChanged(sink.clone()));
@@ -336,7 +419,12 @@ impl PulseState {
           .name
           .as_ref()
           .map(|s| SharedString::from(s.to_string())),
+        description: info
+          .description
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string())),
         volume: info.volume.into(),
+        base_volume: info.base_volume.into(),
         mute: info.mute,
       };
 
@@ -354,6 +442,7 @@ impl PulseState {
     if let Some(source) = this.sources.get_mut(&info.index) {
       if source.volume != info.volume {
         source.volume = info.volume.into();
+        source.base_volume = info.base_volume.into();
         let _ = event_tx.send(Event::SourceVolumeChanged(
           SourceId(info.index),
           source.volume.clone(),
@@ -365,9 +454,15 @@ impl PulseState {
         let _ = event_tx.send(Event::SourceMuteChanged(SourceId(info.index), info.mute));
       }
 
-      if source.name.as_ref().map(|s| s.as_str()) != info.name.as_deref() {
+      if source.name.as_ref().map(|s| s.as_str()) != info.name.as_deref()
+        || source.description.as_ref().map(|s| s.as_str()) != info.description.as_deref()
+      {
         source.name = info
           .name
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string()));
+        source.description = info
+          .description
           .as_ref()
           .map(|s| SharedString::from(s.to_string()));
         let _ = event_tx.send(Event::SourceInfoChanged(source.clone()));
@@ -379,7 +474,12 @@ impl PulseState {
           .name
           .as_ref()
           .map(|s| SharedString::from(s.to_string())),
+        description: info
+          .description
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string())),
         volume: info.volume.into(),
+        base_volume: info.base_volume.into(),
         mute: info.mute,
       };
 

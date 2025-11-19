@@ -7,10 +7,7 @@ use gpui::{
 };
 
 use crate::{
-  audio::{
-    AudioState,
-    types::{SinkId, SinkInfo},
-  },
+  audio::{AudioState, types::SinkId},
   launcher::{Item, ItemAction},
   text_input::{TextInput, TextInputEvent},
   util::{h_flex, v_flex},
@@ -104,12 +101,12 @@ impl AudioSection {
   }
 
   fn render_sink_list_item(&self, ix: usize, id: SinkId, cx: &mut Context<Self>) -> AnyElement {
-    let sink = self
-      .audio_state
-      .read(cx)
-      .sinks
-      .get(&id)
-      .expect("invalid sink id");
+    let (sink, is_default) = {
+      let audio_state = self.audio_state.read(cx);
+      let sink = audio_state.sinks.get(&id).expect("invalid sink id");
+      let is_default = audio_state.default_sink == Some(id);
+      (sink, is_default)
+    };
 
     h_flex()
       .id(("sink", ix))
@@ -123,13 +120,19 @@ impl AudioSection {
       .w_full()
       .gap_2()
       .child(
-        div()
+        h_flex()
           .text_ellipsis()
           .overflow_x_hidden()
           .flex_1()
-          .child(sink.name.clone().unwrap_or_default()),
+          .when(is_default, |this| this.child("DEF: "))
+          .child(
+            sink
+              .description
+              .clone()
+              .unwrap_or_else(|| sink.name.clone().unwrap_or_default()),
+          ),
       )
-      .child(div().child(format!("{}%", sink.volume.0[0])))
+      .child(div().child(format!("{}%", sink.volume.as_percent(sink.base_volume))))
       .into_any()
   }
 }
