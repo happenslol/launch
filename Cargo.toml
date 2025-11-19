@@ -12,7 +12,7 @@ include-fs = "0.2.0"
 anyhow = "1.0.100"
 unicode-segmentation = "1.12.0"
 walkdir = "2.5.0"
-freedesktop-file-parser = "0.3.1"
+freedesktop-desktop-entry = "0.7.19"
 nucleo-matcher = "0.3.1"
 async-lock = "3.4.1"
 zbus = { version = "5.12.0", default-features = false, features = ["async-io"] }
@@ -25,6 +25,8 @@ async-broadcast = "0.7"
 rustix = { version = "1.1.2", features = ["pipe"] }
 futures = "0.3"
 async-process = "2.5.0"
+fork = "0.4.0"
+exec = "0.3.1"
 
 [dependencies.gpui]
 git = "https://github.com/zed-industries/zed"

@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_lock::Mutex;
-use freedesktop_file_parser::DesktopEntry;
+use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
   AnyView, App, Bounds, Entity, FocusHandle, Focusable, KeyBinding, ScrollStrategy, SharedString,
   Size, Subscription, Task, UniformListScrollHandle, Window, WindowBounds, WindowKind,
@@ -21,6 +21,7 @@ use nucleo_matcher::{
   Config, Matcher, Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
+use tracing::error;
 
 use crate::{
   audio::{self, sections::AudioSection},
@@ -123,7 +124,7 @@ impl Launcher {
       matcher: Arc::new(Mutex::new(matcher)),
       current_query: String::new(),
       scroll_handle: UniformListScrollHandle::new(),
-      active_section: Some(audio_section),
+      active_section: None, // Some(audio_section),
 
       search_id: None,
       next_search_id: 0,
@@ -136,7 +137,7 @@ impl Launcher {
       .extend([cx.subscribe_in(&search_input, window, {
         let search_input = search_input.clone();
         move |this, _, ev: &TextInputEvent, window, cx| match *ev {
-          TextInputEvent::Submit => this.launch(window, cx),
+          TextInputEvent::Submit => this.launch_selected(window, cx),
           TextInputEvent::Change => {
             // See if something actually changed
             let new_value = &search_input.read(cx).content.trim();
@@ -283,18 +284,23 @@ impl Launcher {
     cx.quit();
   }
 
-  fn launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(item) = self.selected_item.map(|i| {
-      self
-        .matches
-        .as_ref()
-        .map_or_else(|| &self.items[i], |matches| &self.items[matches[i].0])
-    }) else {
+  fn launch_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(item_index) = self
+      .selected_item
+      .map(|i| self.matches.as_ref().map_or(i, |matches| matches[i].0))
+    else {
       return;
     };
 
-    match &item.action {
-      ItemAction::Launch(entry) => xdg::start(entry),
+    self.launch(item_index, window, cx);
+  }
+
+  fn launch(&mut self, item_index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    match &self.items[item_index].action {
+      ItemAction::Launch(entry) => match xdg::start(entry) {
+        Ok(_) => cx.quit(),
+        Err(err) => error!(?err, "Failed to start process"),
+      },
       ItemAction::Section(make_section) => {
         self.active_section = Some(make_section(window, cx));
         cx.notify();
@@ -329,7 +335,7 @@ impl Render for Launcher {
               .matches
               .as_ref()
               .map_or_else(|| self.items.len(), |matches| matches.len()),
-            cx.processor(move |this, range: Range<usize>, _window, _cx| {
+            cx.processor(move |this, range: Range<usize>, _window, cx| {
               range
                 .map(|i| {
                   let is_selected = this
@@ -347,6 +353,9 @@ impl Render for Launcher {
                     .bg(white())
                     .when(is_selected, |div| div.bg(rgb(0xDDDDDD)))
                     .when(!is_selected, |div| div.hover(|div| div.bg(rgb(0xAAAAAA))))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                      this.launch(item_index, window, cx);
+                    }))
                     .child(item.name.clone())
                 })
                 .collect()

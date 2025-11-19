@@ -1,15 +1,21 @@
 use anyhow::Result;
-use freedesktop_file_parser::DesktopEntry;
+use fork::Fork;
+use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths, get_languages_from_env};
 use gpui::SharedString;
+use tracing::error;
 
 use crate::launcher::{Item, ItemAction};
 
 pub fn get_items() -> Result<Vec<Item>> {
-  let desktop_entries = find_all_desktop_entries()?;
+  let locales = get_languages_from_env();
+  let desktop_entries = Iter::new(default_paths())
+    .entries(Some(&locales))
+    .collect::<Vec<_>>();
+
   let items = desktop_entries
     .iter()
     .map(|entry| Item {
-      name: SharedString::from(entry.name.default.clone()),
+      name: SharedString::from(entry.name(&locales).unwrap().to_string()),
       action: ItemAction::Launch(Box::new(entry.clone())),
     })
     .collect();
@@ -17,55 +23,17 @@ pub fn get_items() -> Result<Vec<Item>> {
   Ok(items)
 }
 
-fn find_all_desktop_entries() -> Result<Vec<DesktopEntry>> {
-  let data_dirs = std::env::var("XDG_DATA_DIRS").ok().map(|p| {
-    std::env::split_paths(&p)
-      .filter(|p| p.is_absolute())
-      .collect::<Vec<_>>()
-  });
+pub fn start(entry: &DesktopEntry) -> Result<()> {
+  let cmd = entry.parse_exec()?;
 
-  let app_dirs = data_dirs.map(|dirs| {
-    dirs
-      .iter()
-      .map(|dir| dir.join("applications"))
-      .filter(|dir| dir.try_exists().unwrap_or_default())
-      .collect::<Vec<_>>()
-  });
+  // TODO: If we want to capture the child's output, we have to create pipes and set out own
+  // stdin/out/err to them before forking, then set them back to our own in the parent.
 
-  let Some(app_dirs) = app_dirs else {
-    return Ok(Vec::new());
-  };
-
-  let mut applications = Vec::new();
-
-  for dir in app_dirs {
-    let walker = walkdir::WalkDir::new(&dir).into_iter();
-
-    // TODO: Deduplicate by dektop id
-    for entry in walker.filter_entry(|e| {
-      e.file_type().is_dir()
-        || e
-          .file_name()
-          .to_str()
-          .is_some_and(|s| s.ends_with(".desktop"))
-    }) {
-      let Ok(entry) = entry else {
-        continue;
-      };
-
-      if entry.file_type().is_dir() {
-        continue;
-      }
-
-      let contents = std::fs::read_to_string(entry.path())?;
-      let parsed = freedesktop_file_parser::parse(&contents)?;
-      applications.push(parsed.entry);
-    }
+  if let Fork::Child = fork::fork()? {
+    let err = exec::execvp(&cmd[0], &cmd);
+    error!(?err, ?cmd, "child: Failed to execvp process");
+    std::process::exit(1);
   }
 
-  Ok(applications)
-}
-
-pub fn start(entry: &DesktopEntry) {
-  println!("launching {}", entry.name.default);
+  Ok(())
 }

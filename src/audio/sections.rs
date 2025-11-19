@@ -124,7 +124,7 @@ impl AudioSection {
           .text_ellipsis()
           .overflow_x_hidden()
           .flex_1()
-          .when(is_default, |this| this.child("DEF: "))
+          .when(is_default, |div| div.child("DEF: "))
           .child(
             sink
               .description
