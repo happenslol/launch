@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use anyhow::Result;
 use gpui::{
@@ -16,7 +16,7 @@ use crate::{
 pub fn get_items() -> Result<Vec<Item>> {
   Ok(vec![Item {
     name: "sinks".into(),
-    action: ItemAction::Section(Box::new(AudioSection::view)),
+    action: ItemAction::Section(Arc::new(AudioSection::view)),
   }])
 }
 
