@@ -14,6 +14,7 @@ pub fn get_items() -> Result<Vec<Item>> {
 
   let items = desktop_entries
     .iter()
+    .filter(|entry| !entry.no_display())
     .map(|entry| Item {
       name: SharedString::from(entry.name(&locales).unwrap().to_string()),
       action: ItemAction::Launch(Box::new(entry.clone())),

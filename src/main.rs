@@ -5,6 +5,7 @@ mod audio;
 mod dbus;
 mod launcher;
 mod logging;
+mod picker;
 mod text_input;
 mod util;
 mod xdg;

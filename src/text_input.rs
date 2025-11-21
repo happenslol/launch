@@ -30,7 +30,7 @@ actions!(
 
 pub struct TextInput {
   pub content: SharedString,
-  focus_handle: FocusHandle,
+  pub focus_handle: FocusHandle,
   placeholder: SharedString,
   selected_range: Range<usize>,
   selection_reversed: bool,
