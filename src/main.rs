@@ -3,6 +3,7 @@
 mod assets;
 mod audio;
 mod dbus;
+mod input;
 mod launcher;
 mod logging;
 mod picker;
