@@ -1,21 +1,17 @@
-use std::{
-  ops::Range,
-  sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-  },
+use std::sync::{
+  Arc,
+  atomic::{AtomicBool, Ordering},
 };
 
 use async_lock::Mutex;
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
-  AnyView, App, AsyncWindowContext, Bounds, Entity, FocusHandle, Focusable, KeyBinding,
-  ScrollStrategy, SharedString, Size, Subscription, Task, UniformListScrollHandle, Window,
-  WindowBounds, WindowKind, WindowOptions, actions, div,
+  AnyView, App, Bounds, Entity, KeyBinding, SharedString, Size, Subscription, Task, Window,
+  WindowBounds, WindowKind, WindowOptions, actions,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
-  px, rgb, rgba, uniform_list, white,
+  px, rgb, rgba,
 };
 use nucleo_matcher::{
   Config, Matcher, Utf32Str,
@@ -24,7 +20,7 @@ use nucleo_matcher::{
 use tracing::{error, trace};
 
 use crate::{
-  audio::{self, sections::AudioSection},
+  audio,
   picker::{Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
   xdg,
@@ -37,7 +33,7 @@ type SectionView = dyn Fn(&mut Window, &mut App) -> AnyView + Send + Sync;
 pub struct Launcher {
   picker: Entity<Picker<RootDelegate>>,
   active_section: Option<AnyView>,
-  subscriptions: Vec<Subscription>,
+  _subscriptions: Vec<Subscription>,
 }
 
 impl Launcher {
@@ -76,22 +72,21 @@ impl Launcher {
     items.extend(audio::sections::get_items().unwrap());
 
     let picker = cx.new(|cx| Picker::new(RootDelegate::new(), items, window, cx));
+    cx.focus_view(&picker, window);
 
-    let mut this = Self {
-      picker,
-      active_section: None, // Some(audio_section),
-      subscriptions: Vec::new(),
-    };
-
-    this.subscriptions.push(cx.subscribe_in(
-      &this.picker,
+    let subscriptions = vec![cx.subscribe_in(
+      &picker,
       window,
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
         PickerEvent::Picked(item) => this.launch(item, window, cx),
       },
-    ));
+    )];
 
-    this
+    Self {
+      picker,
+      active_section: None, // Some(audio_section),
+      _subscriptions: subscriptions,
+    }
   }
 
   fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
@@ -123,7 +118,7 @@ impl Render for Launcher {
     v_flex()
       .on_action(cx.listener(Self::quit))
       .size_full()
-      .bg(rgba(0x00000015))
+      .bg(rgba(0xFFFFFFFF))
       .when_some(self.active_section.as_ref(), |this, section| {
         this.child(section.clone())
       })

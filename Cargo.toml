@@ -27,7 +27,11 @@ futures = "0.3"
 async-process = "2.5.0"
 fork = "0.4.0"
 exec = "0.3.1"
-ropey = "1.6.1"
+ropey = { version = "=2.0.0-beta.1", features = [
+  "metric_lines_lf",
+  "metric_utf16",
+] }
+smallvec = "1.15.1"
 
 [dependencies.gpui]
 git = "https://github.com/zed-industries/zed"

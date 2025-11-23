@@ -13,7 +13,10 @@ use gpui::{
 };
 
 use crate::{
-  text_input::{TextInput, TextInputEvent},
+  input::{
+    input,
+    state::{InputEvent, InputState},
+  },
   util::v_flex,
 };
 
@@ -46,7 +49,7 @@ pub struct Picker<D: PickerDelegate> {
   items: Arc<Vec<D::ListItem>>,
   matches: Option<Vec<(usize, u32)>>,
 
-  search_input: Entity<TextInput>,
+  search_input: Entity<InputState>,
   selected_index: Option<usize>,
   current_query: String,
   list_scroll_handle: UniformListScrollHandle,
@@ -76,7 +79,7 @@ impl<D: PickerDelegate> Picker<D> {
       KeyBinding::new("ctrl-k", SelectPrev, None),
     ]);
 
-    let search_input = cx.new(|cx| TextInput::new(window, cx));
+    let search_input = cx.new(|cx| InputState::new(window, cx));
 
     let mut this = Self {
       delegate,
@@ -97,10 +100,10 @@ impl<D: PickerDelegate> Picker<D> {
     this.subscriptions.push(cx.subscribe_in(
       &search_input,
       window,
-      move |this, search_input, ev: &TextInputEvent, window, cx| match *ev {
-        TextInputEvent::Submit => this.launch_selected(cx),
-        TextInputEvent::Change => {
-          let new_value = &search_input.read(cx).content.trim();
+      move |this, search_input, ev, window, cx| match *ev {
+        InputEvent::PressEnter { .. } => this.launch_selected(cx),
+        InputEvent::Change => {
+          let new_value = &search_input.read(cx).value();
           if &this.current_query == new_value {
             // Query hasn't changed
             return;
@@ -114,6 +117,18 @@ impl<D: PickerDelegate> Picker<D> {
     ));
 
     this
+  }
+
+  pub fn set_items(
+    &mut self,
+    items: Vec<D::ListItem>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.items = Arc::new(items);
+    cx.notify();
+
+    self.update_matches(window, cx);
   }
 
   fn launch_selected(&mut self, cx: &mut Context<Self>) {
@@ -227,9 +242,12 @@ impl<D: PickerDelegate> Picker<D> {
     div()
       .id(("item", ix))
       .cursor_pointer()
-      .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+      .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         let resolved_ix = this.matches.as_ref().map_or(ix, |matches| matches[ix].0);
         cx.emit(PickerEvent::Picked(this.items[resolved_ix].clone()));
+
+        // Maintain focus on the search input
+        cx.focus_self(window);
       }))
       .child(
         self
@@ -256,7 +274,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
       .on_action(cx.listener(Self::select_next))
       .on_action(cx.listener(Self::select_prev))
       .size_full()
-      .child(self.search_input.clone())
+      .child(input(&self.search_input))
       .child(
         uniform_list(
           "matches",

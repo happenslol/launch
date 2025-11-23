@@ -7,7 +7,6 @@ mod input;
 mod launcher;
 mod logging;
 mod picker;
-mod text_input;
 mod util;
 mod xdg;
 
@@ -17,8 +16,8 @@ use tracing::error;
 
 use crate::{
   assets::{Assets, load_embedded_fonts},
+  input::state::InputState,
   launcher::Launcher,
-  text_input::TextInput,
 };
 
 fn main() -> Result<()> {
@@ -27,7 +26,7 @@ fn main() -> Result<()> {
   Application::new().with_assets(Assets).run(move |cx| {
     dbus::init(cx);
     audio::init(cx);
-    TextInput::init(cx);
+    InputState::init(cx);
 
     load_embedded_fonts(cx).unwrap();
     show_launcher(cx);

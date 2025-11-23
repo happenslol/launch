@@ -24,7 +24,9 @@ pub struct GlobalAudioState(Entity<AudioState>);
 
 impl Global for GlobalAudioState {}
 
-pub enum AudioEvent {}
+pub enum AudioEvent {
+  SinksChanged,
+}
 
 pub struct AudioState {
   pulse: PulseThread,
@@ -84,30 +86,36 @@ impl AudioState {
       // Sink events
       SinkFound(sink) => this.update(cx, |this, cx| {
         this.sinks.insert(sink.id, sink);
+        cx.emit(AudioEvent::SinksChanged);
         cx.notify();
       })?,
       SinkInfoChanged(sink) => this.update(cx, |this, cx| {
         this.sinks.insert(sink.id, sink);
+        cx.emit(AudioEvent::SinksChanged);
         cx.notify()
       })?,
       SinkVolumeChanged(sink, volume) => this.update(cx, |this, cx| {
         if let Some(sink) = this.sinks.get_mut(&sink) {
           sink.volume = volume;
+          cx.emit(AudioEvent::SinksChanged);
           cx.notify();
         }
       })?,
       SinkMuteChanged(sink, muted) => this.update(cx, |this, cx| {
         if let Some(sink) = this.sinks.get_mut(&sink) {
           sink.mute = muted;
+          cx.emit(AudioEvent::SinksChanged);
           cx.notify();
         }
       })?,
       SinkRemoved(sink) => this.update(cx, |this, cx| {
         this.sinks.remove(&sink);
+        cx.emit(AudioEvent::SinksChanged);
         cx.notify();
       })?,
       DefaultSinkChanged(default) => this.update(cx, |this, cx| {
         this.default_sink = default;
+        cx.emit(AudioEvent::SinksChanged);
         cx.notify();
       })?,
 
