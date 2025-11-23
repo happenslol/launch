@@ -1,11 +1,16 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
-  AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Styled, Subscription, Task, Window, div, prelude::*, rgb
+  AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
+  Render, Styled, Subscription, Task, Window, actions, div, prelude::*, rgb,
 };
 
 use crate::{
-  audio::{AudioEvent, AudioState, types::SinkInfo},
+  audio::{
+    AudioEvent, AudioState,
+    pulse::{SetMute, SetVolume},
+    types::{SinkId, SinkInfo},
+  },
   picker::{Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
 };
@@ -16,12 +21,22 @@ pub struct AudioSinksSection {
   _subscriptions: Vec<Subscription>,
 }
 
+const CONTEXT: &str = "sinks";
+
+actions!(sinks, [VolumeUp, VolumeDown, Mute]);
+
 impl AudioSinksSection {
   pub fn view(window: &mut Window, cx: &mut App) -> AnyView {
     cx.new(|cx| AudioSinksSection::new(window, cx)).into()
   }
 
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    cx.bind_keys([
+      KeyBinding::new("ctrl-+", VolumeUp, Some(CONTEXT)),
+      KeyBinding::new("ctrl--", VolumeDown, Some(CONTEXT)),
+      KeyBinding::new("ctrl-m", Mute, Some(CONTEXT)),
+    ]);
+
     let audio_state = AudioState::global(cx);
     let delegate = SinksDelegate {
       audio_state: audio_state.clone(),
@@ -59,11 +74,50 @@ impl AudioSinksSection {
       }),
     ];
 
+    cx.focus_self(window);
+
     Self {
       picker,
       audio_state,
       _subscriptions: subscriptions,
     }
+  }
+
+  fn get_selected_id(&self, cx: &mut Context<Self>) -> Option<SinkId> {
+    self.picker.read(cx).get_selected_item().map(|item| item.id)
+  }
+
+  fn volume_up(&mut self, _: &VolumeUp, _window: &mut Window, cx: &mut Context<Self>) {
+    let Some(selected_id) = self.get_selected_id(cx) else {
+      return;
+    };
+
+    self
+      .audio_state
+      .read(cx)
+      .set_sink_volume(selected_id, SetVolume::RelativePercent(5));
+  }
+
+  fn volume_down(&mut self, _: &VolumeDown, _window: &mut Window, cx: &mut Context<Self>) {
+    let Some(selected_id) = self.get_selected_id(cx) else {
+      return;
+    };
+
+    self
+      .audio_state
+      .read(cx)
+      .set_sink_volume(selected_id, SetVolume::RelativePercent(-5));
+  }
+
+  fn mute(&mut self, _: &Mute, _window: &mut Window, cx: &mut Context<Self>) {
+    let Some(selected_id) = self.get_selected_id(cx) else {
+      return;
+    };
+
+    self
+      .audio_state
+      .read(cx)
+      .set_sink_mute(selected_id, SetMute::Toggle)
   }
 }
 
@@ -74,8 +128,14 @@ impl Focusable for AudioSinksSection {
 }
 
 impl Render for AudioSinksSection {
-  fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-    v_flex().size_full().child(self.picker.clone())
+  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    v_flex()
+      .key_context(CONTEXT)
+      .size_full()
+      .on_action(cx.listener(Self::volume_up))
+      .on_action(cx.listener(Self::volume_down))
+      .on_action(cx.listener(Self::mute))
+      .child(self.picker.clone())
   }
 }
 
@@ -109,7 +169,8 @@ impl PickerDelegate for SinksDelegate {
           .text_ellipsis()
           .overflow_x_hidden()
           .flex_1()
-          .when(is_default, |div| div.child("DEF: "))
+          .when(is_default, |div| div.child("---> "))
+          .when(item.mute, |div| div.child("MUTE "))
           .child(
             item
               .description

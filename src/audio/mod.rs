@@ -10,7 +10,7 @@ use gpui::{App, AsyncApp, Entity, EventEmitter, Global, Task, prelude::*};
 use tracing::error;
 
 use crate::audio::{
-  pulse::{Command, PulseThread},
+  pulse::{Command, PulseThread, SetMute, SetVolume},
   types::{SinkId, SinkInfo, SourceId, SourceInfo},
 };
 
@@ -167,6 +167,14 @@ impl AudioState {
 
   pub fn set_default_sink(&self, sink: SinkId, cx: &mut Context<Self>) -> Task<Result<()>> {
     self.async_command(cx, |tx| Command::SetDefaultSink(sink, tx))
+  }
+
+  pub fn set_sink_mute(&self, sink: SinkId, set: SetMute) {
+    self.pulse.send_command(Command::SetSinkMute(sink, set))
+  }
+
+  pub fn set_sink_volume(&self, sink: SinkId, set: SetVolume) {
+    self.pulse.send_command(Command::SetSinkVolume(sink, set))
   }
 
   pub fn set_default_source(&self, source: SourceId, cx: &mut Context<Self>) -> Task<Result<()>> {

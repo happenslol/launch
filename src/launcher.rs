@@ -106,7 +106,8 @@ impl Launcher {
         Err(err) => error!(?err, "Failed to start process"),
       },
       ItemAction::Section(make_section) => {
-        self.active_section = Some(make_section(window, cx));
+        let section = make_section(window, cx);
+        self.active_section = Some(section);
         cx.notify();
       }
     }

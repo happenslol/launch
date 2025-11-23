@@ -131,6 +131,17 @@ impl<D: PickerDelegate> Picker<D> {
     self.update_matches(window, cx);
   }
 
+  pub fn get_selected_item(&self) -> Option<&D::ListItem> {
+    let selected_index = self.selected_index?;
+
+    let resolved_ix = self
+      .matches
+      .as_ref()
+      .map_or(selected_index, |matches| matches[selected_index].0);
+
+    self.items.get(resolved_ix)
+  }
+
   fn launch_selected(&mut self, cx: &mut Context<Self>) {
     let Some(ix) = self.selected_index else {
       return;

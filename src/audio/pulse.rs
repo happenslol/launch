@@ -27,7 +27,7 @@ use pulse::{
 };
 use rustix::pipe::PipeFlags;
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
 
 use super::types::{ChannelVolumes, SinkId, SinkInfo, SourceId, SourceInfo};
 
@@ -52,12 +52,27 @@ pub enum Event {
   Exited(PulseError),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SetVolume {
+  Absolute(u32),
+  AbsolutePercent(u32),
+  Relative(i32),
+  RelativePercent(i32),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SetMute {
+  Mute,
+  Unmute,
+  Toggle,
+}
+
 #[derive(Debug)]
 pub enum Command {
-  SetSinkVolume(SinkId, u16),
-  SetSourceVolume(SourceId, u16),
-  SetSinkMute(SinkId, bool),
-  SetSourceMute(SourceId, bool),
+  SetSinkVolume(SinkId, SetVolume),
+  SetSourceVolume(SourceId, SetVolume),
+  SetSinkMute(SinkId, SetMute),
+  SetSourceMute(SourceId, SetMute),
   SetDefaultSink(SinkId, oneshot::Sender<bool>),
   SetDefaultSource(SourceId, oneshot::Sender<bool>),
   Quit(oneshot::Sender<()>),
@@ -239,6 +254,52 @@ fn handle_command(
       state.borrow_mut().shutdown_tx = Some(tx);
       main_loop.quit(Retval(0));
     }
+    Command::SetSinkVolume(id, set) => {
+      let (mut current, base) = {
+        let state = state.borrow();
+        let Some(sink) = state.sinks.get(&id.0) else {
+          warn!(?id, "No such sink");
+          return;
+        };
+
+        (sink.volume.clone(), sink.base_volume)
+      };
+
+      match set {
+        SetVolume::Absolute(v) => current.set_percent(base, v),
+        SetVolume::AbsolutePercent(p) => current.set_percent(base, p),
+        SetVolume::Relative(v) if v >= 0 => current.add_percent(base, v as u32),
+        SetVolume::Relative(v) => current.sub_percent(base, v.unsigned_abs()),
+        SetVolume::RelativePercent(p) if p >= 0 => current.add_percent(base, p as u32),
+        SetVolume::RelativePercent(p) => current.sub_percent(base, p.unsigned_abs()),
+      }
+
+      context
+        .introspect()
+        .set_sink_volume_by_index(id.0, &current.into(), None);
+    }
+    Command::SetSinkMute(id, set) => match set {
+      SetMute::Mute => {
+        context
+          .introspect()
+          .set_sink_mute_by_index(id.0, true, None);
+      }
+      SetMute::Unmute => {
+        context
+          .introspect()
+          .set_sink_mute_by_index(id.0, false, None);
+      }
+      SetMute::Toggle => {
+        let Some(muted) = state.borrow().sinks.get(&id.0).map(|sink| sink.mute) else {
+          warn!(?id, "No such sink");
+          return;
+        };
+
+        context
+          .introspect()
+          .set_sink_mute_by_index(id.0, !muted, None);
+      }
+    },
     Command::SetDefaultSink(id, res) => {
       let state = state.borrow();
       let Some(sink) = state.sinks.get(&id.0) else {
@@ -258,7 +319,48 @@ fn handle_command(
         }
       });
     }
-    _ => {}
+    Command::SetSourceVolume(id, set) => {}
+    Command::SetSourceMute(id, set) => match set {
+      SetMute::Mute => {
+        context
+          .introspect()
+          .set_source_mute_by_index(id.0, true, None);
+      }
+      SetMute::Unmute => {
+        context
+          .introspect()
+          .set_source_mute_by_index(id.0, false, None);
+      }
+      SetMute::Toggle => {
+        let Some(muted) = state.borrow().sources.get(&id.0).map(|source| source.mute) else {
+          warn!(?id, "No such source");
+          return;
+        };
+
+        context
+          .introspect()
+          .set_source_mute_by_index(id.0, !muted, None);
+      }
+    },
+    Command::SetDefaultSource(id, res) => {
+      let state = state.borrow();
+      let Some(source) = state.sources.get(&id.0) else {
+        warn!(?id, "No such source");
+        return;
+      };
+
+      let Some(name) = source.name.as_ref() else {
+        warn!(?id, "source has no name");
+        return;
+      };
+
+      let mut res = Some(res);
+      context.set_default_source(name, move |success| {
+        if let Some(res) = res.take() {
+          let _ = res.send(success);
+        }
+      });
+    }
   }
 }
 

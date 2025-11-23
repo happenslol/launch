@@ -52,8 +52,6 @@ impl PartialEq for ChannelVolumes {
   }
 }
 
-impl Eq for ChannelVolumes {}
-
 impl PartialEq<pulse::volume::ChannelVolumes> for ChannelVolumes {
   fn eq(&self, other: &pulse::volume::ChannelVolumes) -> bool {
     let other = other.get();
@@ -82,7 +80,55 @@ impl From<pulse::volume::ChannelVolumes> for ChannelVolumes {
   }
 }
 
+impl From<ChannelVolumes> for pulse::volume::ChannelVolumes {
+  fn from(v: ChannelVolumes) -> Self {
+    let mut result = pulse::volume::ChannelVolumes::default();
+    result.init();
+    result.set_len(v.channels);
+
+    // TODO: Is this correct? set seems to set the first n channels, seems unintuitive
+    for (index, volume) in v.volumes.iter().enumerate().rev() {
+      result.set(index as u8, pulse::volume::Volume(*volume));
+    }
+
+    result
+  }
+}
+
 impl ChannelVolumes {
+  pub fn set(&mut self, volume: Volume) {
+    for v in self.volumes.iter_mut() {
+      *v = volume.0;
+    }
+  }
+
+  pub fn set_percent(&mut self, base: Volume, percent: u32) {
+    let vol = (percent as f32 / 100. * base.0 as f32).round() as u32;
+    self.set(Volume(vol));
+  }
+
+  pub fn add(&mut self, volume: Volume) {
+    for v in self.volumes.iter_mut() {
+      *v += volume.0;
+    }
+  }
+
+  pub fn sub(&mut self, volume: Volume) {
+    for v in self.volumes.iter_mut() {
+      *v = v.saturating_sub(volume.0);
+    }
+  }
+
+  pub fn add_percent(&mut self, base: Volume, percent: u32) {
+    let vol = (percent as f32 / 100. * base.0 as f32).round() as i32;
+    self.add(Volume(vol as u32));
+  }
+
+  pub fn sub_percent(&mut self, base: Volume, percent: u32) {
+    let vol = (percent as f32 / 100. * base.0 as f32).round() as i32;
+    self.sub(Volume(vol as u32));
+  }
+
   pub fn as_percent(&self, base: Volume) -> u32 {
     let vol = self
       .volumes

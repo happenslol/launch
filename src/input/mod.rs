@@ -55,6 +55,13 @@ impl RenderOnce for Input {
       .key_context(CONTEXT)
       .track_focus(&state.focus_handle)
       .flex()
+      .items_center()
+      .cursor_text()
+      .line_height(LINE_HEIGHT)
+      .text_size(font_size)
+      .w_full()
+      .min_h(LINE_HEIGHT)
+      .when(state.mode.is_multi_line(), |this| this.h_auto())
       .map(|div| {
         input_state_listeners(
           &self.state,
@@ -65,12 +72,6 @@ impl RenderOnce for Input {
         )
       })
       .on_action(window.listener_for(&self.state, InputState::backspace))
-      .size_full()
-      .line_height(LINE_HEIGHT)
-      .cursor_text()
-      .text_size(font_size)
-      .items_center()
-      .when(state.mode.is_multi_line(), |this| this.h_auto())
       .map(|mut div| {
         div.style().refine(&self.style);
         div
