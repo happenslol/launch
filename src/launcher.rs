@@ -20,7 +20,7 @@ use nucleo_matcher::{
   Config, Matcher, Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
-use tracing::{debug, error, trace};
+use tracing::{error, trace};
 
 use crate::{
   audio,
@@ -32,11 +32,11 @@ use crate::{
 
 actions!(launcher, [Quit]);
 
-type SectionView = dyn Fn(&mut Window, &mut App) -> AnyView + Send + Sync;
+type PanelView = dyn Fn(&mut Window, &mut App) -> AnyView + Send + Sync;
 
 pub struct Launcher {
   picker: Entity<Picker<RootDelegate>>,
-  active_section: Option<AnyView>,
+  active_panel: Option<AnyView>,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -80,7 +80,7 @@ impl Launcher {
     let mut items = vec![];
 
     items.extend(xdg::get_items().unwrap());
-    items.extend(audio::sections::get_items().unwrap());
+    items.extend(audio::panels::get_items().unwrap());
 
     let picker = cx.new(|cx| Picker::new(RootDelegate::new(), items, window, cx));
     cx.focus_view(&picker, window);
@@ -95,13 +95,13 @@ impl Launcher {
 
     Self {
       picker,
-      active_section: None, // Some(audio_section),
+      active_panel: None, // Some(audio_section),
       _subscriptions: subscriptions,
     }
   }
 
   fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-    if self.active_section.take().is_some() {
+    if self.active_panel.take().is_some() {
       cx.focus_view(&self.picker, window);
       cx.notify();
       return;
@@ -121,9 +121,9 @@ impl Launcher {
           Ok(_) => cx.quit(),
           Err(err) => error!(?err, "Failed to start process"),
         },
-        ItemAction::Section(make_section) => {
-          let section = make_section(window, cx);
-          this.active_section = Some(section);
+        ItemAction::Panel(make_panel) => {
+          let panel = make_panel(window, cx);
+          this.active_panel = Some(panel);
           cx.notify();
         }
       });
@@ -138,10 +138,10 @@ impl Render for Launcher {
       .on_action(cx.listener(Self::quit))
       .size_full()
       .bg(rgba(0xFFFFFFFF))
-      .when_some(self.active_section.as_ref(), |this, section| {
-        this.child(section.clone())
+      .when_some(self.active_panel.as_ref(), |this, panel| {
+        this.child(panel.clone())
       })
-      .when_none(&self.active_section, |this| this.child(self.picker.clone()))
+      .when_none(&self.active_panel, |this| this.child(self.picker.clone()))
   }
 }
 
@@ -169,7 +169,7 @@ fn get_matches(matcher: &mut Matcher, items: &[Item], query: &str) -> Vec<(usize
     }
   }
 
-  debug!(duration = ?start_time.elapsed(), count = items.len(), "Done matching root items");
+  trace!(duration = ?start_time.elapsed(), count = items.len(), "Done matching root items");
 
   matches
 }
@@ -198,7 +198,7 @@ pub struct Item {
 #[derive(Clone)]
 pub enum ItemAction {
   Launch(Box<DesktopEntry>),
-  Section(Arc<SectionView>),
+  Panel(Arc<PanelView>),
 }
 
 impl PickerDelegate for RootDelegate {

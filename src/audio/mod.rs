@@ -1,5 +1,5 @@
 mod pulse;
-pub mod sections;
+pub mod panels;
 mod types;
 
 use std::collections::BTreeMap;

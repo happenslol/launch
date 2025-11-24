@@ -6,11 +6,12 @@ use std::{
   os::fd::{AsRawFd, OwnedFd},
   rc::Rc,
   thread::{self, JoinHandle},
+  time::Duration,
 };
 
 use flume::{Receiver, Sender};
-use futures::channel::oneshot;
-use gpui::{App, AppContext, SharedString, Task};
+use futures::channel::oneshot::{self, Canceled};
+use gpui::{App, AppContext, FutureExt, SharedString, Task, Timeout};
 use pulse::{
   callbacks::ListResult,
   context::{
@@ -27,7 +28,7 @@ use pulse::{
 };
 use rustix::pipe::PipeFlags;
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use super::types::{ChannelVolumes, SinkId, SinkInfo, SourceId, SourceInfo};
 
@@ -52,6 +53,7 @@ pub enum Event {
   Exited(PulseError),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum SetVolume {
   Absolute(u32),
@@ -60,6 +62,7 @@ pub enum SetVolume {
   RelativePercent(i32),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum SetMute {
   Mute,
@@ -67,6 +70,7 @@ pub enum SetMute {
   Toggle,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Command {
   SetSinkVolume(SinkId, SetVolume),
@@ -138,10 +142,17 @@ impl PulseThread {
     self.send_command(Command::Quit(tx));
     let handle = self.handle.take().expect("Pulse thread already quit");
 
+    let shutdown = rx.with_timeout(Duration::from_millis(50), cx.background_executor());
     cx.background_spawn(async move {
-      // TODO: Timeout?
-      let _ = rx.await;
-      let _ = handle.join();
+      match shutdown.await {
+        Ok(Ok(())) => {}
+        Ok(Err(Canceled)) => warn!("Pulse thread shutdown was canceled"),
+        Err(Timeout) => warn!("Pulse thread shutdown timed out"),
+      }
+
+      if let Err(err) = handle.join() {
+        warn!(?err, "Failed to join pulse thread");
+      }
     })
   }
 }
@@ -319,7 +330,30 @@ fn handle_command(
         }
       });
     }
-    Command::SetSourceVolume(id, set) => {}
+    Command::SetSourceVolume(id, set) => {
+      let (mut current, base) = {
+        let state = state.borrow();
+        let Some(source) = state.sources.get(&id.0) else {
+          warn!(?id, "No such source");
+          return;
+        };
+
+        (source.volume.clone(), source.base_volume)
+      };
+
+      match set {
+        SetVolume::Absolute(v) => current.set_percent(base, v),
+        SetVolume::AbsolutePercent(p) => current.set_percent(base, p),
+        SetVolume::Relative(v) if v >= 0 => current.add_percent(base, v as u32),
+        SetVolume::Relative(v) => current.sub_percent(base, v.unsigned_abs()),
+        SetVolume::RelativePercent(p) if p >= 0 => current.add_percent(base, p as u32),
+        SetVolume::RelativePercent(p) => current.sub_percent(base, p.unsigned_abs()),
+      }
+
+      context
+        .introspect()
+        .set_source_volume_by_index(id.0, &current.into(), None);
+    }
     Command::SetSourceMute(id, set) => match set {
       SetMute::Mute => {
         context
@@ -373,7 +407,12 @@ fn handle_event(
   index: u32,
 ) {
   let (Some(facility), Some(operation)) = (facility, operation) else {
-    debug!(?facility, ?operation, index, "Skipping event");
+    debug!(
+      ?facility,
+      ?operation,
+      index,
+      "Skipping event without facility or operation"
+    );
     return;
   };
 
@@ -397,7 +436,7 @@ fn handle_event(
           move |item| PulseState::handle_source_info(&state, item)
         });
       }
-      _ => debug!(?facility, ?operation, index, "Skipping event"),
+      _ => trace!(?facility, ?operation, index, "Skipping event"),
     },
     Operation::Removed => match facility {
       Facility::Sink if state.borrow_mut().sinks.remove(&index).is_some() => {
@@ -406,7 +445,7 @@ fn handle_event(
       Facility::Source if state.borrow_mut().sources.remove(&index).is_some() => {
         let _ = event_tx.send(Event::SourceRemoved(SourceId(index)));
       }
-      _ => debug!(?facility, index, "Skipping remove event"),
+      _ => trace!(?facility, index, "Skipping remove event"),
     },
   }
 }

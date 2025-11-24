@@ -19,7 +19,7 @@ use crate::{
   util::{h_flex, v_flex},
 };
 
-pub struct AudioSinksSection {
+pub struct AudioSinksPanel {
   picker: Entity<Picker<SinksDelegate>>,
   audio_state: Entity<AudioState>,
   _subscriptions: Vec<Subscription>,
@@ -29,9 +29,9 @@ const CONTEXT: &str = "sinks";
 
 actions!(sinks, [VolumeUp, VolumeDown, Mute]);
 
-impl AudioSinksSection {
+impl AudioSinksPanel {
   pub fn view(window: &mut Window, cx: &mut App) -> AnyView {
-    cx.new(|cx| AudioSinksSection::new(window, cx)).into()
+    cx.new(|cx| AudioSinksPanel::new(window, cx)).into()
   }
 
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -127,13 +127,13 @@ impl AudioSinksSection {
   }
 }
 
-impl Focusable for AudioSinksSection {
+impl Focusable for AudioSinksPanel {
   fn focus_handle(&self, cx: &App) -> FocusHandle {
     self.picker.read(cx).focus_handle(cx)
   }
 }
 
-impl Render for AudioSinksSection {
+impl Render for AudioSinksPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
       .key_context(CONTEXT)
