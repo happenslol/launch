@@ -22,6 +22,16 @@ use crate::{
 
 actions!(picker, [SelectNext, SelectPrev]);
 
+// TODO: I don't like the delegate pattern, the composition-y API of the text input feels a lot
+// better. Maybe this could be refactored into multiple pieces:
+// - PickerState<Item> (or just Picker)
+// - PickerResults<Item>
+// - PickerSearchInput
+//
+// Then we can render each entity by passing the state into it.
+//
+// The items would need to implement IntoElement or something? The main thing we want to abstract
+// over is the items/matches/selected_index and the search task/cancellation logic.
 pub trait PickerDelegate: Sized + 'static {
   type ListItem: Clone;
 
@@ -63,6 +73,7 @@ pub struct Picker<D: PickerDelegate> {
 
 pub enum PickerEvent<D: PickerDelegate> {
   Picked(D::ListItem),
+  QueryChanged(String),
 }
 
 impl<D: PickerDelegate> EventEmitter<PickerEvent<D>> for Picker<D> {}
@@ -81,13 +92,14 @@ impl<D: PickerDelegate> Picker<D> {
       KeyBinding::new("up", SelectPrev, None),
     ]);
 
+    let has_items = !items.is_empty();
     let search_input = cx.new(|cx| InputState::new(window, cx));
 
     let mut this = Self {
       delegate,
       items: Arc::new(items),
       search_input: search_input.clone(),
-      selected_index: None,
+      selected_index: if has_items { Some(0) } else { None },
       matches: None,
       current_query: String::new(),
       list_scroll_handle: UniformListScrollHandle::new(),
@@ -112,6 +124,7 @@ impl<D: PickerDelegate> Picker<D> {
           }
 
           this.current_query = new_value.to_string();
+          cx.emit(PickerEvent::QueryChanged(this.current_query.clone()));
           this.update_matches(window, cx);
         }
         _ => {}
@@ -128,6 +141,10 @@ impl<D: PickerDelegate> Picker<D> {
     cx: &mut Context<Self>,
   ) {
     self.items = Arc::new(items);
+    if self.selected_index.is_none() && !self.items.is_empty() {
+      self.selected_index = Some(0);
+    }
+
     cx.notify();
 
     self.update_matches(window, cx);
@@ -258,12 +275,12 @@ impl<D: PickerDelegate> Picker<D> {
     div()
       .id(("item", ix))
       .cursor_pointer()
-      .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+      .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
         let resolved_ix = this.matches.as_ref().map_or(ix, |matches| matches[ix].0);
         cx.emit(PickerEvent::Picked(this.items[resolved_ix].clone()));
 
         // Maintain focus on the search input
-        cx.focus_self(window);
+        cx.stop_propagation();
       }))
       .child(
         self

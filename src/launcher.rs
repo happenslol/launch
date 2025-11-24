@@ -90,6 +90,10 @@ impl Launcher {
       window,
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
         PickerEvent::Picked(item) => this.launch(item.clone(), window, cx),
+        PickerEvent::QueryChanged(query) => {
+          println!("Query changed: {query}");
+          let mut context = fend_core::Context::new();
+        },
       },
     )];
 

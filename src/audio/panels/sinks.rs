@@ -70,8 +70,8 @@ impl AudioSinksPanel {
           }
         },
       ),
-      cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| match ev {
-        PickerEvent::Picked(item) => {
+      cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
+        if let PickerEvent::Picked(item) = ev {
           this
             .audio_state
             .update(cx, |state, cx| state.set_default_sink(item.id, cx))

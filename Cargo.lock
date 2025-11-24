@@ -1636,6 +1636,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fend-core"
+version = "1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f775cab5068a34b942b110dcb11f42c96d376b681c45e604884da6059cb9d2c"
+
+[[package]]
 name = "filedescriptor"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2814,6 +2820,7 @@ dependencies = [
  "async-process",
  "dirs 6.0.0",
  "exec",
+ "fend-core",
  "flume",
  "fork",
  "freedesktop-desktop-entry",

@@ -8,6 +8,7 @@ mod input;
 mod launcher;
 mod logging;
 mod picker;
+mod picker2;
 mod util;
 mod xdg;
 
