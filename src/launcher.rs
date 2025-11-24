@@ -53,7 +53,7 @@ impl Launcher {
         exclusive_zone: None,
         exclusive_edge: None,
         margin: None,
-        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        keyboard_interactivity: KeyboardInteractivity::Exclusive,
       }),
       ..Default::default()
     }
@@ -133,9 +133,20 @@ fn get_matches(matcher: &mut Matcher, items: &[Item], query: &str) -> Vec<(usize
   let needle = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
   let mut buf = Vec::new();
   for (i, item) in items.iter().enumerate() {
-    if let Some(score) = needle.score(Utf32Str::new(item.name.as_ref(), &mut buf), matcher) {
+    let mut result_score: Option<u32> = None;
+    for term in &item.terms {
+      if let Some(score) = needle.score(Utf32Str::new(term, &mut buf), matcher) {
+        result_score = if let Some(result_score) = result_score {
+          Some(result_score.max(score))
+        } else {
+          Some(score)
+        }
+      };
+    }
+
+    if let Some(score) = result_score {
       matches.push((i, score));
-    };
+    }
   }
 
   matches
@@ -156,6 +167,8 @@ impl RootDelegate {
 #[derive(Clone)]
 pub struct Item {
   pub name: SharedString,
+  // TODO: Maybe we can put these in contiguous memory?
+  pub terms: Vec<String>,
   pub action: ItemAction,
 }
 

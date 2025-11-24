@@ -32,6 +32,7 @@ ropey = { version = "=2.0.0-beta.1", features = [
   "metric_utf16",
 ] }
 smallvec = "1.15.1"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
 
 [dependencies.gpui]
 git = "https://github.com/zed-industries/zed"

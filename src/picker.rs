@@ -76,7 +76,9 @@ impl<D: PickerDelegate> Picker<D> {
   ) -> Self {
     cx.bind_keys([
       KeyBinding::new("ctrl-j", SelectNext, None),
+      KeyBinding::new("down", SelectNext, None),
       KeyBinding::new("ctrl-k", SelectPrev, None),
+      KeyBinding::new("up", SelectPrev, None),
     ]);
 
     let search_input = cx.new(|cx| InputState::new(window, cx));
@@ -148,7 +150,10 @@ impl<D: PickerDelegate> Picker<D> {
     };
 
     let resolved_ix = self.matches.as_ref().map_or(ix, |matches| matches[ix].0);
-    let item = &self.items[resolved_ix];
+    let Some(item) = self.items.get(resolved_ix) else {
+      return;
+    };
+
     cx.emit(PickerEvent::Picked(item.clone()));
   }
 

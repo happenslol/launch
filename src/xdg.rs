@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashSet};
+
 use anyhow::Result;
 use fork::Fork;
 use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths, get_languages_from_env};
@@ -12,16 +14,41 @@ pub fn get_items() -> Result<Vec<Item>> {
     .entries(Some(&locales))
     .collect::<Vec<_>>();
 
-  let items = desktop_entries
-    .iter()
-    .filter(|entry| !entry.no_display())
-    .map(|entry| Item {
-      name: SharedString::from(entry.name(&locales).unwrap().to_string()),
-      action: ItemAction::Launch(Box::new(entry.clone())),
-    })
-    .collect();
+  let mut result = BTreeMap::new();
+  for entry in desktop_entries {
+    if entry.no_display() || result.contains_key(&entry.appid) {
+      continue;
+    }
 
-  Ok(items)
+    let name = entry.name(&locales).unwrap().to_string();
+
+    let mut terms = HashSet::new();
+    terms.insert(name.clone());
+    terms.insert(entry.appid.clone());
+
+    if let Some(generic_name) = entry.generic_name(&locales) {
+      terms.insert(generic_name.to_string());
+    }
+
+    if let Some(categories) = entry.categories() {
+      terms.extend(categories.iter().map(|cat| cat.to_string()));
+    }
+
+    if let Some(keywords) = entry.keywords(&locales) {
+      terms.extend(keywords.iter().map(|kw| kw.to_string()));
+    }
+
+    result.insert(
+      entry.appid.clone(),
+      Item {
+        name: SharedString::from(name),
+        terms: terms.into_iter().collect(),
+        action: ItemAction::Launch(Box::new(entry.clone())),
+      },
+    );
+  }
+
+  Ok(result.into_values().collect())
 }
 
 pub fn start(entry: &DesktopEntry) -> Result<()> {
