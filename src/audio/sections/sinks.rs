@@ -4,6 +4,10 @@ use gpui::{
   AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
   Render, Styled, Subscription, Task, Window, actions, div, prelude::*, rgb,
 };
+use nucleo_matcher::{
+  Config, Matcher, Utf32Str,
+  pattern::{CaseMatching, Normalization, Pattern},
+};
 
 use crate::{
   audio::{
@@ -185,13 +189,54 @@ impl PickerDelegate for SinksDelegate {
 
   fn update_matches(
     &mut self,
-    _window: &mut Window,
-    _cx: &mut Context<Picker<Self>>,
-    _query: String,
+    window: &mut Window,
+    cx: &mut Context<Picker<Self>>,
+    query: String,
     _cancel_flag: Arc<AtomicBool>,
-    _search_id: usize,
-    _items: Arc<Vec<Self::ListItem>>,
+    search_id: usize,
+    items: Arc<Vec<Self::ListItem>>,
   ) -> Task<()> {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+    let mut matches = Vec::new();
+    let mut buf = Vec::new();
+
+    for (index, item) in items.iter().enumerate() {
+      let mut max_score: Option<u32> = None;
+
+      if let Some(score) = item
+        .name
+        .as_ref()
+        .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))
+      {
+        max_score = if let Some(max_score) = max_score {
+          Some(max_score.max(score))
+        } else {
+          Some(score)
+        }
+      }
+
+      if let Some(score) = item
+        .description
+        .as_ref()
+        .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))
+      {
+        max_score = if let Some(max_score) = max_score {
+          Some(max_score.max(score))
+        } else {
+          Some(score)
+        }
+      }
+
+      if let Some(score) = max_score {
+        matches.push((index, score));
+      }
+    }
+
+    cx.defer_in(window, move |picker, _window, cx| {
+      picker.complete_search(cx, search_id, matches);
+    });
+
     Task::ready(())
   }
 }
