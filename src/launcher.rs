@@ -1,6 +1,9 @@
-use std::sync::{
-  Arc,
-  atomic::{AtomicBool, Ordering},
+use std::{
+  sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+  },
+  time::Instant,
 };
 
 use async_lock::Mutex;
@@ -17,16 +20,17 @@ use nucleo_matcher::{
   Config, Matcher, Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
-use tracing::{error, trace};
+use tracing::{debug, error, trace};
 
 use crate::{
   audio,
+  db::Db,
   picker::{Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
   xdg,
 };
 
-actions!(root, [Quit, SelectNext, SelectPrev]);
+actions!(launcher, [Quit]);
 
 type SectionView = dyn Fn(&mut Window, &mut App) -> AnyView + Send + Sync;
 
@@ -66,6 +70,13 @@ impl Launcher {
   fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     cx.bind_keys([KeyBinding::new("escape", Quit, None)]);
 
+    let db = Db::global(cx);
+    cx.spawn(async move |_, _| {
+      let _launches = db.get_launches().await;
+      // TODO: Use for scoring
+    })
+    .detach();
+
     let mut items = vec![];
 
     items.extend(xdg::get_items().unwrap());
@@ -78,7 +89,7 @@ impl Launcher {
       &picker,
       window,
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
-        PickerEvent::Picked(item) => this.launch(item, window, cx),
+        PickerEvent::Picked(item) => this.launch(item.clone(), window, cx),
       },
     )];
 
@@ -99,18 +110,25 @@ impl Launcher {
     cx.quit();
   }
 
-  fn launch(&mut self, item: &Item, window: &mut Window, cx: &mut Context<Self>) {
-    match &item.action {
-      ItemAction::Launch(entry) => match xdg::start(entry) {
-        Ok(_) => cx.quit(),
-        Err(err) => error!(?err, "Failed to start process"),
-      },
-      ItemAction::Section(make_section) => {
-        let section = make_section(window, cx);
-        self.active_section = Some(section);
-        cx.notify();
-      }
-    }
+  fn launch(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
+    let db = Db::global(cx);
+
+    cx.spawn_in(window, async move |this, cx| {
+      let _ = db.record_launch(&item.id).await;
+
+      let _ = this.update_in(cx, |this, window, cx| match &item.action {
+        ItemAction::Launch(entry) => match xdg::start(entry) {
+          Ok(_) => cx.quit(),
+          Err(err) => error!(?err, "Failed to start process"),
+        },
+        ItemAction::Section(make_section) => {
+          let section = make_section(window, cx);
+          this.active_section = Some(section);
+          cx.notify();
+        }
+      });
+    })
+    .detach();
   }
 }
 
@@ -128,6 +146,8 @@ impl Render for Launcher {
 }
 
 fn get_matches(matcher: &mut Matcher, items: &[Item], query: &str) -> Vec<(usize, u32)> {
+  let start_time = Instant::now();
+
   let mut matches = Vec::new();
 
   let needle = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
@@ -149,6 +169,8 @@ fn get_matches(matcher: &mut Matcher, items: &[Item], query: &str) -> Vec<(usize
     }
   }
 
+  debug!(duration = ?start_time.elapsed(), count = items.len(), "Done matching root items");
+
   matches
 }
 
@@ -166,6 +188,7 @@ impl RootDelegate {
 
 #[derive(Clone)]
 pub struct Item {
+  pub id: String,
   pub name: SharedString,
   // TODO: Maybe we can put these in contiguous memory?
   pub terms: Vec<String>,

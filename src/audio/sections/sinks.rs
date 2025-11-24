@@ -32,8 +32,10 @@ impl AudioSinksSection {
 
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     cx.bind_keys([
-      KeyBinding::new("ctrl-+", VolumeUp, Some(CONTEXT)),
-      KeyBinding::new("ctrl--", VolumeDown, Some(CONTEXT)),
+      KeyBinding::new("ctrl-l", VolumeUp, Some(CONTEXT)),
+      KeyBinding::new("ctrl-h", VolumeDown, Some(CONTEXT)),
+      KeyBinding::new("ctrl-up", VolumeUp, Some(CONTEXT)),
+      KeyBinding::new("ctrl-down", VolumeDown, Some(CONTEXT)),
       KeyBinding::new("ctrl-m", Mute, Some(CONTEXT)),
     ]);
 
@@ -95,7 +97,7 @@ impl AudioSinksSection {
     self
       .audio_state
       .read(cx)
-      .set_sink_volume(selected_id, SetVolume::RelativePercent(5));
+      .set_sink_volume(selected_id, SetVolume::RelativePercent(1));
   }
 
   fn volume_down(&mut self, _: &VolumeDown, _window: &mut Window, cx: &mut Context<Self>) {
@@ -106,7 +108,7 @@ impl AudioSinksSection {
     self
       .audio_state
       .read(cx)
-      .set_sink_volume(selected_id, SetVolume::RelativePercent(-5));
+      .set_sink_volume(selected_id, SetVolume::RelativePercent(-1));
   }
 
   fn mute(&mut self, _: &Mute, _window: &mut Window, cx: &mut Context<Self>) {

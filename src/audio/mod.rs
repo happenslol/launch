@@ -177,7 +177,7 @@ impl AudioState {
     self.pulse.send_command(Command::SetSinkVolume(sink, set))
   }
 
-  pub fn set_default_source(&self, source: SourceId, cx: &mut Context<Self>) -> Task<Result<()>> {
+  pub fn _set_default_source(&self, source: SourceId, cx: &mut Context<Self>) -> Task<Result<()>> {
     self.async_command(cx, |tx| Command::SetDefaultSource(source, tx))
   }
 }

@@ -41,6 +41,7 @@ pub fn get_items() -> Result<Vec<Item>> {
     result.insert(
       entry.appid.clone(),
       Item {
+        id: entry.appid.clone(),
         name: SharedString::from(name),
         terms: terms.into_iter().collect(),
         action: ItemAction::Launch(Box::new(entry.clone())),

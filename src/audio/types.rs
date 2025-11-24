@@ -83,12 +83,10 @@ impl From<pulse::volume::ChannelVolumes> for ChannelVolumes {
 impl From<ChannelVolumes> for pulse::volume::ChannelVolumes {
   fn from(v: ChannelVolumes) -> Self {
     let mut result = pulse::volume::ChannelVolumes::default();
-    result.init();
-    result.set_len(v.channels);
 
-    // TODO: Is this correct? set seems to set the first n channels, seems unintuitive
-    for (index, volume) in v.volumes.iter().enumerate().rev() {
-      result.set(index as u8, pulse::volume::Volume(*volume));
+    result.set_len(v.channels);
+    for (index, volume) in result.get_mut().iter_mut().enumerate() {
+      *volume = pulse::volume::Volume(v.volumes[index]);
     }
 
     result

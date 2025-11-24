@@ -2,6 +2,7 @@
 
 mod assets;
 mod audio;
+mod db;
 mod dbus;
 mod input;
 mod launcher;
@@ -26,6 +27,7 @@ fn main() -> Result<()> {
   Application::new().with_assets(Assets).run(move |cx| {
     dbus::init(cx);
     audio::init(cx);
+    db::init(cx);
     InputState::init(cx);
 
     load_embedded_fonts(cx).unwrap();
