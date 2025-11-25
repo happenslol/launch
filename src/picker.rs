@@ -8,8 +8,8 @@ use std::{
 
 use gpui::{
   App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding,
-  ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, actions, div, prelude::*,
-  uniform_list,
+  ScrollStrategy, StyleRefinement, Subscription, Task, UniformListScrollHandle, Window, actions,
+  div, prelude::*, uniform_list,
 };
 
 use crate::{
@@ -327,3 +327,51 @@ impl<D: PickerDelegate> Render for Picker<D> {
       )
   }
 }
+
+pub fn picker_input<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerInput<D> {
+  PickerInput {
+    picker: picker.clone(),
+    style: StyleRefinement::default(),
+  }
+}
+
+pub struct PickerInput<D: PickerDelegate> {
+  picker: Entity<Picker<D>>,
+  style: StyleRefinement,
+}
+
+impl<D: PickerDelegate> Styled for PickerInput<D> {
+  fn style(&mut self) -> &mut StyleRefinement {
+    &mut self.style
+  }
+}
+
+// impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
+//   fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+//     todo!()
+//   }
+// }
+
+pub fn picker_results<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerResults<D> {
+  PickerResults {
+    picker: picker.clone(),
+    style: StyleRefinement::default(),
+  }
+}
+
+pub struct PickerResults<D: PickerDelegate> {
+  picker: Entity<Picker<D>>,
+  style: StyleRefinement,
+}
+
+impl<D: PickerDelegate> Styled for PickerResults<D> {
+  fn style(&mut self) -> &mut StyleRefinement {
+    &mut self.style
+  }
+}
+
+// impl<D: PickerDelegate> RenderOnce for PickerResults<D> {
+//   fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+//     todo!()
+//   }
+// }

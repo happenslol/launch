@@ -91,9 +91,16 @@ impl Launcher {
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
         PickerEvent::Picked(item) => this.launch(item.clone(), window, cx),
         PickerEvent::QueryChanged(query) => {
-          println!("Query changed: {query}");
-          let mut context = fend_core::Context::new();
-        },
+          let query = query.clone();
+
+          cx.background_spawn(async move {
+            println!("Query changed: {query}");
+            let mut context = fend_core::Context::new();
+            let result = fend_core::evaluate(&query, &mut context);
+            println!("Result: {result:#?}");
+          })
+          .detach();
+        }
       },
     )];
 
@@ -142,10 +149,10 @@ impl Render for Launcher {
       .on_action(cx.listener(Self::quit))
       .size_full()
       .bg(rgba(0xFFFFFFFF))
-      .when_some(self.active_panel.as_ref(), |this, panel| {
-        this.child(panel.clone())
+      .when_some(self.active_panel.as_ref(), |div, panel| {
+        div.child(panel.clone())
       })
-      .when_none(&self.active_panel, |this| this.child(self.picker.clone()))
+      .when_none(&self.active_panel, |div| div.child(self.picker.clone()))
   }
 }
 

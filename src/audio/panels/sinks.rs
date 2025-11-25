@@ -58,18 +58,19 @@ impl AudioSinksPanel {
     let picker = cx.new(|cx| Picker::new(delegate, sinks, window, cx));
 
     let subscriptions = vec![
-      cx.subscribe_in(
-        &audio_state,
-        window,
-        |this, audio_state, ev, window, cx| match ev {
-          AudioEvent::SinksChanged => {
-            let sinks = audio_state.read(cx).sinks.values().cloned().collect();
-            this.picker.update(cx, |picker, cx| {
-              picker.set_items(sinks, window, cx);
-            });
-          }
-        },
-      ),
+      cx.subscribe_in(&audio_state, window, |this, audio_state, ev, window, cx| {
+        // TODO: Probably better to not replace the entire list and do a new search every time the
+        // volume changes, maybe we can differentiate between changes that affect the search and
+        // others?
+        // The sinks can pull their volume directly from the audio global.
+        if let AudioEvent::SinksChanged = ev {
+          let sinks = audio_state.read(cx).sinks.values().cloned().collect();
+          this.picker.update(cx, |picker, cx| {
+            println!("Updating sinks");
+            picker.set_items(sinks, window, cx);
+          });
+        }
+      }),
       cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
         if let PickerEvent::Picked(item) = ev {
           this

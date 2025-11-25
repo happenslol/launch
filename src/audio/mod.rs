@@ -26,6 +26,7 @@ impl Global for GlobalAudioState {}
 
 pub enum AudioEvent {
   SinksChanged,
+  SourcesChanged,
 }
 
 pub struct AudioState {
@@ -122,30 +123,36 @@ impl AudioState {
       // Source events
       SourceFound(source) => this.update(cx, |this, cx| {
         this.sources.insert(source.id, source);
+        cx.emit(AudioEvent::SinksChanged);
         cx.notify()
       })?,
       SourceInfoChanged(source) => this.update(cx, |this, cx| {
         this.sources.insert(source.id, source);
+        cx.emit(AudioEvent::SinksChanged);
         cx.notify()
       })?,
       SourceVolumeChanged(source, volume) => this.update(cx, |this, cx| {
         if let Some(source) = this.sources.get_mut(&source) {
           source.volume = volume;
+          cx.emit(AudioEvent::SinksChanged);
           cx.notify();
         }
       })?,
       SourceMuteChanged(source, muted) => this.update(cx, |this, cx| {
         if let Some(source) = this.sources.get_mut(&source) {
           source.mute = muted;
+          cx.emit(AudioEvent::SinksChanged);
           cx.notify();
         }
       })?,
       SourceRemoved(source) => this.update(cx, |this, cx| {
         this.sources.remove(&source);
+        cx.emit(AudioEvent::SinksChanged);
         cx.notify();
       })?,
       DefaultSourceChanged(default) => this.update(cx, |this, cx| {
         this.default_source = default;
+        cx.emit(AudioEvent::SinksChanged);
         cx.notify();
       })?,
 

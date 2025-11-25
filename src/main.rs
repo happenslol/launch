@@ -12,7 +12,7 @@ mod picker2;
 mod util;
 mod xdg;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use gpui::{App, Application};
 use tracing::error;
 
@@ -32,15 +32,18 @@ fn main() -> Result<()> {
     InputState::init(cx);
 
     load_embedded_fonts(cx).unwrap();
-    show_launcher(cx);
+    if let Err(err) = show_launcher(cx) {
+      error!(?err, "Failed to launch");
+      cx.quit();
+    }
   });
 
   Ok(())
 }
 
-fn show_launcher(cx: &mut App) {
-  if let Err(err) = cx.open_window(Launcher::get_window_options(), Launcher::view) {
-    error!(?err, "Failed to open window");
-    cx.quit();
-  }
+fn show_launcher(cx: &mut App) -> Result<()> {
+  cx.open_window(Launcher::get_window_options(), Launcher::view)
+    .context("Failed to open window")?;
+
+  Ok(())
 }
