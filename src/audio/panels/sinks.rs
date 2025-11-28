@@ -66,7 +66,6 @@ impl AudioSinksPanel {
         if let AudioEvent::SinksChanged = ev {
           let sinks = audio_state.read(cx).sinks.values().cloned().collect();
           this.picker.update(cx, |picker, cx| {
-            println!("Updating sinks");
             picker.set_items(sinks, window, cx);
           });
         }

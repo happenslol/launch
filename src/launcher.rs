@@ -63,11 +63,7 @@ impl Launcher {
     }
   }
 
-  pub fn view(window: &mut Window, cx: &mut App) -> Entity<Self> {
-    cx.new(|cx| Self::new(window, cx))
-  }
-
-  fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+  pub fn new(window: &mut Window, cx: &mut Context<Self>, panel: Option<String>) -> Self {
     cx.bind_keys([KeyBinding::new("escape", Quit, None)]);
 
     let db = Db::global(cx);
@@ -81,6 +77,19 @@ impl Launcher {
 
     items.extend(xdg::get_items().unwrap());
     items.extend(audio::panels::get_items().unwrap());
+
+    let active_panel = panel.as_ref().and_then(|panel| {
+      items.iter().find(|item| &item.id == panel).map_or_else(
+        || {
+          error!("Could not find panel with id {panel}");
+          None
+        },
+        |item| match &item.action {
+          ItemAction::Panel(make_panel) => Some(make_panel(window, cx)),
+          _ => None,
+        },
+      )
+    });
 
     let picker = cx.new(|cx| Picker::new(RootDelegate::new(), items, window, cx));
     cx.focus_view(&picker, window);
@@ -106,7 +115,7 @@ impl Launcher {
 
     Self {
       picker,
-      active_panel: None, // Some(audio_section),
+      active_panel,
       _subscriptions: subscriptions,
     }
   }
