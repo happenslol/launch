@@ -322,12 +322,13 @@ impl<D: PickerDelegate> Render for Picker<D> {
               .collect()
           }),
         )
-        .track_scroll(self.list_scroll_handle.clone())
+        .track_scroll(&self.list_scroll_handle)
         .h_full(),
       )
   }
 }
 
+#[allow(dead_code)]
 pub fn picker_input<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerInput<D> {
   PickerInput {
     picker: picker.clone(),
@@ -335,6 +336,7 @@ pub fn picker_input<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerInpu
   }
 }
 
+#[allow(dead_code)]
 pub struct PickerInput<D: PickerDelegate> {
   picker: Entity<Picker<D>>,
   style: StyleRefinement,
@@ -352,6 +354,7 @@ impl<D: PickerDelegate> Styled for PickerInput<D> {
 //   }
 // }
 
+#[allow(dead_code)]
 pub fn picker_results<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerResults<D> {
   PickerResults {
     picker: picker.clone(),
@@ -359,6 +362,7 @@ pub fn picker_results<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerRe
   }
 }
 
+#[allow(dead_code)]
 pub struct PickerResults<D: PickerDelegate> {
   picker: Entity<Picker<D>>,
   style: StyleRefinement,

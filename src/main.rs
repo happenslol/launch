@@ -3,10 +3,10 @@
 mod assets;
 mod audio;
 mod db;
-mod dbus;
 mod input;
 mod launcher;
 mod logging;
+mod network;
 mod picker;
 mod picker2;
 mod util;
@@ -33,7 +33,6 @@ fn main() -> Result<()> {
   let args = Args::try_parse()?;
 
   Application::new().with_assets(Assets).run(move |cx| {
-    dbus::init(cx);
     audio::init(cx);
     db::init(cx);
     InputState::init(cx);

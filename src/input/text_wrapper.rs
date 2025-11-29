@@ -414,7 +414,7 @@ impl LineLayout {
     for (i, line) in self.wrapped_lines.iter().enumerate() {
       let is_last = i + 1 == self.wrapped_lines.len();
       if x <= line.width {
-        let mut ix = line.index_for_x(x);
+        let mut ix = line.closest_index_for_x(x);
         if !is_last && ix == line.text.len() {
           // For soft wrap line, we can't put the cursor at the end of the line.
           let c_len = line.text.chars().last().map(|c| c.len_utf8()).unwrap_or(0);
@@ -444,7 +444,7 @@ impl LineLayout {
       let is_last = i + 1 == self.wrapped_lines.len();
       let line_bottom = line_top + line_height;
       if pos.y >= line_top && pos.y < line_bottom {
-        let mut ix = line.index_for_x(pos.x);
+        let mut ix = line.closest_index_for_x(pos.x);
         if !is_last && ix == line.text.len() {
           // For soft wrap line, we can't put the cursor at the end of the line.
           let c_len = line.text.chars().last().map(|c| c.len_utf8()).unwrap_or(0);
@@ -470,7 +470,7 @@ impl LineLayout {
     for line in self.wrapped_lines.iter() {
       let line_bottom = line_top + line_height;
       if pos.y >= line_top && pos.y < line_bottom {
-        let ix = line.index_for_x(pos.x);
+        let ix = line.closest_index_for_x(pos.x);
         return Some(offset + ix);
       }
 

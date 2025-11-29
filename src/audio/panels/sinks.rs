@@ -1,8 +1,8 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
-  AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
-  Render, Styled, Subscription, Task, Window, actions, div, prelude::*, rgb,
+  App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render,
+  Styled, Subscription, Task, Window, actions, div, prelude::*, rgb,
 };
 use nucleo_matcher::{
   Config, Matcher, Utf32Str,
@@ -30,10 +30,6 @@ const CONTEXT: &str = "sinks";
 actions!(sinks, [VolumeUp, VolumeDown, Mute]);
 
 impl AudioSinksPanel {
-  pub fn view(window: &mut Window, cx: &mut App) -> AnyView {
-    cx.new(|cx| AudioSinksPanel::new(window, cx)).into()
-  }
-
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     cx.bind_keys([
       KeyBinding::new("ctrl-l", VolumeUp, Some(CONTEXT)),

@@ -1,5 +1,5 @@
-mod pulse;
 pub mod panels;
+mod pulse;
 mod types;
 
 use std::collections::BTreeMap;
@@ -26,6 +26,7 @@ impl Global for GlobalAudioState {}
 
 pub enum AudioEvent {
   SinksChanged,
+  #[allow(dead_code)]
   SourcesChanged,
 }
 

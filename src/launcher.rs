@@ -25,6 +25,7 @@ use tracing::{error, trace};
 use crate::{
   audio,
   db::Db,
+  network,
   picker::{Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
   xdg,
@@ -77,6 +78,7 @@ impl Launcher {
 
     items.extend(xdg::get_items().unwrap());
     items.extend(audio::panels::get_items().unwrap());
+    items.extend(network::get_items().unwrap());
 
     let active_panel = panel.as_ref().and_then(|panel| {
       items.iter().find(|item| &item.id == panel).map_or_else(
@@ -92,23 +94,28 @@ impl Launcher {
     });
 
     let picker = cx.new(|cx| Picker::new(RootDelegate::new(), items, window, cx));
-    cx.focus_view(&picker, window);
+
+    // Only focus the main picker if we're not launching directly into a panel, in which case the
+    // panel will take care of focusing itself.
+    if active_panel.is_none() {
+      cx.focus_view(&picker, window);
+    }
 
     let subscriptions = vec![cx.subscribe_in(
       &picker,
       window,
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
         PickerEvent::Picked(item) => this.launch(item.clone(), window, cx),
-        PickerEvent::QueryChanged(query) => {
-          let query = query.clone();
-
-          cx.background_spawn(async move {
-            println!("Query changed: {query}");
-            let mut context = fend_core::Context::new();
-            let result = fend_core::evaluate(&query, &mut context);
-            println!("Result: {result:#?}");
-          })
-          .detach();
+        PickerEvent::QueryChanged(_query) => {
+          // let query = query.clone();
+          //
+          // cx.background_spawn(async move {
+          //   println!("Query changed: {query}");
+          //   let mut context = fend_core::Context::new();
+          //   let result = fend_core::evaluate(&query, &mut context);
+          //   println!("Result: {result:#?}");
+          // })
+          // .detach();
         }
       },
     )];
