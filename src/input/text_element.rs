@@ -726,6 +726,8 @@ impl Element for TextElement {
           wrap_width,
         )
         .width;
+    } else if state.mode.is_single_line() && !lines.is_empty() {
+      longest_line_width = lines[0].size(line_height).width;
     }
     last_layout.lines = Rc::new(lines);
 

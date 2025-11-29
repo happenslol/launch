@@ -30,7 +30,3 @@
 - fuzzy file search
 - process kill
 - color picker
-
-# bugs
-
-- scrolling in input

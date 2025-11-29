@@ -336,7 +336,6 @@ impl InputState {
   /// - The index of the line (zero-based) containing the offset.
   /// - The index of the sub-line (zero-based) within the line containing the offset.
   /// - The position of the offset.
-  #[allow(unused)]
   pub fn line_and_position_for_offset(
     &self,
     offset: usize,
@@ -434,7 +433,6 @@ impl InputState {
   /// Set with disabled mode.
   ///
   /// See also: [`Self::set_disabled`], [`Self::is_disabled`].
-  #[allow(unused)]
   pub fn disabled(mut self, disabled: bool) -> Self {
     self.disabled = disabled;
     self
