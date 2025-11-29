@@ -2,54 +2,61 @@ use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
 use fork::Fork;
-use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths, get_languages_from_env};
-use gpui::SharedString;
+use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths};
+use gpui::Resource;
 use tracing::error;
 
-use crate::launcher::{Item, ItemAction};
+use crate::launcher::RootItem;
 
-pub fn get_items() -> Result<Vec<Item>> {
-  let locales = get_languages_from_env();
+pub fn get_items(locales: &[String]) -> Result<(Vec<RootItem>, Vec<String>)> {
   let desktop_entries = Iter::new(default_paths())
-    .entries(Some(&locales))
+    .entries(Some(locales))
     .collect::<Vec<_>>();
 
   let mut result = BTreeMap::new();
+  let mut icon_names = HashSet::new();
+
   for entry in desktop_entries {
     if entry.no_display() || result.contains_key(&entry.appid) {
       continue;
     }
 
-    let name = entry.name(&locales).unwrap().to_string();
-
-    let mut terms = HashSet::new();
-    terms.insert(name.clone());
-    terms.insert(entry.appid.clone());
-
-    if let Some(generic_name) = entry.generic_name(&locales) {
-      terms.insert(generic_name.to_string());
+    if let Some(icon) = entry.icon() {
+      icon_names.insert(icon.to_string());
     }
 
-    if let Some(categories) = entry.categories() {
-      terms.extend(categories.iter().map(|cat| cat.to_string()));
-    }
-
-    if let Some(keywords) = entry.keywords(&locales) {
-      terms.extend(keywords.iter().map(|kw| kw.to_string()));
-    }
-
+    let name = entry.name(locales).unwrap().to_string();
     result.insert(
       entry.appid.clone(),
-      Item {
-        id: entry.appid.clone(),
-        name: SharedString::from(name),
-        terms: terms.into_iter().collect(),
-        action: ItemAction::Launch(Box::new(entry.clone())),
+      RootItem::App {
+        name: name.into(),
+        entry,
       },
     );
   }
 
-  Ok(result.into_values().collect())
+  Ok((
+    result.into_values().collect(),
+    icon_names.into_iter().collect(),
+  ))
+}
+
+pub fn get_icon(name: &str) -> Option<Resource> {
+  let scale = Some(1);
+  let size = Some(24);
+
+  let mut lookup = freedesktop_icons::lookup(name).force_svg().with_cache();
+
+  if let Some(scale) = scale {
+    lookup = lookup.with_scale(scale);
+  }
+
+  if let Some(size) = size {
+    lookup = lookup.with_size(size);
+  }
+
+  let result = lookup.find()?;
+  Some(Resource::Path(result.into()))
 }
 
 pub fn start(entry: &DesktopEntry) -> Result<()> {

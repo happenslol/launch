@@ -15,7 +15,7 @@ use crate::{
     pulse::{SetMute, SetVolume},
     types::{SinkId, SinkInfo},
   },
-  picker::{Picker, PickerDelegate, PickerEvent},
+  picker::{ItemMatch, Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
 };
 
@@ -154,6 +154,7 @@ impl PickerDelegate for SinksDelegate {
     cx: &mut Context<Picker<Self>>,
     item: &Self::ListItem,
     is_selected: bool,
+    _matched: Option<ItemMatch>,
   ) -> impl IntoElement {
     let is_default = self.audio_state.read(cx).default_sink == Some(item.id);
 
@@ -192,6 +193,14 @@ impl PickerDelegate for SinksDelegate {
     search_id: usize,
     items: Arc<Vec<Self::ListItem>>,
   ) -> Task<()> {
+    if query.is_empty() {
+      cx.defer_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, None);
+      });
+
+      return Task::ready(());
+    }
+
     let mut matcher = Matcher::new(Config::DEFAULT);
     let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
     let mut matches = Vec::new();
@@ -230,7 +239,7 @@ impl PickerDelegate for SinksDelegate {
     }
 
     cx.defer_in(window, move |picker, _window, cx| {
-      picker.complete_search(cx, search_id, matches);
+      picker.complete_search(cx, search_id, Some(matches));
     });
 
     Task::ready(())

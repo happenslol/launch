@@ -16,6 +16,10 @@ pub fn init() {
           .parse()
           .unwrap(),
       )
+      // Hide warnings when invalid SVGs are parsed, this is pretty common and we can't do anything
+      // about it
+      .add_directive("usvg=error".parse().unwrap())
+      .add_directive("resvg=error".parse().unwrap())
       .add_directive(LevelFilter::WARN.into())
   });
 

@@ -11,20 +11,19 @@ use gpui::{
 };
 
 use crate::{
-  launcher::{Item, ItemAction},
+  launcher::RootItem,
   network::types::{DeviceConnection, DeviceInfo, KnownDeviceConnection},
-  picker::{Picker, PickerDelegate},
+  picker::{ItemMatch, Picker, PickerDelegate},
   util::{h_flex, v_flex},
 };
 
-pub fn get_items() -> Result<Vec<Item>> {
-  Ok(vec![Item {
+pub fn get_items() -> Result<Vec<RootItem>> {
+  Ok(vec![RootItem::Panel {
     id: "networks".into(),
     name: "Networks".into(),
+    icon: None,
     terms: vec!["net".into(), "network".into(), "ethernet".into()],
-    action: ItemAction::Panel(Arc::new(|window, cx| {
-      cx.new(|cx| NetworkPanel::new(window, cx)).into()
-    })),
+    view: Arc::new(|window, cx| cx.new(|cx| NetworkPanel::new(window, cx)).into()),
   }])
 }
 
@@ -196,6 +195,7 @@ impl PickerDelegate for NetworkDelegate {
     _cx: &mut Context<Picker<Self>>,
     item: &Self::ListItem,
     is_selected: bool,
+    _matched: Option<ItemMatch>,
   ) -> impl IntoElement {
     h_flex()
       .w_full()

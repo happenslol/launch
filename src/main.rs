@@ -1,4 +1,5 @@
 #![feature(bool_to_result)]
+#![feature(vec_into_chunks)]
 
 mod assets;
 mod audio;

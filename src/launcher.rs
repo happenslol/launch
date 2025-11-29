@@ -1,16 +1,15 @@
 use std::{
-  sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-  },
+  cmp::Reverse,
+  collections::HashMap,
+  sync::{Arc, atomic::AtomicBool},
   time::Instant,
 };
 
-use async_lock::Mutex;
 use freedesktop_desktop_entry::DesktopEntry;
+use futures::{StreamExt as _, stream::FuturesUnordered};
 use gpui::{
-  AnyView, App, Bounds, Entity, KeyBinding, SharedString, Size, Subscription, Task, Window,
-  WindowBounds, WindowKind, WindowOptions, actions,
+  AnyView, App, Bounds, Entity, ImageSource, KeyBinding, Resource, SharedString, Size,
+  Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -26,18 +25,17 @@ use crate::{
   audio,
   db::Db,
   network,
-  picker::{Picker, PickerDelegate, PickerEvent},
+  picker::{ItemMatch, Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
-  xdg,
+  xdg::{self, get_icon},
 };
 
 actions!(launcher, [Quit]);
 
-type PanelView = dyn Fn(&mut Window, &mut App) -> AnyView + Send + Sync;
-
 pub struct Launcher {
   picker: Entity<Picker<RootDelegate>>,
   active_panel: Option<AnyView>,
+  xdg_icon_path_cache: Entity<HashMap<String, Resource>>,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -76,24 +74,69 @@ impl Launcher {
 
     let mut items = vec![];
 
-    items.extend(xdg::get_items().unwrap());
+    let locales = freedesktop_desktop_entry::get_languages_from_env();
+    let (desktop_items, icon_names) = xdg::get_items(&locales).unwrap();
+
+    // Find app icon paths, this is pretty slow
+    cx.spawn_in(window, async move |this, cx| {
+      println!("Getting icon paths");
+      let now = Instant::now();
+
+      let result = FuturesUnordered::from_iter(icon_names.chunks(14).map(|names| {
+        let names = names.to_vec();
+        cx.background_spawn(async move {
+          names
+            .iter()
+            .filter_map(|name| get_icon(name).map(|icon| (name.clone(), icon)))
+            .collect::<HashMap<_, _>>()
+        })
+      }))
+      .collect::<Vec<_>>()
+      .await
+      .into_iter()
+      .flatten()
+      .collect::<HashMap<_, _>>();
+
+      println!("Got icon paths in {:?}", now.elapsed());
+
+      let _ = this.update(cx, |this, cx| {
+        this.xdg_icon_path_cache.update(cx, |cache, cx| {
+          cache.extend(result);
+          cx.notify();
+        })
+      });
+    })
+    .detach();
+
+    items.extend(desktop_items);
     items.extend(audio::panels::get_items().unwrap());
     items.extend(network::get_items().unwrap());
 
     let active_panel = panel.as_ref().and_then(|panel| {
-      items.iter().find(|item| &item.id == panel).map_or_else(
-        || {
-          error!("Could not find panel with id {panel}");
-          None
-        },
-        |item| match &item.action {
-          ItemAction::Panel(make_panel) => Some(make_panel(window, cx)),
-          _ => None,
-        },
-      )
+      items
+        .iter()
+        .find(|item| matches!(item, RootItem::Panel { id, .. } if id == panel))
+        .map_or_else(
+          || {
+            error!("Could not find panel with id {panel}");
+            None
+          },
+          |item| match &item {
+            RootItem::Panel { view, .. } => Some(view(window, cx)),
+            _ => None,
+          },
+        )
     });
 
-    let picker = cx.new(|cx| Picker::new(RootDelegate::new(), items, window, cx));
+    let xdg_icon_path_cache = cx.new(|_| HashMap::new());
+    let picker = cx.new(|cx| {
+      Picker::new(
+        RootDelegate::new(locales, xdg_icon_path_cache.clone()),
+        items,
+        window,
+        cx,
+      )
+    });
 
     // Only focus the main picker if we're not launching directly into a panel, in which case the
     // panel will take care of focusing itself.
@@ -123,6 +166,7 @@ impl Launcher {
     Self {
       picker,
       active_panel,
+      xdg_icon_path_cache,
       _subscriptions: subscriptions,
     }
   }
@@ -137,19 +181,19 @@ impl Launcher {
     cx.quit();
   }
 
-  fn launch(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
+  fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
     let db = Db::global(cx);
 
     cx.spawn_in(window, async move |this, cx| {
-      let _ = db.record_launch(&item.id).await;
+      let _ = db.record_launch(&item.id()).await;
 
-      let _ = this.update_in(cx, |this, window, cx| match &item.action {
-        ItemAction::Launch(entry) => match xdg::start(entry) {
+      let _ = this.update_in(cx, |this, window, cx| match &item {
+        RootItem::App { entry, .. } => match xdg::start(entry) {
           Ok(_) => cx.quit(),
           Err(err) => error!(?err, "Failed to start process"),
         },
-        ItemAction::Panel(make_panel) => {
-          let panel = make_panel(window, cx);
+        RootItem::Panel { view, .. } => {
+          let panel = view(window, cx);
           this.active_panel = Some(panel);
           cx.notify();
         }
@@ -172,72 +216,127 @@ impl Render for Launcher {
   }
 }
 
-fn get_matches(matcher: &mut Matcher, items: &[Item], query: &str) -> Vec<(usize, u32)> {
+fn get_matches(
+  matcher: &mut Matcher,
+  locales: &[String],
+  items: &[RootItem],
+  query: &str,
+) -> Vec<(usize, u32)> {
   let start_time = Instant::now();
 
   let mut matches = Vec::new();
 
   let needle = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
   let mut buf = Vec::new();
+
   for (i, item) in items.iter().enumerate() {
-    let mut result_score: Option<u32> = None;
-    for term in &item.terms {
-      if let Some(score) = needle.score(Utf32Str::new(term, &mut buf), matcher) {
-        result_score = if let Some(result_score) = result_score {
-          Some(result_score.max(score))
-        } else {
-          Some(score)
-        }
+    let mut max_score: Option<u32> = None;
+    let mut do_match = |term: &str| {
+      let term = Utf32Str::new(term, &mut buf);
+      let Some(score) = needle.score(term, matcher) else {
+        return;
       };
+
+      max_score = Some(max_score.map_or(score, |max_score| max_score.max(score)));
+    };
+
+    match item {
+      RootItem::App { entry, .. } => {
+        do_match(&entry.appid);
+        if let Some(name) = entry.name(locales) {
+          do_match(&name);
+        }
+
+        if let Some(generic_name) = entry.generic_name(locales) {
+          do_match(&generic_name);
+        }
+
+        if let Some(categories) = entry.categories() {
+          for category in categories {
+            do_match(category);
+          }
+        }
+      }
+      RootItem::Panel { name, terms, .. } => {
+        do_match(name);
+        for term in terms {
+          do_match(term);
+        }
+      }
     }
 
-    if let Some(score) = result_score {
+    if let Some(score) = max_score {
       matches.push((i, score));
     }
   }
 
   trace!(duration = ?start_time.elapsed(), count = items.len(), "Done matching root items");
 
+  matches.sort_by_key(|(_, score)| Reverse(*score));
   matches
 }
 
 struct RootDelegate {
-  matcher: Arc<Mutex<Matcher>>,
+  xdg_icon_path_cache: Entity<HashMap<String, Resource>>,
+  xdg_locales: Vec<String>,
 }
 
 impl RootDelegate {
-  fn new() -> Self {
-    let matcher = Matcher::new(Config::DEFAULT);
-    let matcher = Arc::new(Mutex::new(matcher));
-    Self { matcher }
+  fn new(xdg_locales: Vec<String>, xdg_icon_path_cache: Entity<HashMap<String, Resource>>) -> Self {
+    Self {
+      xdg_locales,
+      xdg_icon_path_cache,
+    }
   }
 }
 
+type PanelView = dyn Fn(&mut Window, &mut App) -> AnyView + Send + Sync;
+
+// TODO: Maybe we can put terms in contiguous memory?
 #[derive(Clone)]
-pub struct Item {
-  pub id: String,
-  pub name: SharedString,
-  // TODO: Maybe we can put these in contiguous memory?
-  pub terms: Vec<String>,
-  pub action: ItemAction,
+pub enum RootItem {
+  App {
+    name: SharedString,
+    entry: DesktopEntry,
+  },
+  Panel {
+    id: String,
+    icon: Option<Resource>,
+    name: SharedString,
+    terms: Vec<String>,
+    view: Arc<PanelView>,
+  },
 }
 
-#[derive(Clone)]
-pub enum ItemAction {
-  Launch(Box<DesktopEntry>),
-  Panel(Arc<PanelView>),
+impl RootItem {
+  pub fn id(&self) -> String {
+    match self {
+      RootItem::App { entry, .. } => format!("app:{}", entry.appid),
+      RootItem::Panel { id, .. } => format!("panel:{}", id),
+    }
+  }
+
+  pub fn type_label(&self) -> &'static str {
+    match self {
+      RootItem::App { .. } => "app",
+      RootItem::Panel { .. } => "panel",
+    }
+  }
 }
 
 impl PickerDelegate for RootDelegate {
-  type ListItem = Item;
+  type ListItem = RootItem;
 
   fn render_list_item(
     &self,
     _window: &mut Window,
-    _cx: &mut Context<Picker<Self>>,
+    cx: &mut Context<Picker<Self>>,
     item: &Self::ListItem,
     is_selected: bool,
+    matched: Option<ItemMatch>,
   ) -> impl IntoElement {
+    let icon_cache = self.xdg_icon_path_cache.read(cx);
+
     h_flex()
       .w_full()
       .when_else(
@@ -245,7 +344,36 @@ impl PickerDelegate for RootDelegate {
         |div| div.bg(rgb(0xDDDDDD)),
         |div| div.bg(rgb(0xFFFFFF)),
       )
-      .child(item.name.clone())
+      .justify_between()
+      .child(h_flex().gap_1().map(|this| {
+        match item {
+          RootItem::App { entry, name } => {
+            let icon = entry.icon().and_then(|icon| icon_cache.get(icon));
+
+            this
+              .when_some(icon, |this, icon| {
+                this.child(img(ImageSource::Resource(icon.clone())).size_8())
+              })
+              .when_none(&icon, |this| this.child(div().size_8()))
+              .child(name.clone())
+          }
+          RootItem::Panel { name, icon, .. } => this
+            .when_some(icon.as_ref(), |this, icon| {
+              this.child(img(ImageSource::Resource(icon.clone())).size_8())
+            })
+            .when_none(icon, |this| this.child(div().size_8()))
+            .child(name.clone()),
+        }
+      }))
+      .child(
+        h_flex()
+          .gap_1()
+          .text_color(rgb(0xAAAAAA))
+          .when_some(matched, |div, matched| {
+            div.child(format!("{}", matched.score))
+          })
+          .child(item.type_label()),
+      )
   }
 
   fn update_matches(
@@ -253,42 +381,24 @@ impl PickerDelegate for RootDelegate {
     window: &mut Window,
     cx: &mut Context<Picker<Self>>,
     query: String,
-    cancel_flag: Arc<AtomicBool>,
+    _cancel_flag: Arc<AtomicBool>,
     search_id: usize,
     items: Arc<Vec<Self::ListItem>>,
   ) -> Task<()> {
-    let matcher = self.matcher.clone();
-
-    cx.spawn_in(window, async move |picker, cx| {
-      let matches = cx
-        .background_spawn(async move {
-          if cancel_flag.load(Ordering::Acquire) {
-            trace!(search_id, "Stopping search on background spawn");
-            return None;
-          }
-
-          let matches = {
-            // TODO: Should find a better solution, maybe have a pool of matchers? Or a queue that
-            // just takes jobs?
-            let mut matcher = matcher.lock().await;
-            get_matches(&mut matcher, &items, &query)
-          };
-
-          if cancel_flag.load(Ordering::Acquire) {
-            return None;
-          }
-
-          Some(matches)
-        })
-        .await;
-
-      let Some(matches) = matches else {
-        return;
-      };
-
-      let _ = picker.update(cx, |picker, cx| {
-        picker.complete_search(cx, search_id, matches)
+    if query.is_empty() {
+      cx.defer_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, None);
       });
-    })
+
+      return Task::ready(());
+    }
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let matches = get_matches(&mut matcher, &self.xdg_locales, &items, &query);
+    cx.defer_in(window, move |picker, _window, cx| {
+      picker.complete_search(cx, search_id, Some(matches));
+    });
+
+    Task::ready(())
   }
 }
