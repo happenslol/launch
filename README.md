@@ -13,10 +13,8 @@
 
 # todo
 
-- start with panel id
 - back button
 - styling
-- track frequency
 
 # inline
 

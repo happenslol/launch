@@ -2,14 +2,14 @@ use std::{
   cmp::Reverse,
   collections::HashMap,
   sync::{Arc, atomic::AtomicBool},
-  time::Instant,
 };
 
 use freedesktop_desktop_entry::DesktopEntry;
 use futures::{StreamExt as _, stream::FuturesUnordered};
 use gpui::{
-  AnyView, App, Bounds, Entity, ImageSource, KeyBinding, Resource, SharedString, Size,
-  Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
+  AnyView, App, AsyncWindowContext, Bounds, Entity, ImageSource, KeyBinding, Resource,
+  SharedString, Size, Subscription, Task, WeakEntity, Window, WindowBounds, WindowKind,
+  WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -19,14 +19,14 @@ use nucleo_matcher::{
   Config, Matcher, Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
-use tracing::{error, trace};
+use tracing::error;
 
 use crate::{
   audio,
-  db::Db,
+  db::DB,
   network,
   picker::{ItemMatch, Picker, PickerDelegate, PickerEvent},
-  util::{h_flex, v_flex},
+  util::{ResultExt, h_flex, v_flex},
   xdg::{self, get_icon},
 };
 
@@ -64,13 +64,8 @@ impl Launcher {
 
   pub fn new(window: &mut Window, cx: &mut Context<Self>, panel: Option<String>) -> Self {
     cx.bind_keys([KeyBinding::new("escape", Quit, None)]);
-
-    let db = Db::global(cx);
-    cx.spawn(async move |_, _| {
-      let _launches = db.get_launches().await;
-      // TODO: Use for scoring
-    })
-    .detach();
+    let launches = Arc::new(DB.get_launches());
+    let xdg_icon_path_cache = cx.new(|_| DB.get_desktop_entry_icon_paths());
 
     let mut items = vec![];
 
@@ -79,32 +74,7 @@ impl Launcher {
 
     // Find app icon paths, this is pretty slow
     cx.spawn_in(window, async move |this, cx| {
-      println!("Getting icon paths");
-      let now = Instant::now();
-
-      let result = FuturesUnordered::from_iter(icon_names.chunks(14).map(|names| {
-        let names = names.to_vec();
-        cx.background_spawn(async move {
-          names
-            .iter()
-            .filter_map(|name| get_icon(name).map(|icon| (name.clone(), icon)))
-            .collect::<HashMap<_, _>>()
-        })
-      }))
-      .collect::<Vec<_>>()
-      .await
-      .into_iter()
-      .flatten()
-      .collect::<HashMap<_, _>>();
-
-      println!("Got icon paths in {:?}", now.elapsed());
-
-      let _ = this.update(cx, |this, cx| {
-        this.xdg_icon_path_cache.update(cx, |cache, cx| {
-          cache.extend(result);
-          cx.notify();
-        })
-      });
+      Self::refresh_app_icons(this, cx, icon_names).await
     })
     .detach();
 
@@ -128,10 +98,9 @@ impl Launcher {
         )
     });
 
-    let xdg_icon_path_cache = cx.new(|_| HashMap::new());
     let picker = cx.new(|cx| {
       Picker::new(
-        RootDelegate::new(locales, xdg_icon_path_cache.clone()),
+        RootDelegate::new(launches, locales, xdg_icon_path_cache.clone()),
         items,
         window,
         cx,
@@ -181,25 +150,58 @@ impl Launcher {
     cx.quit();
   }
 
-  fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
-    let db = Db::global(cx);
+  async fn refresh_app_icons(
+    this: WeakEntity<Self>,
+    cx: &mut AsyncWindowContext,
+    icon_names: Vec<String>,
+  ) {
+    // TODO: fork the icon lookups crate and make it actually async
+    let result = FuturesUnordered::from_iter(icon_names.chunks(10).map(|names| {
+      let names = names.to_vec();
+      cx.background_spawn(async move {
+        names
+          .iter()
+          .filter_map(|name| get_icon(name).map(|icon| (name.clone(), icon)))
+          .collect::<HashMap<_, _>>()
+      })
+    }))
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .flatten()
+    .collect::<HashMap<_, _>>();
 
-    cx.spawn_in(window, async move |this, cx| {
-      let _ = db.record_launch(&item.id()).await;
+    DB.store_desktop_entry_icon_paths(&result);
 
-      let _ = this.update_in(cx, |this, window, cx| match &item {
-        RootItem::App { entry, .. } => match xdg::start(entry) {
-          Ok(_) => cx.quit(),
-          Err(err) => error!(?err, "Failed to start process"),
-        },
-        RootItem::Panel { view, .. } => {
-          let panel = view(window, cx);
-          this.active_panel = Some(panel);
+    let result = result
+      .into_iter()
+      .map(|(k, v)| (k, Resource::Path(v.into())))
+      .collect::<HashMap<_, _>>();
+
+    this
+      .update(cx, |this, cx| {
+        this.xdg_icon_path_cache.update(cx, |cache, cx| {
+          cache.extend(result);
           cx.notify();
-        }
-      });
-    })
-    .detach();
+        })
+      })
+      .log_err();
+  }
+
+  fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
+    DB.record_launch(&item.id());
+
+    match &item {
+      RootItem::App { entry, .. } => match xdg::start(entry) {
+        Ok(_) => cx.quit(),
+        Err(err) => error!(?err, "Failed to start process"),
+      },
+      RootItem::Panel { view, .. } => {
+        let panel = view(window, cx);
+        self.active_panel = Some(panel);
+        cx.notify();
+      }
+    }
   }
 }
 
@@ -216,74 +218,20 @@ impl Render for Launcher {
   }
 }
 
-fn get_matches(
-  matcher: &mut Matcher,
-  locales: &[String],
-  items: &[RootItem],
-  query: &str,
-) -> Vec<(usize, u32)> {
-  let start_time = Instant::now();
-
-  let mut matches = Vec::new();
-
-  let needle = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
-  let mut buf = Vec::new();
-
-  for (i, item) in items.iter().enumerate() {
-    let mut max_score: Option<u32> = None;
-    let mut do_match = |term: &str| {
-      let term = Utf32Str::new(term, &mut buf);
-      let Some(score) = needle.score(term, matcher) else {
-        return;
-      };
-
-      max_score = Some(max_score.map_or(score, |max_score| max_score.max(score)));
-    };
-
-    match item {
-      RootItem::App { entry, .. } => {
-        do_match(&entry.appid);
-        if let Some(name) = entry.name(locales) {
-          do_match(&name);
-        }
-
-        if let Some(generic_name) = entry.generic_name(locales) {
-          do_match(&generic_name);
-        }
-
-        if let Some(categories) = entry.categories() {
-          for category in categories {
-            do_match(category);
-          }
-        }
-      }
-      RootItem::Panel { name, terms, .. } => {
-        do_match(name);
-        for term in terms {
-          do_match(term);
-        }
-      }
-    }
-
-    if let Some(score) = max_score {
-      matches.push((i, score));
-    }
-  }
-
-  trace!(duration = ?start_time.elapsed(), count = items.len(), "Done matching root items");
-
-  matches.sort_by_key(|(_, score)| Reverse(*score));
-  matches
-}
-
 struct RootDelegate {
+  launches: Arc<HashMap<String, (u32, u64)>>,
   xdg_icon_path_cache: Entity<HashMap<String, Resource>>,
   xdg_locales: Vec<String>,
 }
 
 impl RootDelegate {
-  fn new(xdg_locales: Vec<String>, xdg_icon_path_cache: Entity<HashMap<String, Resource>>) -> Self {
+  fn new(
+    launches: Arc<HashMap<String, (u32, u64)>>,
+    xdg_locales: Vec<String>,
+    xdg_icon_path_cache: Entity<HashMap<String, Resource>>,
+  ) -> Self {
     Self {
+      launches,
       xdg_locales,
       xdg_icon_path_cache,
     }
@@ -394,7 +342,62 @@ impl PickerDelegate for RootDelegate {
     }
 
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let matches = get_matches(&mut matcher, &self.xdg_locales, &items, &query);
+    let mut matches = Vec::new();
+    let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+    let mut buf = Vec::new();
+
+    for (i, item) in items.iter().enumerate() {
+      let mut max_score: Option<u32> = None;
+      let mut do_match = |term: &str| {
+        let term = Utf32Str::new(term, &mut buf);
+        let Some(score) = needle.score(term, &mut matcher) else {
+          return;
+        };
+
+        max_score = Some(max_score.map_or(score, |max_score| max_score.max(score)));
+      };
+
+      match item {
+        RootItem::App { entry, .. } => {
+          do_match(&entry.appid);
+          if let Some(name) = entry.name(&self.xdg_locales) {
+            do_match(&name);
+          }
+
+          if let Some(generic_name) = entry.generic_name(&self.xdg_locales) {
+            do_match(&generic_name);
+          }
+
+          if let Some(categories) = entry.categories() {
+            for category in categories {
+              do_match(category);
+            }
+          }
+        }
+        RootItem::Panel { name, terms, .. } => {
+          do_match(name);
+          for term in terms {
+            do_match(term);
+          }
+        }
+      }
+
+      if let Some(score) = max_score {
+        matches.push((i, score));
+      }
+    }
+
+    matches.sort_by_key(|(i, score)| {
+      let (count, last_launch) = self
+        .launches
+        .get(&items[*i].id())
+        .copied()
+        .unwrap_or_default();
+
+      // Use launch count and recency as tie breaker
+      Reverse((*score, count, last_launch))
+    });
+
     cx.defer_in(window, move |picker, _window, cx| {
       picker.complete_search(cx, search_id, Some(matches));
     });

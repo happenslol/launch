@@ -35,7 +35,6 @@ fn main() -> Result<()> {
 
   Application::new().with_assets(Assets).run(move |cx| {
     audio::init(cx);
-    db::init(cx);
     InputState::init(cx);
 
     load_embedded_fonts(cx).unwrap();

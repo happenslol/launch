@@ -1,9 +1,8 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{collections::{BTreeMap, HashSet}, path::PathBuf};
 
 use anyhow::Result;
 use fork::Fork;
 use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths};
-use gpui::Resource;
 use tracing::error;
 
 use crate::launcher::RootItem;
@@ -41,7 +40,7 @@ pub fn get_items(locales: &[String]) -> Result<(Vec<RootItem>, Vec<String>)> {
   ))
 }
 
-pub fn get_icon(name: &str) -> Option<Resource> {
+pub fn get_icon(name: &str) -> Option<PathBuf> {
   let scale = Some(1);
   let size = Some(24);
 
@@ -55,8 +54,7 @@ pub fn get_icon(name: &str) -> Option<Resource> {
     lookup = lookup.with_size(size);
   }
 
-  let result = lookup.find()?;
-  Some(Resource::Path(result.into()))
+  lookup.find()
 }
 
 pub fn start(entry: &DesktopEntry) -> Result<()> {

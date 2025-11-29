@@ -3081,7 +3081,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-broadcast",
- "async-lock",
  "async-process",
  "bluez-zbus",
  "clap",

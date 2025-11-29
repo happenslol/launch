@@ -22,3 +22,39 @@ pub fn h_flex() -> Div {
 pub fn v_flex() -> Div {
   div().v_flex()
 }
+
+pub trait ResultExt<E> {
+  type Ok;
+
+  fn log_err(self) -> Option<Self::Ok>;
+  fn warn_on_err(self) -> Option<Self::Ok>;
+}
+
+impl<T, E> ResultExt<E> for Result<T, E>
+where
+  E: std::fmt::Debug,
+{
+  type Ok = T;
+
+  #[track_caller]
+  fn log_err(self) -> Option<T> {
+    match self {
+      Ok(value) => Some(value),
+      Err(error) => {
+        tracing::error!("{:?}", error);
+        None
+      }
+    }
+  }
+
+  #[track_caller]
+  fn warn_on_err(self) -> Option<T> {
+    match self {
+      Ok(value) => Some(value),
+      Err(error) => {
+        tracing::error!("{:?}", error);
+        None
+      }
+    }
+  }
+}
