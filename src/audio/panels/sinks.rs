@@ -15,7 +15,7 @@ use crate::{
     pulse::{SetMute, SetVolume},
     types::{SinkId, SinkInfo},
   },
-  picker::{ItemMatch, Picker, PickerDelegate, PickerEvent},
+  picker::{Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
 };
 
@@ -154,7 +154,6 @@ impl PickerDelegate for SinksDelegate {
     cx: &mut Context<Picker<Self>>,
     item: &Self::ListItem,
     is_selected: bool,
-    _matched: Option<ItemMatch>,
   ) -> impl IntoElement {
     let is_default = self.audio_state.read(cx).default_sink == Some(item.id);
 

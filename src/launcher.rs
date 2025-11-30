@@ -1,7 +1,10 @@
 use std::{
   cmp::Reverse,
   collections::HashMap,
-  sync::{Arc, atomic::AtomicBool},
+  sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+  },
 };
 
 use freedesktop_desktop_entry::DesktopEntry;
@@ -25,7 +28,7 @@ use crate::{
   audio,
   db::DB,
   network,
-  picker::{ItemMatch, Picker, PickerDelegate, PickerEvent},
+  picker::{Picker, PickerDelegate, PickerEvent},
   util::{ResultExt, h_flex, v_flex},
   xdg::{self, get_icon},
 };
@@ -208,6 +211,7 @@ impl Launcher {
 impl Render for Launcher {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
+      .font_family("Noto Sans")
       .on_action(cx.listener(Self::quit))
       .size_full()
       .bg(rgba(0xFFFFFFFF))
@@ -281,7 +285,6 @@ impl PickerDelegate for RootDelegate {
     cx: &mut Context<Picker<Self>>,
     item: &Self::ListItem,
     is_selected: bool,
-    matched: Option<ItemMatch>,
   ) -> impl IntoElement {
     let icon_cache = self.xdg_icon_path_cache.read(cx);
 
@@ -317,9 +320,6 @@ impl PickerDelegate for RootDelegate {
         h_flex()
           .gap_1()
           .text_color(rgb(0xAAAAAA))
-          .when_some(matched, |div, matched| {
-            div.child(format!("{}", matched.score))
-          })
           .child(item.type_label()),
       )
   }
@@ -329,7 +329,7 @@ impl PickerDelegate for RootDelegate {
     window: &mut Window,
     cx: &mut Context<Picker<Self>>,
     query: String,
-    _cancel_flag: Arc<AtomicBool>,
+    cancel_flag: Arc<AtomicBool>,
     search_id: usize,
     items: Arc<Vec<Self::ListItem>>,
   ) -> Task<()> {
@@ -341,67 +341,85 @@ impl PickerDelegate for RootDelegate {
       return Task::ready(());
     }
 
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut matches = Vec::new();
-    let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
-    let mut buf = Vec::new();
+    let locales = self.xdg_locales.clone();
+    let launches = self.launches.clone();
 
-    for (i, item) in items.iter().enumerate() {
-      let mut max_score: Option<u32> = None;
-      let mut do_match = |term: &str| {
-        let term = Utf32Str::new(term, &mut buf);
-        let Some(score) = needle.score(term, &mut matcher) else {
-          return;
-        };
+    cx.spawn_in(window, async move |picker, cx| {
+      let Some(matches) = cx
+        .background_spawn(async move {
+          let mut matcher = Matcher::new(Config::DEFAULT);
+          let mut matches = Vec::new();
+          let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+          let mut buf = Vec::new();
 
-        max_score = Some(max_score.map_or(score, |max_score| max_score.max(score)));
-      };
-
-      match item {
-        RootItem::App { entry, .. } => {
-          do_match(&entry.appid);
-          if let Some(name) = entry.name(&self.xdg_locales) {
-            do_match(&name);
+          if cancel_flag.load(Ordering::Acquire) {
+            return None;
           }
 
-          if let Some(generic_name) = entry.generic_name(&self.xdg_locales) {
-            do_match(&generic_name);
-          }
+          for (i, item) in items.iter().enumerate() {
+            let mut max_score: Option<u32> = None;
+            let mut do_match = |term: &str| {
+              let term = Utf32Str::new(term, &mut buf);
+              let Some(score) = needle.score(term, &mut matcher) else {
+                return;
+              };
 
-          if let Some(categories) = entry.categories() {
-            for category in categories {
-              do_match(category);
+              max_score = Some(max_score.map_or(score, |max_score| max_score.max(score)));
+            };
+
+            match item {
+              RootItem::App { entry, .. } => {
+                do_match(&entry.appid);
+                if let Some(name) = entry.name(&locales) {
+                  do_match(&name);
+                }
+
+                if let Some(generic_name) = entry.generic_name(&locales) {
+                  do_match(&generic_name);
+                }
+
+                if let Some(categories) = entry.categories() {
+                  for category in categories {
+                    do_match(category);
+                  }
+                }
+              }
+              RootItem::Panel { name, terms, .. } => {
+                do_match(name);
+                for term in terms {
+                  do_match(term);
+                }
+              }
+            }
+
+            if let Some(score) = max_score {
+              matches.push((i, score));
             }
           }
-        }
-        RootItem::Panel { name, terms, .. } => {
-          do_match(name);
-          for term in terms {
-            do_match(term);
+
+          if cancel_flag.load(Ordering::Acquire) {
+            return None;
           }
-        }
-      }
 
-      if let Some(score) = max_score {
-        matches.push((i, score));
-      }
-    }
+          matches.sort_by_key(|(i, score)| {
+            let (count, last_launch) = launches.get(&items[*i].id()).copied().unwrap_or_default();
 
-    matches.sort_by_key(|(i, score)| {
-      let (count, last_launch) = self
-        .launches
-        .get(&items[*i].id())
-        .copied()
-        .unwrap_or_default();
+            // Use launch count and recency as tie breaker
+            Reverse((*score, count, last_launch))
+          });
 
-      // Use launch count and recency as tie breaker
-      Reverse((*score, count, last_launch))
-    });
+          Some(matches)
+        })
+        .await
+      else {
+        return;
+      };
 
-    cx.defer_in(window, move |picker, _window, cx| {
-      picker.complete_search(cx, search_id, Some(matches));
-    });
-
-    Task::ready(())
+      picker
+        .update(cx, |picker, cx| {
+          picker.complete_search(cx, search_id, Some(matches));
+        })
+        .log_err();
+    })
   }
 }

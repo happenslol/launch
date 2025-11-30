@@ -22,11 +22,6 @@ use crate::{
 
 actions!(picker, [SelectNext, SelectPrev]);
 
-#[derive(Clone, Copy)]
-pub struct ItemMatch {
-  pub score: u32,
-}
-
 // TODO: I don't like the delegate pattern, the composition-y API of the text input feels a lot
 // better. Maybe this could be refactored into multiple pieces:
 // - PickerState<Item> (or just Picker)
@@ -46,7 +41,6 @@ pub trait PickerDelegate: Sized + 'static {
     cx: &mut Context<Picker<Self>>,
     item: &Self::ListItem,
     is_selected: bool,
-    matched: Option<ItemMatch>,
   ) -> impl IntoElement;
 
   fn update_matches(
@@ -283,7 +277,6 @@ impl<D: PickerDelegate> Picker<D> {
     cx: &mut Context<Self>,
     ix: usize,
     is_selected: bool,
-    matched: Option<ItemMatch>,
   ) -> impl IntoElement + use<D> {
     div()
       .id(("item", ix))
@@ -298,7 +291,7 @@ impl<D: PickerDelegate> Picker<D> {
       .child(
         self
           .delegate
-          .render_list_item(window, cx, &self.items[ix], is_selected, matched),
+          .render_list_item(window, cx, &self.items[ix], is_selected),
       )
   }
 }
@@ -329,12 +322,12 @@ impl<D: PickerDelegate> Render for Picker<D> {
             range
               .map(|ix| {
                 let is_selected = this.selected_index.is_some_and(|selected| selected == ix);
-                let (resolved_ix, matched) = this.matches.as_ref().map_or((ix, None), |matches| {
-                  let (resolved_ix, score) = matches[ix];
-                  (resolved_ix, Some(ItemMatch { score }))
+                let resolved_ix = this.matches.as_ref().map_or(ix, |matches| {
+                  let (resolved_ix, _) = matches[ix];
+                  resolved_ix
                 });
 
-                this.render_list_item(window, cx, resolved_ix, is_selected, matched)
+                this.render_list_item(window, cx, resolved_ix, is_selected)
               })
               .collect()
           }),

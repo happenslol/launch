@@ -13,7 +13,7 @@ use gpui::{
 use crate::{
   launcher::RootItem,
   network::types::{DeviceConnection, DeviceInfo, KnownDeviceConnection},
-  picker::{ItemMatch, Picker, PickerDelegate},
+  picker::{Picker, PickerDelegate},
   util::{h_flex, v_flex},
 };
 
@@ -195,7 +195,6 @@ impl PickerDelegate for NetworkDelegate {
     _cx: &mut Context<Picker<Self>>,
     item: &Self::ListItem,
     is_selected: bool,
-    _matched: Option<ItemMatch>,
   ) -> impl IntoElement {
     h_flex()
       .w_full()

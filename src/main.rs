@@ -9,7 +9,6 @@ mod launcher;
 mod logging;
 mod network;
 mod picker;
-mod picker2;
 mod util;
 mod xdg;
 
