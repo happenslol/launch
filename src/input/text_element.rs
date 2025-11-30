@@ -631,7 +631,7 @@ impl Element for TextElement {
     let mut bounds = bounds;
 
     let placeholder_color = rgb(0xAAAAAA);
-    let foreground = rgb(0x000000);
+    let foreground = rgb(0xFFFFFF);
 
     let (display_text, text_color) = if is_empty {
       (&Rope::from(placeholder.as_str()), placeholder_color)
@@ -833,7 +833,7 @@ impl Element for TextElement {
     }
 
     let selection_color = rgb(0x007ACC);
-    let caret_color = rgb(0x000000);
+    let caret_color = rgb(0xFFFFFF);
 
     // Paint selections
     if window.is_window_active()

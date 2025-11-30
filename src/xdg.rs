@@ -1,9 +1,12 @@
-use std::{collections::{BTreeMap, HashSet}, path::PathBuf};
+use std::{
+  collections::{BTreeMap, HashSet},
+  path::PathBuf,
+  process,
+};
 
 use anyhow::Result;
 use fork::Fork;
 use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths};
-use tracing::error;
 
 use crate::launcher::RootItem;
 
@@ -64,9 +67,17 @@ pub fn start(entry: &DesktopEntry) -> Result<()> {
   // stdin/out/err to them before forking, then set them back to our own in the parent.
 
   if let Fork::Child = fork::fork()? {
+    if fork::setsid().is_err() {
+      eprintln!("Failed to setsid: {}", std::io::Error::last_os_error());
+      process::exit(1);
+    }
+    if fork::redirect_stdio().is_err() {
+      eprintln!("Failed to close_fd: {}", std::io::Error::last_os_error());
+    }
+
     let err = exec::execvp(&cmd[0], &cmd);
-    error!(?err, ?cmd, "child: Failed to execvp process");
-    std::process::exit(1);
+    eprintln!("Failed to exec {:?}: {}", cmd, err);
+    process::exit(1);
   }
 
   Ok(())

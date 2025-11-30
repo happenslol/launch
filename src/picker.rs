@@ -9,7 +9,7 @@ use std::{
 use gpui::{
   App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding,
   ScrollStrategy, StyleRefinement, Subscription, Task, UniformListScrollHandle, Window, actions,
-  div, prelude::*, uniform_list,
+  div, prelude::*, rgb, uniform_list,
 };
 
 use crate::{
@@ -313,7 +313,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
       .on_action(cx.listener(Self::select_next))
       .on_action(cx.listener(Self::select_prev))
       .size_full()
-      .child(input(&self.search_input))
+      .child(input(&self.search_input).p_2().text_color(rgb(0xFFFFFF)))
       .child(
         uniform_list(
           "matches",

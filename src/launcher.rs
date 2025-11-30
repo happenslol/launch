@@ -212,9 +212,14 @@ impl Render for Launcher {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
       .font_family("Noto Sans")
+      .text_color(rgb(0xFFFFFF))
       .on_action(cx.listener(Self::quit))
+      .rounded_lg()
       .size_full()
-      .bg(rgba(0xFFFFFFFF))
+      .border_1()
+      .p_2()
+      .border_color(rgb(0x444444))
+      .bg(rgba(0x212121FF))
       .when_some(self.active_panel.as_ref(), |div, panel| {
         div.child(panel.clone())
       })
@@ -290,11 +295,8 @@ impl PickerDelegate for RootDelegate {
 
     h_flex()
       .w_full()
-      .when_else(
-        is_selected,
-        |div| div.bg(rgb(0xDDDDDD)),
-        |div| div.bg(rgb(0xFFFFFF)),
-      )
+      .p_1()
+      .when(is_selected, |this| this.bg(rgb(0x444444)))
       .justify_between()
       .child(h_flex().gap_1().map(|this| {
         match item {
