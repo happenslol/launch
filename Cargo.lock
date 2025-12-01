@@ -3096,6 +3096,7 @@ dependencies = [
  "gpui",
  "include-fs",
  "indexmap",
+ "itertools 0.14.0",
  "libpulse-binding",
  "nucleo-matcher",
  "pipewire",

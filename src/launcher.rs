@@ -49,7 +49,7 @@ impl Launcher {
       app_id: Some("launch".to_string()),
       window_bounds: Some(WindowBounds::Windowed(Bounds {
         origin: point(px(0.), px(0.)),
-        size: Size::new(px(600.), px(240.)),
+        size: Size::new(px(800.), px(800.)),
       })),
       window_background: gpui::WindowBackgroundAppearance::Transparent,
       kind: WindowKind::LayerShell(LayerShellOptions {
