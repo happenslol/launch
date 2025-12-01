@@ -10,9 +10,9 @@ use std::{
 use freedesktop_desktop_entry::DesktopEntry;
 use futures::{StreamExt as _, stream::FuturesUnordered};
 use gpui::{
-  AnyView, App, AsyncWindowContext, Bounds, Entity, ImageSource, KeyBinding, Resource,
-  SharedString, Size, Subscription, Task, WeakEntity, Window, WindowBounds, WindowKind,
-  WindowOptions, actions, div, img,
+  AnyView, App, AsyncWindowContext, Bounds, Entity, FocusHandle, Focusable, ImageSource,
+  KeyBinding, Resource, SharedString, Size, Subscription, Task, WeakEntity, Window, WindowBounds,
+  WindowKind, WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -36,6 +36,7 @@ use crate::{
 actions!(launcher, [Quit]);
 
 pub struct Launcher {
+  focus_handle: FocusHandle,
   picker: Entity<Picker<RootDelegate>>,
   active_panel: Option<AnyView>,
   xdg_icon_path_cache: Entity<HashMap<String, Resource>>,
@@ -67,6 +68,7 @@ impl Launcher {
 
   pub fn new(window: &mut Window, cx: &mut Context<Self>, panel: Option<String>) -> Self {
     cx.bind_keys([KeyBinding::new("escape", Quit, None)]);
+
     let launches = Arc::new(DB.get_launches());
     let xdg_icon_path_cache = cx.new(|_| DB.get_desktop_entry_icon_paths());
 
@@ -82,8 +84,19 @@ impl Launcher {
     .detach();
 
     items.extend(desktop_items);
-    items.extend(audio::panels::get_items().unwrap());
-    items.extend(network::get_items().unwrap());
+    items.extend(audio::panels::get_items());
+    items.extend(network::get_items());
+
+    let items = Arc::new(items);
+
+    let picker = cx.new(|cx| {
+      Picker::new(
+        RootDelegate::new(launches, locales, xdg_icon_path_cache.clone()),
+        items.clone(),
+        window,
+        cx,
+      )
+    });
 
     let active_panel = panel.as_ref().and_then(|panel| {
       items
@@ -100,21 +113,6 @@ impl Launcher {
           },
         )
     });
-
-    let picker = cx.new(|cx| {
-      Picker::new(
-        RootDelegate::new(launches, locales, xdg_icon_path_cache.clone()),
-        items,
-        window,
-        cx,
-      )
-    });
-
-    // Only focus the main picker if we're not launching directly into a panel, in which case the
-    // panel will take care of focusing itself.
-    if active_panel.is_none() {
-      cx.focus_view(&picker, window);
-    }
 
     let subscriptions = vec![cx.subscribe_in(
       &picker,
@@ -135,7 +133,10 @@ impl Launcher {
       },
     )];
 
+    cx.focus_self(window);
+
     Self {
+      focus_handle: cx.focus_handle(),
       picker,
       active_panel,
       xdg_icon_path_cache,
@@ -202,15 +203,23 @@ impl Launcher {
       RootItem::Panel { view, .. } => {
         let panel = view(window, cx);
         self.active_panel = Some(panel);
+        cx.focus_self(window);
         cx.notify();
       }
     }
   }
 }
 
+impl Focusable for Launcher {
+  fn focus_handle(&self, _cx: &App) -> FocusHandle {
+    self.focus_handle.clone()
+  }
+}
+
 impl Render for Launcher {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
+      .track_focus(&self.focus_handle)
       .font_family("Noto Sans")
       .text_color(rgb(0xFFFFFF))
       .on_action(cx.listener(Self::quit))

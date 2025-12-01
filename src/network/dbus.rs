@@ -127,75 +127,66 @@ pub async fn list_devices<'a>(nm: &NetworkManager<'a>) -> Result<Vec<DeviceInfo>
   Ok(devices_info)
 }
 
-pub async fn scan_wifi(
-  device: WirelessDevice<'_>,
-  hw_address: Option<String>,
-) -> zbus::Result<Vec<AccessPoint>> {
-  device.request_scan(HashMap::new()).await?;
-
-  let mut scan_changed = device.receive_last_scan_changed().await;
-
-  if let Some(t) = scan_changed.next().await
-    && let Ok(-1) = t.get().await
-  {
-    tracing::error!("wireless device scan errored");
-    return Ok(Default::default());
-  }
-
+pub async fn read_access_points(device: &WirelessDevice<'_>) -> Result<Vec<AccessPoint>> {
   let access_points = device.get_access_points().await?;
+  let (state, hw_address) = {
+    let device = device.upcast().await?;
+    let state = device
+      .cached_state()
+      .unwrap_or_default()
+      .map(|s| s.into())
+      .unwrap_or_else(|| DeviceState::Unknown);
 
-  let state: DeviceState = device
-    .upcast()
-    .await
-    .and_then(|dev| dev.cached_state())
-    .unwrap_or_default()
-    .map(|s| s.into())
-    .unwrap_or_else(|| DeviceState::Unknown);
+    let hw_address = device.hw_address().await.ok();
+
+    (state, hw_address)
+  };
 
   // Sort by strength and remove duplicates
   let mut aps = HashMap::<String, AccessPoint>::new();
   for ap in access_points {
     let (ssid_res, strength_res) = futures::join!(ap.ssid(), ap.strength());
+    let Some((ssid, strength)) = ssid_res.ok().zip(strength_res.ok()) else {
+      continue;
+    };
 
-    if let Some((ssid, strength)) = ssid_res.ok().zip(strength_res.ok()) {
-      let ssid = String::from_utf8_lossy(&ssid.clone()).into_owned();
-      if let Some(access_point) = aps.get(&ssid)
-        && access_point.strength > strength
-      {
-        continue;
-      }
-
-      let Ok(flags) = ap.rsn_flags().await else {
-        continue;
-      };
-      let network_type = if flags.intersects(ApSecurityFlags::KEY_MGMT_802_1X) {
-        NetworkType::EAP
-      } else if flags.intersects(ApSecurityFlags::KEY_MGMTPSK) {
-        NetworkType::PSK
-      } else if flags.is_empty() {
-        NetworkType::Open
-      } else {
-        continue;
-      };
-
-      aps.insert(
-        ssid.clone(),
-        AccessPoint {
-          ssid: Arc::from(ssid),
-          strength,
-          state,
-          working: false,
-          path: ap.inner().path().to_owned(),
-          secured: !ap.wpa_flags().await?.is_empty(),
-          wps_push: ap.flags().await?.contains(ApFlags::WPS_PBC),
-          network_type,
-          hw_address: hw_address
-            .as_ref()
-            .and_then(|str_addr| HwAddress::from_str(str_addr))
-            .unwrap_or_default(),
-        },
-      );
+    let ssid = String::from_utf8_lossy(&ssid.clone()).into_owned();
+    if let Some(access_point) = aps.get(&ssid)
+      && access_point.strength > strength
+    {
+      continue;
     }
+
+    let Ok(flags) = ap.rsn_flags().await else {
+      continue;
+    };
+    let network_type = if flags.intersects(ApSecurityFlags::KEY_MGMT_802_1X) {
+      NetworkType::EAP
+    } else if flags.intersects(ApSecurityFlags::KEY_MGMTPSK) {
+      NetworkType::PSK
+    } else if flags.is_empty() {
+      NetworkType::Open
+    } else {
+      continue;
+    };
+
+    aps.insert(
+      ssid.clone(),
+      AccessPoint {
+        ssid: Arc::from(ssid),
+        strength,
+        state,
+        working: false,
+        path: ap.inner().path().to_owned(),
+        secured: !ap.wpa_flags().await?.is_empty(),
+        wps_push: ap.flags().await?.contains(ApFlags::WPS_PBC),
+        network_type,
+        hw_address: hw_address
+          .as_ref()
+          .and_then(|str_addr| HwAddress::from_str(str_addr))
+          .unwrap_or_default(),
+      },
+    );
   }
 
   let aps = aps

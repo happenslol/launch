@@ -1,5 +1,6 @@
 mod dbus;
 mod types;
+mod wifi;
 
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -16,14 +17,23 @@ use crate::{
   util::{h_flex, v_flex},
 };
 
-pub fn get_items() -> Result<Vec<RootItem>> {
-  Ok(vec![RootItem::Panel {
-    id: "networks".into(),
-    name: "Networks".into(),
-    icon: None,
-    terms: vec!["net".into(), "network".into(), "ethernet".into()],
-    view: Arc::new(|window, cx| cx.new(|cx| NetworkPanel::new(window, cx)).into()),
-  }])
+pub fn get_items() -> Vec<RootItem> {
+  vec![
+    RootItem::Panel {
+      id: "networks".into(),
+      name: "Networks".into(),
+      icon: None,
+      terms: vec!["net".into(), "network".into(), "ethernet".into()],
+      view: Arc::new(|window, cx| cx.new(|cx| NetworkPanel::new(window, cx)).into()),
+    },
+    RootItem::Panel {
+      id: "wifi".into(),
+      icon: None,
+      name: "Wifi".into(),
+      terms: vec!["wifi".into()],
+      view: Arc::new(|window, cx| cx.new(|cx| wifi::WifiPanel::new(window, cx)).into()),
+    },
+  ]
 }
 
 pub struct NetworkPanel {
@@ -35,7 +45,7 @@ const CONTEXT: &str = "network";
 
 impl NetworkPanel {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-    let picker = cx.new(|cx| Picker::new(NetworkDelegate {}, vec![], window, cx));
+    let picker = cx.new(|cx| Picker::new(NetworkDelegate {}, Arc::new(vec![]), window, cx));
     cx.focus_view(&picker, window);
 
     let dbus_task = cx.spawn_in(window, async move |_window, _cx| {

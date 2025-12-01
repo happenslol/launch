@@ -51,7 +51,7 @@ impl AudioSinksPanel {
       .cloned()
       .collect::<Vec<_>>();
 
-    let picker = cx.new(|cx| Picker::new(delegate, sinks, window, cx));
+    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(sinks), window, cx));
 
     let subscriptions = vec![
       cx.subscribe_in(&audio_state, window, |this, audio_state, ev, window, cx| {
@@ -159,11 +159,7 @@ impl PickerDelegate for SinksDelegate {
 
     h_flex()
       .w_full()
-      .when_else(
-        is_selected,
-        |div| div.bg(rgb(0xDDDDDD)),
-        |div| div.bg(rgb(0xFFFFFF)),
-      )
+      .when(is_selected, |this| this.bg(rgb(0x444444)))
       .w_full()
       .gap_2()
       .child(

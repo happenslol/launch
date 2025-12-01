@@ -81,7 +81,7 @@ impl<D: PickerDelegate> EventEmitter<PickerEvent<D>> for Picker<D> {}
 impl<D: PickerDelegate> Picker<D> {
   pub fn new(
     delegate: D,
-    items: Vec<D::ListItem>,
+    items: Arc<Vec<D::ListItem>>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
@@ -97,7 +97,7 @@ impl<D: PickerDelegate> Picker<D> {
 
     let mut this = Self {
       delegate,
-      items: Arc::new(items),
+      items,
       search_input: search_input.clone(),
       selected_index: if has_items { Some(0) } else { None },
       matches: None,
