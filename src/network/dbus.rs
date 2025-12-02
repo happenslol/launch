@@ -137,12 +137,7 @@ pub async fn read_access_points(device: &WirelessDevice<'_>) -> Result<Vec<Acces
   let access_points = device.get_access_points().await?;
   let (state, hw_address) = {
     let device = device.upcast().await?;
-    let state = device
-      .cached_state()
-      .unwrap_or_default()
-      .map(|s| s.into())
-      .unwrap_or_else(|| DeviceState::Unknown);
-
+    let state = device.state().await.unwrap_or(DeviceState::Unknown);
     let hw_address = device.hw_address().await.ok();
 
     (state, hw_address)

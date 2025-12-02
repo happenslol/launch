@@ -60,7 +60,7 @@ impl Launcher {
         exclusive_zone: None,
         exclusive_edge: None,
         margin: None,
-        keyboard_interactivity: KeyboardInteractivity::Exclusive,
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
       }),
       ..Default::default()
     }

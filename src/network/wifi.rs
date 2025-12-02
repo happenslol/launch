@@ -2,7 +2,10 @@ use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use dbus_networkmanager::{
-  device::wireless::WirelessDevice, interface::device::wireless::WirelessDeviceProxy,
+  device::wireless::WirelessDevice,
+  interface::{
+    access_point::AccessPointProxy, device::wireless::WirelessDeviceProxy, enums::DeviceState,
+  },
   nm::NetworkManager,
 };
 use futures::{StreamExt as _, stream::FuturesUnordered};
@@ -33,11 +36,26 @@ pub struct WifiPanel {
 impl WifiPanel {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     cx.spawn_in(window, async move |this, cx| {
-      let conn = zbus::Connection::system().await?;
+      let conn = zbus::connection::Builder::system()
+        .unwrap()
+        .internal_executor(false)
+        .build()
+        .await
+        .unwrap();
+
+      let tick = cx.background_spawn({
+        let conn = conn.clone();
+        async move {
+          loop {
+            conn.executor().tick().await;
+          }
+        }
+      });
 
       this.update_in(cx, |this, window, cx| {
         this.conn = Some(conn.clone());
         this.listen_ap_changes(window, cx);
+        this.tasks.push(tick);
       })
     })
     .detach_and_log_err(cx);
@@ -69,20 +87,6 @@ impl WifiPanel {
         let path: Arc<str> = Arc::from(wifi_device.inner().path().as_str());
 
         async move {
-          let get_aps = {
-            let tx = tx.clone();
-            let iface = iface.clone();
-            let path = path.clone();
-            let wifi_device: WirelessDevice<'_> = wifi_device.clone().into();
-            async move {
-              let access_points = read_access_points(&wifi_device).await?;
-              println!("sending aps for {iface}: {access_points:?}");
-              tx.send_async((iface.clone(), (path.clone(), access_points)))
-                .await?;
-              Ok::<_, anyhow::Error>(())
-            }
-          };
-
           let receive_aps_changed = {
             let iface = iface.clone();
             let wifi_device: WirelessDevice<'_> = wifi_device.clone().into();
@@ -91,9 +95,24 @@ impl WifiPanel {
 
               while aps_changed.next().await.is_some() {
                 let access_points = read_access_points(&wifi_device).await?;
-                println!("sending aps for {iface}: {access_points:?}");
                 tx.send_async((iface.clone(), (path.clone(), access_points)))
                   .await?;
+              }
+
+              println!("aps_changed quit");
+              Ok::<_, anyhow::Error>(())
+            }
+          };
+
+          let active_conn = {
+            let wifi_device: WirelessDevice<'_> = wifi_device.clone().into();
+            async move {
+              let device = wifi_device.upcast().await?;
+              let mut changed = device.receive_active_connection_changed().await;
+              while let Some(_ev) = changed.next().await {
+                let ssid = wifi_device.active_access_point().await?.ssid().await?;
+                let ssid = String::from_utf8_lossy_owned(ssid);
+                println!("active_connection_changed: {ssid}");
               }
 
               Ok::<_, anyhow::Error>(())
@@ -106,12 +125,32 @@ impl WifiPanel {
             async move {
               let mut active_ap_changed = wifi_device.receive_active_access_point_changed().await;
 
-              while active_ap_changed.next().await.is_some() {
-                let active_ap = wifi_device.active_access_point().await?;
-                let ssid = String::from_utf8_lossy_owned(active_ap.ssid().await?);
-                active_tx.send_async((iface.clone(), ssid)).await?;
+              while let Some(_active) = active_ap_changed.next().await {
+                let active_ap = match wifi_device.active_access_point().await {
+                  Ok(active_ap) => active_ap,
+                  Err(e) => {
+                    println!("ERR get active: {e}");
+                    continue;
+                  }
+                };
+
+                println!("a: {active_ap:?}");
+                match active_ap.ssid().await {
+                  Ok(ssid) => {
+                    println!("b: active ssid: {}", String::from_utf8_lossy_owned(ssid))
+                  }
+                  Err(e) => {
+                    println!("ERR get ssid: {e}");
+                    continue;
+                  }
+                }
+
+                // let ssid = String::from_utf8_lossy_owned(active_ap.ssid().await?);
+                // println!("active_ap_changed: {ssid}");
+                // active_tx.send_async((iface.clone(), ssid)).await?;
               }
 
+              println!("active_ap_changed quit");
               Ok::<_, anyhow::Error>(())
             }
           };
@@ -124,7 +163,7 @@ impl WifiPanel {
               let mut state_changed = device.receive_state_changed().await;
 
               while let Some(ev) = state_changed.next().await {
-                let state = ev.get().await?;
+                let state: DeviceState = ev.get().await?.into();
                 println!("state changed {iface}: {state:?}");
               }
 
@@ -133,8 +172,8 @@ impl WifiPanel {
           };
 
           futures::join!(
+            active_conn,
             receive_state_changed,
-            get_aps,
             receive_aps_changed,
             receive_active_ap_changed
           )
