@@ -98,6 +98,9 @@ impl Launcher {
       )
     });
 
+    cx.focus_self(window);
+    cx.focus_view(&picker, window);
+
     let active_panel = panel.as_ref().and_then(|panel| {
       items
         .iter()
@@ -132,8 +135,6 @@ impl Launcher {
         }
       },
     )];
-
-    cx.focus_self(window);
 
     Self {
       focus_handle: cx.focus_handle(),

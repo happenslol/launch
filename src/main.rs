@@ -1,5 +1,7 @@
 #![feature(bool_to_result)]
 #![feature(vec_into_chunks)]
+#![feature(result_option_map_or_default)]
+#![feature(string_from_utf8_lossy_owned)]
 
 mod assets;
 mod audio;

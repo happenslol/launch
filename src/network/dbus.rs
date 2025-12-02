@@ -3,11 +3,17 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
 use dbus_networkmanager::{
-  device::wireless::WirelessDevice,
-  interface::enums::{ApFlags, ApSecurityFlags, DeviceState, DeviceType},
+  device::{Device, SpecificDevice, wireless::WirelessDevice},
+  interface::{
+    device::{DeviceProxy, wireless::WirelessDeviceProxy},
+    enums::{ApFlags, ApSecurityFlags, DeviceState, DeviceType},
+  },
   nm::NetworkManager,
 };
-use futures::{StreamExt as _, stream::FuturesOrdered};
+use futures::{
+  StreamExt as _,
+  stream::{FuturesOrdered, FuturesUnordered},
+};
 use itertools::Itertools;
 
 use crate::network::types::{
@@ -195,4 +201,32 @@ pub async fn read_access_points(device: &WirelessDevice<'_>) -> Result<Vec<Acces
     .collect();
 
   Ok(aps)
+}
+
+pub async fn get_wifi_devices<'a>(
+  nm: &NetworkManager<'a>,
+) -> Result<Vec<(String, WirelessDeviceProxy<'a>)>> {
+  let devices = nm.devices().await?;
+  let wifi_devices = FuturesUnordered::from_iter(devices.into_iter().map(|device| async move {
+    let device_type = device.device_type().await.ok()?;
+    if !matches!(device_type, DeviceType::Wifi) {
+      return None;
+    }
+
+    let conn = device.inner().connection().clone();
+    let iface = device.interface().await.ok()?;
+    let wifi_device = WirelessDeviceProxy::builder(&conn)
+      .path(device.inner().path())
+      .ok()?
+      .build()
+      .await
+      .ok()?;
+
+    Some((iface, wifi_device))
+  }))
+  .filter_map(|res| async move { res })
+  .collect::<Vec<_>>()
+  .await;
+
+  Ok(wifi_devices)
 }
