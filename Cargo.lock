@@ -3103,6 +3103,8 @@ dependencies = [
  "ropey",
  "rusqlite",
  "rustix 1.1.2",
+ "serde",
+ "serde_repr",
  "smallvec",
  "thiserror 2.0.17",
  "tracing",
@@ -3110,6 +3112,7 @@ dependencies = [
  "unicode-segmentation",
  "walkdir",
  "zbus",
+ "zvariant",
 ]
 
 [[package]]
