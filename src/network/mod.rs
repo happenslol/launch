@@ -5,7 +5,6 @@ mod wifi;
 use std::sync::{Arc, atomic::AtomicBool};
 
 use anyhow::Result;
-use dbus_networkmanager::nm::NetworkManager;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, SharedString, Task, Window,
   prelude::*, rgb,
