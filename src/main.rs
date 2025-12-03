@@ -6,6 +6,7 @@
 mod assets;
 mod audio;
 mod db;
+mod dbus;
 mod input;
 mod launcher;
 mod logging;

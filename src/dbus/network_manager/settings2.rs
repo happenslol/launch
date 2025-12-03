@@ -1,0 +1,91 @@
+use zbus::proxy;
+
+#[proxy(
+  interface = "org.freedesktop.NetworkManager.Settings.Connection",
+  default_service = "org.freedesktop.NetworkManager",
+  default_path = "/org/freedesktop/NetworkManager/Settings/1"
+)]
+pub trait Connection {
+  /// ClearSecrets method
+  fn clear_secrets(&self) -> zbus::Result<()>;
+
+  /// Delete method
+  fn delete(&self) -> zbus::Result<()>;
+
+  /// GetSecrets method
+  fn get_secrets(
+    &self,
+    setting_name: &str,
+  ) -> zbus::Result<
+    std::collections::HashMap<
+      String,
+      std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    >,
+  >;
+
+  /// GetSettings method
+  fn get_settings(
+    &self,
+  ) -> zbus::Result<
+    std::collections::HashMap<
+      String,
+      std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    >,
+  >;
+
+  /// Save method
+  fn save(&self) -> zbus::Result<()>;
+
+  /// Update method
+  fn update(
+    &self,
+    properties: std::collections::HashMap<
+      &str,
+      std::collections::HashMap<&str, &zbus::zvariant::Value<'_>>,
+    >,
+  ) -> zbus::Result<()>;
+
+  /// Update2 method
+  fn update2(
+    &self,
+    settings: std::collections::HashMap<
+      &str,
+      std::collections::HashMap<&str, &zbus::zvariant::Value<'_>>,
+    >,
+    flags: u32,
+    args: std::collections::HashMap<&str, &zbus::zvariant::Value<'_>>,
+  ) -> zbus::Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>>;
+
+  /// UpdateUnsaved method
+  fn update_unsaved(
+    &self,
+    properties: std::collections::HashMap<
+      &str,
+      std::collections::HashMap<&str, &zbus::zvariant::Value<'_>>,
+    >,
+  ) -> zbus::Result<()>;
+
+  /// Removed signal
+  #[zbus(signal)]
+  fn removed(&self) -> zbus::Result<()>;
+
+  /// Updated signal
+  #[zbus(signal)]
+  fn updated(&self) -> zbus::Result<()>;
+
+  /// Filename property
+  #[zbus(property)]
+  fn filename(&self) -> zbus::Result<String>;
+
+  /// Flags property
+  #[zbus(property)]
+  fn flags(&self) -> zbus::Result<u32>;
+
+  /// Unsaved property
+  #[zbus(property)]
+  fn unsaved(&self) -> zbus::Result<bool>;
+
+  /// VersionId property
+  #[zbus(property)]
+  fn version_id(&self) -> zbus::Result<u64>;
+}
