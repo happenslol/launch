@@ -14,7 +14,7 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.PPP",
-	default_service = "org.freedesktop.NetworkManager"
+  default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait PPP {
   /// NeedSecrets method

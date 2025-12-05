@@ -14,7 +14,7 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.VPN.Plugin",
-	default_service = "org.freedesktop.NetworkManager"
+  default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait Plugin {
   /// Connect method

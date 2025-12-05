@@ -14,6 +14,6 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.Device.OvsInterface",
-	default_service = "org.freedesktop.NetworkManager"
+  default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait OvsInterface {}

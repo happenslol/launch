@@ -14,7 +14,7 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.DHCP4Config",
-	default_service = "org.freedesktop.NetworkManager"
+  default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait DHCP4Config {
   /// Options property

@@ -14,7 +14,7 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.Settings.Connection",
-	default_service = "org.freedesktop.NetworkManager"
+  default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait Connection {
   /// ClearSecrets method

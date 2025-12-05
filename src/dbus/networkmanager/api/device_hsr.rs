@@ -14,7 +14,7 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.Device.Hsr",
-	default_service = "org.freedesktop.NetworkManager"
+  default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait Hsr {
   /// MulticastSpec property

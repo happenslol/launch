@@ -1,6 +1,6 @@
 mod api;
 
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{StreamExt, stream::FuturesUnordered, try_join};
 use gpui::SharedString;
 use zbus::Result;
 
@@ -84,6 +84,63 @@ impl std::fmt::Debug for WirelessDevice {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("WirelessDevice")
       .field("name", &self.name)
+      .finish()
+  }
+}
+
+impl WirelessDevice {
+  pub async fn get_access_points(&self) -> Result<Vec<AccessPoint>> {
+    let access_points = self.wireless_proxy.get_access_points().await?;
+    let access_points = access_points
+      .into_iter()
+      .map(|path| async move {
+        let access_point = api::AccessPointProxy::builder(self.device_proxy.inner().connection())
+          .path(path)
+          .ok()?
+          .build()
+          .await
+          .ok()?;
+
+        let (ssid, strength, frequency) = try_join!(
+          access_point.ssid(),
+          access_point.strength(),
+          access_point.frequency(),
+        )
+        .ok()?;
+
+        let ssid = String::from_utf8_lossy(&ssid).to_string();
+        let ssid = SharedString::from(ssid);
+
+        Some(AccessPoint {
+          ssid,
+          strength,
+          frequency,
+          proxy: access_point,
+        })
+      })
+      .collect::<FuturesUnordered<_>>()
+      .filter_map(|access_point| async { access_point })
+      .collect::<Vec<_>>()
+      .await;
+
+    Ok(vec![])
+  }
+}
+
+pub struct AccessPoint {
+  pub ssid: SharedString,
+  pub strength: u8,
+  pub frequency: u32,
+
+  proxy: api::AccessPointProxy<'static>,
+}
+
+impl std::fmt::Debug for AccessPoint {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("AccessPoint")
+      .field("ssid", &self.ssid)
+      .field("strength", &self.strength)
+      .field("frequency", &self.frequency)
       .finish()
   }
 }

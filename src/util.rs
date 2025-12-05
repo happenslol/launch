@@ -1,4 +1,5 @@
 #![allow(unused)]
+use futures::{Stream, stream::FilterMap};
 use gpui::{Div, Styled, div};
 
 pub trait StyledExt: Styled + Sized {
