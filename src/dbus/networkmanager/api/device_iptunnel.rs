@@ -14,7 +14,7 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.Device.IPTunnel",
-  assume_defaults = true
+	default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait IPTunnel {
   /// EncapsulationLimit property

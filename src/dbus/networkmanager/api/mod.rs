@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 // NetworkManager D-Bus API modules
 mod access_point;
 mod agent_manager;

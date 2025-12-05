@@ -14,7 +14,7 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.VPN.Plugin",
-  assume_defaults = true
+	default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait Plugin {
   /// Connect method
@@ -112,8 +112,8 @@ pub trait Plugin {
   fn secrets_required(&self, message: &str, secrets: Vec<&str>) -> zbus::Result<()>;
 
   /// StateChanged signal
-  #[zbus(signal)]
-  fn state_changed(&self, state: u32) -> zbus::Result<()>;
+  #[zbus(signal, name = "StateChanged")]
+  fn state_changed_signal(&self, state: u32) -> zbus::Result<()>;
 
   /// State property
   #[zbus(property)]

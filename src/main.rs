@@ -36,6 +36,7 @@ fn main() -> Result<()> {
   let args = Args::try_parse()?;
 
   Application::new().with_assets(Assets).run(move |cx| {
+    dbus::init(cx);
     audio::init(cx);
     InputState::init(cx);
 

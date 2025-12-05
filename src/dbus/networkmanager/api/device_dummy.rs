@@ -14,7 +14,7 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.Device.Dummy",
-  assume_defaults = true
+	default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait Dummy {
   /// HwAddress property

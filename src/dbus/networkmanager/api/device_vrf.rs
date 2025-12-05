@@ -14,7 +14,7 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.Device.Vrf",
-  assume_defaults = true
+	default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait Vrf {
   /// Table property

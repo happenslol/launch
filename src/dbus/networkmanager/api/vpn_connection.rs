@@ -14,12 +14,12 @@
 use zbus::proxy;
 #[proxy(
   interface = "org.freedesktop.NetworkManager.VPN.Connection",
-  assume_defaults = true
+	default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait Connection {
   /// VpnStateChanged signal
   #[zbus(signal)]
-  fn vpn_state_changed(&self, state: u32, reason: u32) -> zbus::Result<()>;
+  fn vpn_state_changed_signal(&self, state: u32, reason: u32) -> zbus::Result<()>;
 
   /// Banner property
   #[zbus(property)]

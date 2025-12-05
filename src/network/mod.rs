@@ -1,5 +1,3 @@
-mod dbus;
-mod types;
 mod wifi;
 
 use std::sync::{Arc, atomic::AtomicBool};
@@ -47,13 +45,7 @@ impl NetworkPanel {
     let picker = cx.new(|cx| Picker::new(NetworkDelegate {}, Arc::new(vec![]), window, cx));
     cx.focus_view(&picker, window);
 
-    let dbus_task = cx.spawn_in(window, async move |_window, _cx| {
-      let conn = zbus::Connection::system().await?;
-      let nm = NetworkManager::new(&conn).await?;
-      let devices = dbus::list_devices(&nm).await?;
-
-      Ok(())
-    });
+    let dbus_task = cx.spawn_in(window, async move |_this, _cx| Ok(()));
 
     Self {
       picker,

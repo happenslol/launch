@@ -115,7 +115,7 @@ pub trait NetworkManager {
 
   /// state method
   #[zbus(name = "state")]
-  fn state(&self) -> zbus::Result<u32>;
+  fn state_method(&self) -> zbus::Result<u32>;
 
   /// CheckPermissions signal
   #[zbus(signal)]
@@ -130,8 +130,8 @@ pub trait NetworkManager {
   fn device_removed(&self, device_path: zbus::zvariant::ObjectPath<'_>) -> zbus::Result<()>;
 
   /// StateChanged signal
-  #[zbus(signal)]
-  fn state_changed(&self, state: u32) -> zbus::Result<()>;
+  #[zbus(signal, name = "StateChanged")]
+  fn state_changed_signal(&self, state: u32) -> zbus::Result<()>;
 
   /// ActivatingConnection property
   #[zbus(property)]
@@ -183,7 +183,7 @@ pub trait NetworkManager {
   #[zbus(property)]
   fn set_global_dns_configuration(
     &self,
-    value: std::collections::HashMap<&str, &zbus::zvariant::Value<'_>>,
+    value: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
   ) -> zbus::Result<()>;
 
   /// Metered property
