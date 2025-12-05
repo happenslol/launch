@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, pin::pin};
 
 use anyhow::Result;
+use futures::StreamExt;
 use gpui::{SharedString, Subscription, Task, UniformListScrollHandle, Window, prelude::*};
 
 use crate::{
@@ -64,11 +65,24 @@ impl WifiPanel {
               let name = device.name.clone();
               (name, device)
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
 
           Ok::<_, anyhow::Error>(devices)
         })
         .await?;
+
+      for device in devices.values() {
+        cx.spawn({
+          let device = device.clone();
+          async move |_cx| {
+            let mut access_points = pin!(device.access_point_changes().await);
+            while let Some(aps) = access_points.next().await {
+              println!("got access points: {:?}", aps);
+            }
+          }
+        })
+        .detach();
+      }
 
       this.update(cx, |this, cx| {
         println!("got devices: {:?}", devices);
