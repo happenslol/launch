@@ -336,6 +336,19 @@ impl PickerDelegate for RootDelegate {
       )
   }
 
+  fn sort_items(
+    &self,
+    items: &[Self::ListItem],
+    matches: &mut [(usize, u32)],
+  ) {
+    matches.sort_by_key(|(i, score)| {
+      let (count, last_launch) = self.launches.get(&items[*i].id()).copied().unwrap_or_default();
+
+      // Sort by score (descending), then count (descending), then last_launch (descending)
+      Reverse((*score, count, last_launch))
+    });
+  }
+
   fn update_matches(
     &mut self,
     window: &mut Window,
@@ -354,7 +367,6 @@ impl PickerDelegate for RootDelegate {
     }
 
     let locales = self.xdg_locales.clone();
-    let launches = self.launches.clone();
 
     cx.spawn_in(window, async move |picker, cx| {
       let Some(matches) = cx
@@ -412,13 +424,6 @@ impl PickerDelegate for RootDelegate {
           if cancel_flag.load(Ordering::Acquire) {
             return None;
           }
-
-          matches.sort_by_key(|(i, score)| {
-            let (count, last_launch) = launches.get(&items[*i].id()).copied().unwrap_or_default();
-
-            // Use launch count and recency as tie breaker
-            Reverse((*score, count, last_launch))
-          });
 
           Some(matches)
         })

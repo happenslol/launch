@@ -52,6 +52,15 @@ pub trait PickerDelegate: Sized + 'static {
     search_id: usize,
     items: Arc<Vec<Self::ListItem>>,
   ) -> Task<()>;
+
+  fn sort_items(
+    &self,
+    _items: &[Self::ListItem],
+    matches: &mut [(usize, u32)],
+  ) {
+    // Default implementation: sort by score descending
+    matches.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+  }
 }
 
 pub struct Picker<D: PickerDelegate> {
@@ -206,11 +215,13 @@ impl<D: PickerDelegate> Picker<D> {
       return;
     }
 
-    let Some(matches) = matches else {
-      self.matches = None;
-      cx.notify();
-      return;
-    };
+    let mut matches = matches.unwrap_or_else(|| {
+      // No matches provided (empty query), create indices for all items with score 0
+      (0..self.items.len()).map(|i| (i, 0)).collect()
+    });
+
+    // Sort items using the delegate's sorting logic
+    self.delegate.sort_items(&self.items, &mut matches);
 
     self.selected_index = if !matches.is_empty() {
       Some(
