@@ -60,7 +60,7 @@ impl Launcher {
         exclusive_zone: None,
         exclusive_edge: None,
         margin: None,
-        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        keyboard_interactivity: KeyboardInteractivity::Exclusive,
       }),
       ..Default::default()
     }
@@ -336,13 +336,13 @@ impl PickerDelegate for RootDelegate {
       )
   }
 
-  fn sort_items(
-    &self,
-    items: &[Self::ListItem],
-    matches: &mut [(usize, u32)],
-  ) {
+  fn sort_items(&self, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
     matches.sort_by_key(|(i, score)| {
-      let (count, last_launch) = self.launches.get(&items[*i].id()).copied().unwrap_or_default();
+      let (count, last_launch) = self
+        .launches
+        .get(&items[*i].id())
+        .copied()
+        .unwrap_or_default();
 
       // Sort by score (descending), then count (descending), then last_launch (descending)
       Reverse((*score, count, last_launch))
