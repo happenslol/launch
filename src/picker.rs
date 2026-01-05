@@ -140,6 +140,9 @@ impl<D: PickerDelegate> Picker<D> {
       },
     ));
 
+    // Perform initial search/sort with empty query
+    this.update_matches(window, cx);
+
     this
   }
 
