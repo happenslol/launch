@@ -2,7 +2,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render,
-  Styled, Subscription, Task, Window, actions, div, prelude::*, rgb,
+  RenderOnce, Styled, Subscription, Task, Window, actions, div, prelude::*, px, relative, rgb,
 };
 use nucleo_matcher::{
   Config, Matcher, Utf32Str,
@@ -141,6 +141,50 @@ impl Render for AudioSinksPanel {
   }
 }
 
+#[derive(IntoElement)]
+pub struct VolumeBar {
+  volume_percent: u32,
+  is_muted: bool,
+}
+
+impl VolumeBar {
+  pub fn new(volume_percent: u32, is_muted: bool) -> Self {
+    Self {
+      volume_percent,
+      is_muted,
+    }
+  }
+}
+
+impl RenderOnce for VolumeBar {
+  fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    // Calculate fill percentage, clamped to 0.0-1.0 for visual display
+    let fill_percentage = (self.volume_percent as f32 / 100.0).min(1.0);
+
+    // Determine bar color based on mute state
+    let bar_color = if self.is_muted {
+      rgb(0x666666) // Dimmed gray for muted
+    } else {
+      rgb(0x007ACC) // Blue for normal
+    };
+
+    // Two-layer div structure (same as Zed's ProgressBar)
+    div()
+      .w_full()
+      .h(px(6.0))
+      .rounded(px(3.0))
+      .p(px(1.0))
+      .bg(rgb(0x333333)) // Dark gray background
+      .child(
+        div()
+          .h_full()
+          .rounded(px(2.0))
+          .bg(bar_color)
+          .w(relative(fill_percentage)), // Proportional width
+      )
+  }
+}
+
 struct SinksDelegate {
   audio_state: Entity<AudioState>,
 }
@@ -156,27 +200,37 @@ impl PickerDelegate for SinksDelegate {
     is_selected: bool,
   ) -> impl IntoElement {
     let is_default = self.audio_state.read(cx).default_sink == Some(item.id);
+    let volume_percent = item.volume.as_percent(item.base_volume);
 
-    h_flex()
+    v_flex()
       .w_full()
       .when(is_selected, |this| this.bg(rgb(0x444444)))
-      .w_full()
-      .gap_2()
+      .gap_1()
       .child(
+        // First row: name with indicators + percentage text
         h_flex()
-          .text_ellipsis()
-          .overflow_x_hidden()
-          .flex_1()
-          .when(is_default, |div| div.child("---> "))
-          .when(item.mute, |div| div.child("MUTE "))
+          .w_full()
+          .gap_2()
           .child(
-            item
-              .description
-              .clone()
-              .unwrap_or_else(|| item.name.clone().unwrap_or_default()),
-          ),
+            h_flex()
+              .flex_1()
+              .text_ellipsis()
+              .overflow_x_hidden()
+              .when(is_default, |div| div.child("---> "))
+              .when(item.mute, |div| div.child("MUTE "))
+              .child(
+                item
+                  .description
+                  .clone()
+                  .unwrap_or_else(|| item.name.clone().unwrap_or_default()),
+              ),
+          )
+          .child(div().child(format!("{}%", volume_percent))),
       )
-      .child(div().child(format!("{}%", item.volume.as_percent(item.base_volume))))
+      .child(
+        // Second row: full-width volume bar only
+        VolumeBar::new(volume_percent, item.mute),
+      )
   }
 
   fn update_matches(
