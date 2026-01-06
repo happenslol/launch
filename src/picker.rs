@@ -68,7 +68,9 @@ pub struct Picker<D: PickerDelegate> {
   items: Arc<Vec<D::ListItem>>,
   matches: Option<Vec<(usize, u32)>>,
 
-  search_input: Entity<InputState>,
+  pub search_input: Entity<InputState>,
+
+  focus_handle: FocusHandle,
   selected_index: Option<usize>,
   current_query: String,
   list_scroll_handle: UniformListScrollHandle,
@@ -107,6 +109,7 @@ impl<D: PickerDelegate> Picker<D> {
     let mut this = Self {
       delegate,
       items,
+      focus_handle: cx.focus_handle(),
       search_input: search_input.clone(),
       selected_index: if has_items { Some(0) } else { None },
       matches: None,
@@ -311,8 +314,8 @@ impl<D: PickerDelegate> Picker<D> {
 }
 
 impl<D: PickerDelegate> Focusable for Picker<D> {
-  fn focus_handle(&self, cx: &App) -> FocusHandle {
-    self.search_input.read(cx).focus_handle.clone()
+  fn focus_handle(&self, _cx: &App) -> FocusHandle {
+    self.focus_handle.clone()
   }
 }
 
@@ -324,6 +327,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
       .map_or_else(|| self.items.len(), |matches| matches.len());
 
     v_flex()
+      .track_focus(&self.focus_handle)
       .on_action(cx.listener(Self::select_next))
       .on_action(cx.listener(Self::select_prev))
       .size_full()

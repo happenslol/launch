@@ -116,14 +116,8 @@ impl Launcher {
 
     // Focus the appropriate view: panel if one was created via CLI, otherwise the picker
     if active_panel.is_none() {
-      // Defer focusing the picker until after the window is fully initialized
-      let picker = picker.clone();
-      window.defer(cx, move |window, cx| {
-        window.focus(&picker.read(cx).focus_handle(cx));
-      });
+      cx.focus_view(&picker.read(cx).search_input.clone(), window);
     }
-    // If a panel was created via CLI, don't focus anything here - the panel's constructor
-    // already focused its internal search input
 
     let subscriptions = vec![cx.subscribe_in(
       &picker,
@@ -159,7 +153,7 @@ impl Launcher {
       // Defer focusing the root picker so it happens after the panel is removed from the render tree
       let picker = self.picker.clone();
       window.defer(cx, move |window, cx| {
-        window.focus(&picker.read(cx).focus_handle(cx));
+        window.focus(&picker.read(cx).search_input.focus_handle(cx));
       });
       return;
     }

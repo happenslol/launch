@@ -76,7 +76,7 @@ impl AudioSinksPanel {
       }),
     ];
 
-    cx.focus_view(&picker, window);
+    cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
     Self {
       picker,
