@@ -143,6 +143,7 @@ pub struct Device {
   pub battery: Option<u8>,
 
   path: OwnedObjectPath,
+  conn: zbus::Connection,
   device_proxy: api::Device1Proxy<'static>,
 }
 
@@ -174,6 +175,7 @@ impl Device {
       paired,
       battery,
       path,
+      conn: conn.clone(),
       device_proxy,
     })
   }
@@ -195,6 +197,32 @@ impl Device {
 
   pub fn object_path(&self) -> &OwnedObjectPath {
     &self.path
+  }
+
+  pub async fn listen_alias_changed(&self) -> Result<impl Stream<Item = String> + use<>> {
+    let stream = self.device_proxy.receive_alias_changed().await;
+    Ok(stream.filter_map(|signal| async move {
+      signal.get().await.ok()
+    }))
+  }
+
+  pub async fn listen_connected_changed(&self) -> Result<impl Stream<Item = bool> + use<>> {
+    let stream = self.device_proxy.receive_connected_changed().await;
+    Ok(stream.filter_map(|signal| async move {
+      signal.get().await.ok()
+    }))
+  }
+
+  pub async fn listen_battery_changed(&self) -> Result<impl Stream<Item = Option<u8>> + use<>> {
+    let battery_proxy = api::Battery1Proxy::builder(&self.conn)
+      .path(self.path.clone())?
+      .build()
+      .await?;
+
+    let stream = battery_proxy.receive_percentage_changed().await;
+    Ok(stream.filter_map(|signal| async move {
+      signal.get().await.ok().map(Some)
+    }))
   }
 }
 

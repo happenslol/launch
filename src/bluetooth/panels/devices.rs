@@ -2,8 +2,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use futures::StreamExt;
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Styled, Subscription, Task,
-  Window, div, prelude::*, rgb,
+  App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled,
+  Subscription, Task, Window, div, prelude::*, rgb,
 };
 use nucleo_matcher::{
   Config, Matcher, Utf32Str,
@@ -12,16 +12,126 @@ use nucleo_matcher::{
 use tracing::error;
 
 use crate::{
-  dbus::{GlobalDbusConnection, bluez::{Adapter, BlueZ, Device}},
+  dbus::{
+    GlobalDbusConnection,
+    bluez::{Adapter, BlueZ, Device},
+  },
   picker::{Picker, PickerDelegate, PickerEvent},
-  util::{h_flex, v_flex},
+  util::v_flex,
 };
+
+pub struct DeviceEntry {
+  device: Device,
+  _property_listeners: Vec<Task<()>>,
+}
+
+impl DeviceEntry {
+  pub fn new(device: Device, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let mut entry = Self {
+      device: device.clone(),
+      _property_listeners: Vec::new(),
+    };
+
+    entry.spawn_property_listeners(&device, window, cx);
+    entry
+  }
+
+  pub fn device(&self) -> &Device {
+    &self.device
+  }
+
+  fn spawn_property_listeners(
+    &mut self,
+    device: &Device,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let alias_listener = cx.spawn_in(window, {
+      let device = device.clone();
+      async move |this, cx| {
+        let alias_stream = cx
+          .background_spawn({
+            let device = device.clone();
+            async move { device.listen_alias_changed().await }
+          })
+          .await;
+
+        let Ok(alias_stream) = alias_stream else {
+          return;
+        };
+
+        futures::pin_mut!(alias_stream);
+
+        while let Some(new_alias) = alias_stream.next().await {
+          let _ = this.update(cx, |this, cx| {
+            this.device.name = SharedString::from(new_alias.clone());
+            cx.notify();
+          });
+        }
+      }
+    });
+
+    let connected_listener = cx.spawn_in(window, {
+      let device = device.clone();
+      async move |this, cx| {
+        let connected_stream = cx
+          .background_spawn({
+            let device = device.clone();
+            async move { device.listen_connected_changed().await }
+          })
+          .await;
+
+        let Ok(connected_stream) = connected_stream else {
+          return;
+        };
+
+        futures::pin_mut!(connected_stream);
+
+        while let Some(new_connected) = connected_stream.next().await {
+          let _ = this.update(cx, |this, cx| {
+            this.device.connected = new_connected;
+            cx.notify();
+          });
+        }
+      }
+    });
+
+    let battery_listener = cx.spawn_in(window, {
+      let device = device.clone();
+      async move |this, cx| {
+        let battery_stream = cx
+          .background_spawn({
+            let device = device.clone();
+            async move { device.listen_battery_changed().await }
+          })
+          .await;
+
+        let Ok(battery_stream) = battery_stream else {
+          return;
+        };
+
+        futures::pin_mut!(battery_stream);
+
+        while let Some(new_battery) = battery_stream.next().await {
+          let _ = this.update(cx, |this, cx| {
+            this.device.battery = new_battery;
+            cx.notify();
+          });
+        }
+      }
+    });
+
+    self._property_listeners.push(alias_listener);
+    self._property_listeners.push(connected_listener);
+    self._property_listeners.push(battery_listener);
+  }
+}
 
 pub struct BluetoothDevicesPanel {
   picker: Entity<Picker<DevicesDelegate>>,
   bluez: Option<BlueZ>,
   adapter: Option<Adapter>,
-  devices: Vec<Device>,
+  devices: Vec<Entity<DeviceEntry>>,
   _device_updates_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
@@ -35,15 +145,16 @@ impl BluetoothDevicesPanel {
 
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
-        if let PickerEvent::Picked(device) = ev {
-          this.handle_device_picked(device.clone(), window, cx);
+        if let PickerEvent::Picked(device_entry) = ev {
+          let device = device_entry.read(cx).device().clone();
+          this.handle_device_picked(device, window, cx);
         }
       }),
       cx.observe_global_in::<GlobalDbusConnection>(window, |this, window, cx| {
-        if this.bluez.is_none() {
-          if let Some(conn) = GlobalDbusConnection::system(cx) {
-            this.initialize(window, cx, &conn);
-          }
+        if this.bluez.is_none()
+          && let Some(conn) = GlobalDbusConnection::system(cx)
+        {
+          this.initialize(window, cx, &conn);
         }
       }),
     ];
@@ -101,22 +212,25 @@ impl BluetoothDevicesPanel {
         })
         .await;
 
-      let devices = match cx
+      let devices = cx
         .background_spawn({
           let bluez = bluez.clone();
           async move { bluez.get_devices().await }
         })
         .await
-      {
-        Ok(devices) => devices,
-        Err(_) => Vec::new(),
-      };
+        .unwrap_or_default();
 
       this
         .update_in(cx, |this, window, cx| {
           this.bluez = Some(bluez.clone());
           this.adapter = Some(adapter.clone());
-          this.devices = devices;
+
+          let device_entries: Vec<Entity<DeviceEntry>> = devices
+            .into_iter()
+            .map(|device| cx.new(|cx| DeviceEntry::new(device, window, cx)))
+            .collect();
+
+          this.devices = device_entries;
 
           picker.update(cx, |picker, cx| {
             picker.set_items(this.devices.clone(), window, cx);
@@ -142,11 +256,12 @@ impl BluetoothDevicesPanel {
 
     cx.spawn_in(window, async move |this, cx| {
       let conn = bluez.conn.clone();
-      let interfaces_added_result = cx.background_spawn({
-        let bluez = bluez.clone();
-        async move { bluez.interfaces_added().await }
-      })
-      .await;
+      let interfaces_added_result = cx
+        .background_spawn({
+          let bluez = bluez.clone();
+          async move { bluez.interfaces_added().await }
+        })
+        .await;
 
       let Ok(interfaces_added) = interfaces_added_result else {
         return;
@@ -169,44 +284,44 @@ impl BluetoothDevicesPanel {
         if let Ok(device) = device_result {
           let _ = this.update_in(cx, |this, window, cx| {
             let device_address = device.address.clone();
-            if let Some(existing) = this.devices.iter_mut().find(|d| d.address == device_address) {
-              *existing = device.clone();
-            } else {
-              this.devices.push(device.clone());
+
+            let already_exists = this
+              .devices
+              .iter()
+              .any(|entry| entry.read(cx).device().address == device_address);
+
+            if !already_exists {
+              let new_entry = cx.new(|cx| DeviceEntry::new(device, window, cx));
+              this.devices.push(new_entry);
+
+              let picker = this.picker.clone();
+              picker.update(cx, |picker, cx| {
+                picker.set_items(this.devices.clone(), window, cx);
+              });
+
+              cx.notify();
             }
-
-            let picker = this.picker.clone();
-            picker.update(cx, |picker, cx| {
-              picker.set_items(this.devices.clone(), window, cx);
-            });
-
-            cx.notify();
           });
         }
       }
     })
   }
 
+  fn handle_device_picked(&mut self, device: Device, _window: &mut Window, cx: &mut Context<Self>) {
+    cx.background_spawn(async move {
+      if !device.paired {
+        device.pair().await?;
+      }
 
-  fn handle_device_picked(&mut self, device: Device, window: &mut Window, cx: &mut Context<Self>) {
-    cx.spawn_in(window, async move |_this, cx| {
-      let _ = cx
-        .background_spawn(async move {
-          if !device.paired {
-            device.pair().await?;
-          }
+      if device.connected {
+        device.disconnect().await?;
+      } else {
+        device.connect().await?;
+      }
 
-          if device.connected {
-            device.disconnect().await?;
-          } else {
-            device.connect().await?;
-          }
-
-          Ok::<(), anyhow::Error>(())
-        })
-        .await;
+      Ok::<(), anyhow::Error>(())
     })
-    .detach();
+    .detach_and_log_err(cx);
   }
 }
 
@@ -228,25 +343,26 @@ impl Render for BluetoothDevicesPanel {
 struct DevicesDelegate {}
 
 impl PickerDelegate for DevicesDelegate {
-  type ListItem = Device;
+  type ListItem = Entity<DeviceEntry>;
 
   fn render_list_item(
     &self,
     _window: &mut Window,
-    _cx: &mut Context<Picker<Self>>,
+    cx: &mut Context<Picker<Self>>,
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
+    let device = item.read(cx).device();
     let mut status_text = String::new();
-    if item.connected {
+    if device.connected {
       status_text.push_str("CONNECTED ");
     }
-    if !item.paired {
+    if !device.paired {
       status_text.push_str("NEW ");
     }
-    status_text.push_str(&item.name);
+    status_text.push_str(&device.name);
 
-    let battery_text = item
+    let battery_text = device
       .battery
       .map(|b| format!("Battery: {}%", b))
       .unwrap_or_else(|| String::from(" "));
@@ -291,13 +407,16 @@ impl PickerDelegate for DevicesDelegate {
     let mut buf = Vec::new();
 
     for (index, item) in items.iter().enumerate() {
+      // TODO: Is it cheaper to store the string outside of the entity so we don't have to
+      // read here?
+      let device = item.read(cx).device();
       let mut max_score: Option<u32> = None;
 
-      if let Some(score) = needle.score(Utf32Str::new(&item.name, &mut buf), &mut matcher) {
+      if let Some(score) = needle.score(Utf32Str::new(&device.name, &mut buf), &mut matcher) {
         max_score = Some(score);
       }
 
-      if let Some(score) = needle.score(Utf32Str::new(&item.address, &mut buf), &mut matcher) {
+      if let Some(score) = needle.score(Utf32Str::new(&device.address, &mut buf), &mut matcher) {
         max_score = Some(max_score.map_or(score, |s| s.max(score)));
       }
 
