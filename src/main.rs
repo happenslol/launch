@@ -5,6 +5,7 @@
 
 mod assets;
 mod audio;
+mod bluetooth;
 mod db;
 mod dbus;
 mod input;

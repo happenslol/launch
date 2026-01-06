@@ -134,6 +134,8 @@ Other entities can then register a callback to handle these events by doing `cx.
 
 A "panel" is a view that is rendered in the launcher window. Panels can be selected from the launcher or started from the command line with their id. Panels will mostly use a picker view, but can theoretically render whatever they want.
 
+To be shown in the launcher, panels should have a `get_items` function which returns a list of `RootItem`s.
+
 # dbus
 
 This project uses zbus to communicate with the system and user dbus. Each dbus service has a module in `src/dbus`, with the following structure:
