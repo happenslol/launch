@@ -26,7 +26,6 @@ impl Global for GlobalAudioState {}
 
 pub enum AudioEvent {
   SinksChanged,
-  #[allow(dead_code)]
   SourcesChanged,
 }
 
@@ -124,36 +123,36 @@ impl AudioState {
       // Source events
       SourceFound(source) => this.update(cx, |this, cx| {
         this.sources.insert(source.id, source);
-        cx.emit(AudioEvent::SinksChanged);
+        cx.emit(AudioEvent::SourcesChanged);
         cx.notify()
       })?,
       SourceInfoChanged(source) => this.update(cx, |this, cx| {
         this.sources.insert(source.id, source);
-        cx.emit(AudioEvent::SinksChanged);
+        cx.emit(AudioEvent::SourcesChanged);
         cx.notify()
       })?,
       SourceVolumeChanged(source, volume) => this.update(cx, |this, cx| {
         if let Some(source) = this.sources.get_mut(&source) {
           source.volume = volume;
-          cx.emit(AudioEvent::SinksChanged);
+          cx.emit(AudioEvent::SourcesChanged);
           cx.notify();
         }
       })?,
       SourceMuteChanged(source, muted) => this.update(cx, |this, cx| {
         if let Some(source) = this.sources.get_mut(&source) {
           source.mute = muted;
-          cx.emit(AudioEvent::SinksChanged);
+          cx.emit(AudioEvent::SourcesChanged);
           cx.notify();
         }
       })?,
       SourceRemoved(source) => this.update(cx, |this, cx| {
         this.sources.remove(&source);
-        cx.emit(AudioEvent::SinksChanged);
+        cx.emit(AudioEvent::SourcesChanged);
         cx.notify();
       })?,
       DefaultSourceChanged(default) => this.update(cx, |this, cx| {
         this.default_source = default;
-        cx.emit(AudioEvent::SinksChanged);
+        cx.emit(AudioEvent::SourcesChanged);
         cx.notify();
       })?,
 
@@ -185,7 +184,15 @@ impl AudioState {
     self.pulse.send_command(Command::SetSinkVolume(sink, set))
   }
 
-  pub fn _set_default_source(&self, source: SourceId, cx: &mut Context<Self>) -> Task<Result<()>> {
+  pub fn set_default_source(&self, source: SourceId, cx: &mut Context<Self>) -> Task<Result<()>> {
     self.async_command(cx, |tx| Command::SetDefaultSource(source, tx))
+  }
+
+  pub fn set_source_volume(&self, source: SourceId, set: SetVolume) {
+    self.pulse.send_command(Command::SetSourceVolume(source, set))
+  }
+
+  pub fn set_source_mute(&self, source: SourceId, set: SetMute) {
+    self.pulse.send_command(Command::SetSourceMute(source, set))
   }
 }
