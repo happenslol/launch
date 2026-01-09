@@ -11,9 +11,9 @@ use nucleo_matcher::{
 
 use crate::{
   audio::{
-    AudioEvent, AudioState,
+    AudioState,
     pulse::{SetMute, SetVolume},
-    types::{SourceId, SourceInfo},
+    types::{SourceId, SourceInfo, SourceListEvent},
   },
   picker::{Picker, PickerDelegate, PickerEvent},
   util::v_flex,
@@ -25,6 +25,8 @@ pub struct AudioSourcesPanel {
   picker: Entity<Picker<SourcesDelegate>>,
   audio_state: Entity<AudioState>,
   _subscriptions: Vec<Subscription>,
+  _list_subscription_task: Task<()>,
+  _initial_load_task: Task<()>,
 }
 
 const CONTEXT: &str = "sources";
@@ -46,33 +48,69 @@ impl AudioSourcesPanel {
       audio_state: audio_state.clone(),
     };
 
-    let sources = audio_state
-      .read(cx)
-      .sources
-      .values()
-      .cloned()
-      .collect::<Vec<_>>();
+    // Start with empty picker
+    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
 
-    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(sources), window, cx));
+    // Load initial data async
+    let initial_load_task = window.spawn(cx, {
+      let picker = picker.clone();
+      let audio_state = audio_state.clone();
+      async move |cx| {
+        let sources = cx
+          .update(|_, cx| {
+            let executor = cx.background_executor();
+            audio_state.read(cx).list_sources(&executor)
+          })
+          .ok();
+        let Some(sources_task) = sources else { return };
+        let sources = sources_task.await;
 
-    let subscriptions = vec![
-      cx.subscribe_in(&audio_state, window, |this, audio_state, ev, window, cx| {
-        if let AudioEvent::SourcesChanged = ev {
-          let sources = audio_state.read(cx).sources.values().cloned().collect();
-          this.picker.update(cx, |picker, cx| {
-            picker.set_items(sources, window, cx);
-          });
+        let _ = picker.update_in(cx, |picker, window, cx| {
+          picker.set_items(sources, window, cx);
+        });
+      }
+    });
+
+    // Subscribe to list changes
+    let list_rx = audio_state.read(cx).subscribe_source_list();
+    let list_subscription_task = window.spawn(cx, {
+      let picker = picker.clone();
+      let audio_state = audio_state.clone();
+      async move |cx| {
+        while let Ok(event) = list_rx.recv_async().await {
+          match event {
+            SourceListEvent::Added(_) | SourceListEvent::Removed(_) => {
+              // Refresh the full list
+              let sources = cx
+                .update(|_, cx| {
+                  let executor = cx.background_executor();
+                  audio_state.read(cx).list_sources(&executor)
+                })
+                .ok();
+              let Some(sources_task) = sources else { continue };
+              let sources = sources_task.await;
+
+              let _ = picker.update_in(cx, |picker, window, cx| {
+                picker.set_items(sources, window, cx);
+              });
+            }
+            SourceListEvent::DefaultChanged(_) => {
+              // Just notify to re-render (default_source updated via AudioState's internal sub)
+              let _ = picker.update_in(cx, |_, _, cx| cx.notify());
+            }
+          }
         }
-      }),
-      cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
-        if let PickerEvent::Picked(item) = ev {
-          this
-            .audio_state
-            .update(cx, |state, cx| state.set_default_source(item.id, cx))
-            .detach_and_log_err(cx);
-        }
-      }),
-    ];
+      }
+    });
+
+    let subscriptions = vec![cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
+      if let PickerEvent::Picked(item) = ev {
+        this
+          .audio_state
+          .update(cx, |state, cx| state.set_default_source(item.id, cx))
+          .detach_and_log_err(cx);
+      }
+    })];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
@@ -80,6 +118,8 @@ impl AudioSourcesPanel {
       picker,
       audio_state,
       _subscriptions: subscriptions,
+      _list_subscription_task: list_subscription_task,
+      _initial_load_task: initial_load_task,
     }
   }
 

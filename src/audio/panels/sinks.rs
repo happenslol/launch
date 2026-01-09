@@ -11,9 +11,9 @@ use nucleo_matcher::{
 
 use crate::{
   audio::{
-    AudioEvent, AudioState,
+    AudioState,
     pulse::{SetMute, SetVolume},
-    types::{SinkId, SinkInfo},
+    types::{SinkId, SinkInfo, SinkListEvent},
   },
   picker::{Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
@@ -23,6 +23,8 @@ pub struct AudioSinksPanel {
   picker: Entity<Picker<SinksDelegate>>,
   audio_state: Entity<AudioState>,
   _subscriptions: Vec<Subscription>,
+  _list_subscription_task: Task<()>,
+  _initial_load_task: Task<()>,
 }
 
 const CONTEXT: &str = "sinks";
@@ -44,37 +46,69 @@ impl AudioSinksPanel {
       audio_state: audio_state.clone(),
     };
 
-    let sinks = audio_state
-      .read(cx)
-      .sinks
-      .values()
-      .cloned()
-      .collect::<Vec<_>>();
+    // Start with empty picker
+    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
 
-    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(sinks), window, cx));
+    // Load initial data async
+    let initial_load_task = window.spawn(cx, {
+      let picker = picker.clone();
+      let audio_state = audio_state.clone();
+      async move |cx| {
+        let sinks = cx
+          .update(|_, cx| {
+            let executor = cx.background_executor();
+            audio_state.read(cx).list_sinks(&executor)
+          })
+          .ok();
+        let Some(sinks_task) = sinks else { return };
+        let sinks = sinks_task.await;
 
-    let subscriptions = vec![
-      cx.subscribe_in(&audio_state, window, |this, audio_state, ev, window, cx| {
-        // TODO: Probably better to not replace the entire list and do a new search every time the
-        // volume changes, maybe we can differentiate between changes that affect the search and
-        // others?
-        // The sinks can pull their volume directly from the audio global.
-        if let AudioEvent::SinksChanged = ev {
-          let sinks = audio_state.read(cx).sinks.values().cloned().collect();
-          this.picker.update(cx, |picker, cx| {
-            picker.set_items(sinks, window, cx);
-          });
+        let _ = picker.update_in(cx, |picker, window, cx| {
+          picker.set_items(sinks, window, cx);
+        });
+      }
+    });
+
+    // Subscribe to list changes
+    let list_rx = audio_state.read(cx).subscribe_sink_list();
+    let list_subscription_task = window.spawn(cx, {
+      let picker = picker.clone();
+      let audio_state = audio_state.clone();
+      async move |cx| {
+        while let Ok(event) = list_rx.recv_async().await {
+          match event {
+            SinkListEvent::Added(_) | SinkListEvent::Removed(_) => {
+              // Refresh the full list
+              let sinks = cx
+                .update(|_, cx| {
+                  let executor = cx.background_executor();
+                  audio_state.read(cx).list_sinks(&executor)
+                })
+                .ok();
+              let Some(sinks_task) = sinks else { continue };
+              let sinks = sinks_task.await;
+
+              let _ = picker.update_in(cx, |picker, window, cx| {
+                picker.set_items(sinks, window, cx);
+              });
+            }
+            SinkListEvent::DefaultChanged(_) => {
+              // Just notify to re-render (default_sink updated via AudioState's internal sub)
+              let _ = picker.update_in(cx, |_, _, cx| cx.notify());
+            }
+          }
         }
-      }),
-      cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
-        if let PickerEvent::Picked(item) = ev {
-          this
-            .audio_state
-            .update(cx, |state, cx| state.set_default_sink(item.id, cx))
-            .detach_and_log_err(cx);
-        }
-      }),
-    ];
+      }
+    });
+
+    let subscriptions = vec![cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
+      if let PickerEvent::Picked(item) = ev {
+        this
+          .audio_state
+          .update(cx, |state, cx| state.set_default_sink(item.id, cx))
+          .detach_and_log_err(cx);
+      }
+    })];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
@@ -82,6 +116,8 @@ impl AudioSinksPanel {
       picker,
       audio_state,
       _subscriptions: subscriptions,
+      _list_subscription_task: list_subscription_task,
+      _initial_load_task: initial_load_task,
     }
   }
 
