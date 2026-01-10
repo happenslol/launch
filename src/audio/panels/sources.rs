@@ -13,7 +13,7 @@ use crate::{
   audio::{
     AudioState,
     pulse::{SetMute, SetVolume},
-    types::{SourceId, SourceInfo, SourceListEvent},
+    types::{SourceEvent, SourceId, SourceInfo, SourceListEvent},
   },
   picker::{Picker, PickerDelegate, PickerEvent},
   util::v_flex,
@@ -21,9 +21,64 @@ use crate::{
 
 use super::VolumeBar;
 
+pub struct SourceEntry {
+  source: SourceInfo,
+  _event_listener: Task<()>,
+}
+
+impl SourceEntry {
+  pub fn new(source: SourceInfo, audio_state: &Entity<AudioState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let source_id = source.id;
+    let event_rx = audio_state.read(cx).subscribe_source(source_id);
+
+    let event_listener = cx.spawn_in(window, async move |this, cx| {
+      while let Ok(event) = event_rx.recv_async().await {
+        let should_break = matches!(event, SourceEvent::Removed);
+
+        let _ = this.update(cx, |this, cx| {
+          match event {
+            SourceEvent::VolumeChanged(volume) => {
+              this.source.volume = volume;
+              cx.notify();
+            }
+            SourceEvent::MuteChanged(mute) => {
+              this.source.mute = mute;
+              cx.notify();
+            }
+            SourceEvent::InfoChanged(info) => {
+              this.source = info;
+              cx.notify();
+            }
+            SourceEvent::BecameDefault | SourceEvent::NoLongerDefault => {
+              cx.notify();
+            }
+            SourceEvent::Removed => {
+              // Source was removed, listener will stop
+            }
+          }
+        });
+
+        if should_break {
+          break;
+        }
+      }
+    });
+
+    Self {
+      source,
+      _event_listener: event_listener,
+    }
+  }
+
+  pub fn source(&self) -> &SourceInfo {
+    &self.source
+  }
+}
+
 pub struct AudioSourcesPanel {
   picker: Entity<Picker<SourcesDelegate>>,
   audio_state: Entity<AudioState>,
+  sources: Vec<Entity<SourceEntry>>,
   _subscriptions: Vec<Subscription>,
   _list_subscription_task: Task<()>,
   _initial_load_task: Task<()>,
@@ -52,10 +107,10 @@ impl AudioSourcesPanel {
     let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
 
     // Load initial data async
-    let initial_load_task = window.spawn(cx, {
+    let initial_load_task = cx.spawn_in(window, {
       let picker = picker.clone();
       let audio_state = audio_state.clone();
-      async move |cx| {
+      async move |this, cx| {
         let sources = cx
           .update(|_, cx| {
             let executor = cx.background_executor();
@@ -65,33 +120,45 @@ impl AudioSourcesPanel {
         let Some(sources_task) = sources else { return };
         let sources = sources_task.await;
 
-        let _ = picker.update_in(cx, |picker, window, cx| {
-          picker.set_items(sources, window, cx);
+        let _ = this.update_in(cx, |this, window, cx| {
+          let source_entries: Vec<Entity<SourceEntry>> = sources
+            .into_iter()
+            .map(|source| cx.new(|cx| SourceEntry::new(source, &audio_state, window, cx)))
+            .collect();
+
+          this.sources = source_entries.clone();
+          picker.update(cx, |picker, cx| {
+            picker.set_items(source_entries, window, cx);
+          });
         });
       }
     });
 
     // Subscribe to list changes
     let list_rx = audio_state.read(cx).subscribe_source_list();
-    let list_subscription_task = window.spawn(cx, {
+    let list_subscription_task = cx.spawn_in(window, {
       let picker = picker.clone();
       let audio_state = audio_state.clone();
-      async move |cx| {
+      async move |this, cx| {
         while let Ok(event) = list_rx.recv_async().await {
           match event {
-            SourceListEvent::Added(_) | SourceListEvent::Removed(_) => {
-              // Refresh the full list
-              let sources = cx
-                .update(|_, cx| {
-                  let executor = cx.background_executor();
-                  audio_state.read(cx).list_sources(&executor)
-                })
-                .ok();
-              let Some(sources_task) = sources else { continue };
-              let sources = sources_task.await;
+            SourceListEvent::Added(source_info) => {
+              let _ = this.update_in(cx, |this, window, cx| {
+                let new_entry = cx.new(|cx| SourceEntry::new(source_info, &audio_state, window, cx));
+                this.sources.push(new_entry);
 
-              let _ = picker.update_in(cx, |picker, window, cx| {
-                picker.set_items(sources, window, cx);
+                picker.update(cx, |picker, cx| {
+                  picker.set_items(this.sources.clone(), window, cx);
+                });
+              });
+            }
+            SourceListEvent::Removed(source_id) => {
+              let _ = this.update_in(cx, |this, window, cx| {
+                this.sources.retain(|entry| entry.read(cx).source().id != source_id);
+
+                picker.update(cx, |picker, cx| {
+                  picker.set_items(this.sources.clone(), window, cx);
+                });
               });
             }
             SourceListEvent::DefaultChanged(_) => {
@@ -104,10 +171,11 @@ impl AudioSourcesPanel {
     });
 
     let subscriptions = vec![cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
-      if let PickerEvent::Picked(item) = ev {
+      if let PickerEvent::Picked(entry) = ev {
+        let source_id = entry.read(cx).source().id;
         this
           .audio_state
-          .update(cx, |state, cx| state.set_default_source(item.id, cx))
+          .update(cx, |state, cx| state.set_default_source(source_id, cx))
           .detach_and_log_err(cx);
       }
     })];
@@ -117,6 +185,7 @@ impl AudioSourcesPanel {
     Self {
       picker,
       audio_state,
+      sources: Vec::new(),
       _subscriptions: subscriptions,
       _list_subscription_task: list_subscription_task,
       _initial_load_task: initial_load_task,
@@ -124,7 +193,7 @@ impl AudioSourcesPanel {
   }
 
   fn get_selected_id(&self, cx: &mut Context<Self>) -> Option<SourceId> {
-    self.picker.read(cx).get_selected_item().map(|item| item.id)
+    self.picker.read(cx).get_selected_item().map(|entry| entry.read(cx).source().id)
   }
 
   fn volume_up(&mut self, _: &VolumeUp, _window: &mut Window, cx: &mut Context<Self>) {
@@ -184,7 +253,7 @@ struct SourcesDelegate {
 }
 
 impl PickerDelegate for SourcesDelegate {
-  type ListItem = SourceInfo;
+  type ListItem = Entity<SourceEntry>;
 
   fn render_list_item(
     &self,
@@ -195,8 +264,9 @@ impl PickerDelegate for SourcesDelegate {
   ) -> impl IntoElement {
     use crate::util::h_flex;
 
-    let is_default = self.audio_state.read(cx).default_source == Some(item.id);
-    let volume_percent = item.volume.as_percent(item.base_volume);
+    let source = item.read(cx).source();
+    let is_default = self.audio_state.read(cx).default_source == Some(source.id);
+    let volume_percent = source.volume.as_percent(source.base_volume);
 
     v_flex()
       .w_full()
@@ -212,17 +282,17 @@ impl PickerDelegate for SourcesDelegate {
               .text_ellipsis()
               .overflow_x_hidden()
               .when(is_default, |div| div.child("---> "))
-              .when(item.mute, |div| div.child("MUTE "))
+              .when(source.mute, |div| div.child("MUTE "))
               .child(
-                item
+                source
                   .description
                   .clone()
-                  .unwrap_or_else(|| item.name.clone().unwrap_or_default()),
+                  .unwrap_or_else(|| source.name.clone().unwrap_or_default()),
               ),
           )
           .child(div().child(format!("{}%", volume_percent))),
       )
-      .child(VolumeBar::new(volume_percent, item.mute))
+      .child(VolumeBar::new(volume_percent, source.mute))
   }
 
   fn update_matches(
@@ -247,10 +317,11 @@ impl PickerDelegate for SourcesDelegate {
     let mut matches = Vec::new();
     let mut buf = Vec::new();
 
-    for (index, item) in items.iter().enumerate() {
+    for (index, entry) in items.iter().enumerate() {
+      let source = entry.read(cx).source();
       let mut max_score: Option<u32> = None;
 
-      if let Some(score) = item
+      if let Some(score) = source
         .name
         .as_ref()
         .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))
@@ -262,7 +333,7 @@ impl PickerDelegate for SourcesDelegate {
         }
       }
 
-      if let Some(score) = item
+      if let Some(score) = source
         .description
         .as_ref()
         .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))

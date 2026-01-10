@@ -9,7 +9,10 @@ use gpui::{App, BackgroundExecutor, Entity, Global, Task, prelude::*};
 
 use crate::audio::{
   pulse::{Command, PulseThread, SetMute, SetVolume},
-  types::{SinkEvent, SinkId, SinkInfo, SinkListEvent, SourceEvent, SourceId, SourceInfo, SourceListEvent},
+  types::{
+    SinkEvent, SinkId, SinkInfo, SinkInputEvent, SinkInputId, SinkInputInfo, SinkInputListEvent,
+    SinkListEvent, SourceEvent, SourceId, SourceInfo, SourceListEvent,
+  },
 };
 
 pub fn init(cx: &mut App) {
@@ -178,5 +181,40 @@ impl AudioState {
 
   pub fn set_source_mute(&self, source: SourceId, set: SetMute) {
     self.pulse.send_command(Command::SetSourceMute(source, set))
+  }
+
+  // Sink input query methods
+  pub fn list_sink_inputs(&self, executor: &BackgroundExecutor) -> Task<Vec<SinkInputInfo>> {
+    let (tx, rx) = oneshot::channel();
+    self.pulse.send_command(Command::ListSinkInputs(tx));
+    executor.spawn(async move { rx.await.unwrap_or_default() })
+  }
+
+  // Sink input subscription methods
+  pub fn subscribe_sink_input(&self, id: SinkInputId) -> Receiver<SinkInputEvent> {
+    let (tx, rx) = flume::unbounded();
+    self.pulse.send_command(Command::SubscribeSinkInput(id, tx));
+    rx
+  }
+
+  pub fn subscribe_sink_input_list(&self) -> Receiver<SinkInputListEvent> {
+    let (tx, rx) = flume::unbounded();
+    self.pulse.send_command(Command::SubscribeSinkInputList(tx));
+    rx
+  }
+
+  // Sink input action methods
+  pub fn set_sink_input_volume(&self, id: SinkInputId, set: SetVolume) {
+    self.pulse.send_command(Command::SetSinkInputVolume(id, set))
+  }
+
+  pub fn set_sink_input_mute(&self, id: SinkInputId, set: SetMute) {
+    self.pulse.send_command(Command::SetSinkInputMute(id, set))
+  }
+
+  pub fn move_sink_input(&self, input_id: SinkInputId, sink_id: SinkId) {
+    self
+      .pulse
+      .send_command(Command::MoveSinkInput(input_id, sink_id))
   }
 }

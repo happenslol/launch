@@ -26,6 +26,19 @@ pub struct SourceInfo {
   pub mute: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+pub struct SinkInputId(pub u32);
+
+#[derive(Debug, Clone)]
+pub struct SinkInputInfo {
+  pub id: SinkInputId,
+  pub name: Option<SharedString>,
+  pub sink_id: SinkId,
+  pub volume: ChannelVolumes,
+  pub mute: bool,
+  pub application_name: Option<SharedString>,
+}
+
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
 pub struct Volume(pub u32);
 
@@ -174,4 +187,19 @@ pub enum SourceListEvent {
   Added(SourceInfo),
   Removed(SourceId),
   DefaultChanged(Option<SourceId>),
+}
+
+#[derive(Debug, Clone)]
+pub enum SinkInputEvent {
+  VolumeChanged(ChannelVolumes),
+  MuteChanged(bool),
+  SinkChanged(SinkId),
+  InfoChanged(SinkInputInfo),
+  Removed,
+}
+
+#[derive(Debug, Clone)]
+pub enum SinkInputListEvent {
+  Added(SinkInputInfo),
+  Removed(SinkInputId),
 }
