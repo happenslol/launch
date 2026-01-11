@@ -1,6 +1,14 @@
 {
-	"permissions": {
-		"allow": ["Bash(cargo check:*)", "Bash(ls:*)", "Bash(cargo build:*)"],
-		"additionalDirectories": ["/home/happens/code/zed"]
-	}
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(ls:*)",
+      "Bash(cargo build:*)",
+      "Bash(grep:*)",
+      "Bash(cargo test:*)"
+    ],
+    "additionalDirectories": [
+      "/home/happens/code/zed"
+    ]
+  }
 }
