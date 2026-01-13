@@ -34,6 +34,7 @@ use crate::{
 };
 
 actions!(launcher, [Quit]);
+const CONTEXT: &str = "launcher";
 
 pub struct Launcher {
   focus_handle: FocusHandle,
@@ -67,7 +68,7 @@ impl Launcher {
   }
 
   pub fn new(window: &mut Window, cx: &mut Context<Self>, panel: Option<String>) -> Self {
-    cx.bind_keys([KeyBinding::new("escape", Quit, None)]);
+    cx.bind_keys([KeyBinding::new("escape", Quit, Some(CONTEXT))]);
 
     let launches = Arc::new(DB.get_launches());
     let xdg_icon_path_cache = cx.new(|_| DB.get_desktop_entry_icon_paths());
@@ -228,6 +229,7 @@ impl Focusable for Launcher {
 impl Render for Launcher {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
+      .key_context(CONTEXT)
       .track_focus(&self.focus_handle)
       .font_family("Noto Sans")
       .text_color(rgb(0xFFFFFF))
