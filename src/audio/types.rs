@@ -1,6 +1,6 @@
 use gpui::SharedString;
 
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct SinkId(pub u32);
 
 #[derive(Debug, Clone)]
@@ -13,7 +13,7 @@ pub struct SinkInfo {
   pub mute: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct SourceId(pub u32);
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,19 @@ pub struct SourceInfo {
   pub volume: ChannelVolumes,
   pub base_volume: Volume,
   pub mute: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+pub struct SinkInputId(pub u32);
+
+#[derive(Debug, Clone)]
+pub struct SinkInputInfo {
+  pub id: SinkInputId,
+  pub name: Option<SharedString>,
+  pub sink_id: SinkId,
+  pub volume: ChannelVolumes,
+  pub mute: bool,
+  pub application_name: Option<SharedString>,
 }
 
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
@@ -140,4 +153,53 @@ impl ChannelVolumes {
 
     (vol / base * 100.).round() as u32
   }
+}
+
+#[derive(Debug, Clone)]
+pub enum SinkEvent {
+  VolumeChanged(ChannelVolumes),
+  MuteChanged(bool),
+  InfoChanged(SinkInfo),
+  BecameDefault,
+  NoLongerDefault,
+  Removed,
+}
+
+#[derive(Debug, Clone)]
+pub enum SourceEvent {
+  VolumeChanged(ChannelVolumes),
+  MuteChanged(bool),
+  InfoChanged(SourceInfo),
+  BecameDefault,
+  NoLongerDefault,
+  Removed,
+}
+
+#[derive(Debug, Clone)]
+pub enum SinkListEvent {
+  Added(SinkInfo),
+  Removed(SinkId),
+  DefaultChanged(Option<SinkId>),
+}
+
+#[derive(Debug, Clone)]
+pub enum SourceListEvent {
+  Added(SourceInfo),
+  Removed(SourceId),
+  DefaultChanged(Option<SourceId>),
+}
+
+#[derive(Debug, Clone)]
+pub enum SinkInputEvent {
+  VolumeChanged(ChannelVolumes),
+  MuteChanged(bool),
+  SinkChanged(SinkId),
+  InfoChanged(SinkInputInfo),
+  Removed,
+}
+
+#[derive(Debug, Clone)]
+pub enum SinkInputListEvent {
+  Added(SinkInputInfo),
+  Removed(SinkInputId),
 }

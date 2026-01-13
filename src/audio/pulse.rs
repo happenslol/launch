@@ -30,28 +30,10 @@ use rustix::pipe::PipeFlags;
 use thiserror::Error;
 use tracing::{debug, trace, warn};
 
-use super::types::{ChannelVolumes, SinkId, SinkInfo, SourceId, SourceInfo};
-
-#[derive(Debug)]
-pub enum Event {
-  // Sink events
-  SinkFound(SinkInfo),
-  SinkInfoChanged(SinkInfo),
-  SinkVolumeChanged(SinkId, ChannelVolumes),
-  SinkMuteChanged(SinkId, bool),
-  SinkRemoved(SinkId),
-  DefaultSinkChanged(Option<SinkId>),
-
-  // Source events
-  SourceFound(SourceInfo),
-  SourceInfoChanged(SourceInfo),
-  SourceVolumeChanged(SourceId, ChannelVolumes),
-  SourceMuteChanged(SourceId, bool),
-  SourceRemoved(SourceId),
-  DefaultSourceChanged(Option<SourceId>),
-
-  Exited(PulseError),
-}
+use super::types::{
+  SinkEvent, SinkId, SinkInfo, SinkInputEvent, SinkInputId, SinkInputInfo, SinkInputListEvent,
+  SinkListEvent, SourceEvent, SourceId, SourceInfo, SourceListEvent,
+};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
@@ -71,7 +53,6 @@ pub enum SetMute {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
 pub enum Command {
   SetSinkVolume(SinkId, SetVolume),
   SetSourceVolume(SourceId, SetVolume),
@@ -80,6 +61,28 @@ pub enum Command {
   SetDefaultSink(SinkId, oneshot::Sender<bool>),
   SetDefaultSource(SourceId, oneshot::Sender<bool>),
   Quit(oneshot::Sender<()>),
+
+  // Query commands (return cached state)
+  ListSinks(oneshot::Sender<Vec<SinkInfo>>),
+  ListSources(oneshot::Sender<Vec<SourceInfo>>),
+  GetSinkInfo(SinkId, oneshot::Sender<Option<SinkInfo>>),
+  GetSourceInfo(SourceId, oneshot::Sender<Option<SourceInfo>>),
+  GetDefaultSink(oneshot::Sender<Option<SinkId>>),
+  GetDefaultSource(oneshot::Sender<Option<SourceId>>),
+
+  // Subscription commands
+  SubscribeSink(SinkId, Sender<SinkEvent>),
+  SubscribeSource(SourceId, Sender<SourceEvent>),
+  SubscribeSinkList(Sender<SinkListEvent>),
+  SubscribeSourceList(Sender<SourceListEvent>),
+
+  // Sink input commands
+  ListSinkInputs(oneshot::Sender<Vec<SinkInputInfo>>),
+  SubscribeSinkInput(SinkInputId, Sender<SinkInputEvent>),
+  SubscribeSinkInputList(Sender<SinkInputListEvent>),
+  SetSinkInputVolume(SinkInputId, SetVolume),
+  SetSinkInputMute(SinkInputId, SetMute),
+  MoveSinkInput(SinkInputId, SinkId),
 }
 
 #[derive(Debug, Clone, Error)]
@@ -96,7 +99,6 @@ pub enum PulseError {
 
 pub struct PulseThread {
   handle: Option<JoinHandle<()>>,
-  event_rx: Receiver<Event>,
 
   // Pipe to notify the pulse main loop when we have sent new commands
   notify_fd: File,
@@ -108,13 +110,11 @@ impl PulseThread {
     let (reader, writer) =
       rustix::pipe::pipe_with(PipeFlags::CLOEXEC).expect("failed to create pipe");
 
-    // Are these limits reasonable? How fast do we get events when changing volume?
-    let (event_tx, event_rx) = flume::bounded(20);
     let (command_tx, command_rx) = flume::bounded(20);
 
     let handle = thread::spawn(move || {
-      if let Err(err) = thread_main(reader, event_tx.clone(), command_rx) {
-        let _ = event_tx.send(Event::Exited(err));
+      if let Err(err) = thread_main(reader, command_rx) {
+        tracing::error!(?err, "Pulse thread exited with error");
       }
     });
 
@@ -122,14 +122,9 @@ impl PulseThread {
 
     Self {
       handle: Some(handle),
-      event_rx,
       notify_fd,
       command_tx,
     }
-  }
-
-  pub fn get_event_rx(&self) -> Receiver<Event> {
-    self.event_rx.clone()
   }
 
   pub fn send_command(&self, cmd: Command) {
@@ -159,10 +154,9 @@ impl PulseThread {
 
 fn thread_main(
   notify_fd: OwnedFd,
-  event_tx: Sender<Event>,
   command_rx: Receiver<Command>,
 ) -> Result<(), PulseError> {
-  let state = Rc::new(RefCell::new(PulseState::new(event_tx.clone())));
+  let state = Rc::new(RefCell::new(PulseState::new()));
   let mut main_loop = Mainloop::new().ok_or(PulseError::MainLoopCreate)?;
   let mut context = Context::new(&main_loop, "launch").ok_or(PulseError::ContextCreate)?;
 
@@ -203,6 +197,11 @@ fn thread_main(
     move |result| PulseState::handle_source_info(&state, result)
   });
 
+  introspector.get_sink_input_info_list({
+    let state = state.clone();
+    move |result| PulseState::handle_sink_input_info(&state, result)
+  });
+
   // Make sure to request server info after sinks and sources so we can match default sink and
   // source up
   introspector.get_server_info({
@@ -213,7 +212,7 @@ fn thread_main(
   context.set_subscribe_callback(Some(Box::new({
     let state = state.clone();
     move |facility, operation, index| {
-      handle_event(&state, &event_tx, &introspector, facility, operation, index);
+      handle_event(&state, &introspector, facility, operation, index);
     }
   })));
 
@@ -395,12 +394,122 @@ fn handle_command(
         }
       });
     }
+
+    // Query commands
+    Command::ListSinks(tx) => {
+      let sinks = state.borrow().sinks.values().cloned().collect();
+      let _ = tx.send(sinks);
+    }
+    Command::ListSources(tx) => {
+      let sources = state.borrow().sources.values().cloned().collect();
+      let _ = tx.send(sources);
+    }
+    Command::GetSinkInfo(id, tx) => {
+      let info = state.borrow().sinks.get(&id.0).cloned();
+      let _ = tx.send(info);
+    }
+    Command::GetSourceInfo(id, tx) => {
+      let info = state.borrow().sources.get(&id.0).cloned();
+      let _ = tx.send(info);
+    }
+    Command::GetDefaultSink(tx) => {
+      let _ = tx.send(state.borrow().default_sink_id);
+    }
+    Command::GetDefaultSource(tx) => {
+      let _ = tx.send(state.borrow().default_source_id);
+    }
+
+    // Subscription commands
+    Command::SubscribeSink(id, sender) => {
+      state
+        .borrow_mut()
+        .sink_subscribers
+        .entry(id)
+        .or_default()
+        .push(sender);
+    }
+    Command::SubscribeSource(id, sender) => {
+      state
+        .borrow_mut()
+        .source_subscribers
+        .entry(id)
+        .or_default()
+        .push(sender);
+    }
+    Command::SubscribeSinkList(sender) => {
+      state.borrow_mut().sink_list_subscribers.push(sender);
+    }
+    Command::SubscribeSourceList(sender) => {
+      state.borrow_mut().source_list_subscribers.push(sender);
+    }
+
+    // Sink input commands
+    Command::ListSinkInputs(tx) => {
+      let sink_inputs = state.borrow().sink_inputs.values().cloned().collect();
+      let _ = tx.send(sink_inputs);
+    }
+    Command::SubscribeSinkInput(id, sender) => {
+      state
+        .borrow_mut()
+        .sink_input_subscribers
+        .entry(id)
+        .or_default()
+        .push(sender);
+    }
+    Command::SubscribeSinkInputList(sender) => {
+      state.borrow_mut().sink_input_list_subscribers.push(sender);
+    }
+    Command::SetSinkInputVolume(id, set) => {
+      let mut current = {
+        let state = state.borrow();
+        let Some(sink_input) = state.sink_inputs.get(&id.0) else {
+          warn!(?id, "No such sink input");
+          return;
+        };
+        sink_input.volume.clone()
+      };
+
+      // Use NORMAL volume as base since sink inputs don't have base_volume
+      let base = super::types::Volume(pulse::volume::Volume::NORMAL.0);
+
+      match set {
+        SetVolume::Absolute(v) => current.set_percent(base, v),
+        SetVolume::AbsolutePercent(p) => current.set_percent(base, p),
+        SetVolume::Relative(v) if v >= 0 => current.add_percent(base, v as u32),
+        SetVolume::Relative(v) => current.sub_percent(base, v.unsigned_abs()),
+        SetVolume::RelativePercent(p) if p >= 0 => current.add_percent(base, p as u32),
+        SetVolume::RelativePercent(p) => current.sub_percent(base, p.unsigned_abs()),
+      }
+
+      context
+        .introspect()
+        .set_sink_input_volume(id.0, &current.into(), None);
+    }
+    Command::SetSinkInputMute(id, set) => match set {
+      SetMute::Mute => {
+        context.introspect().set_sink_input_mute(id.0, true, None);
+      }
+      SetMute::Unmute => {
+        context.introspect().set_sink_input_mute(id.0, false, None);
+      }
+      SetMute::Toggle => {
+        let Some(muted) = state.borrow().sink_inputs.get(&id.0).map(|i| i.mute) else {
+          warn!(?id, "No such sink input");
+          return;
+        };
+        context.introspect().set_sink_input_mute(id.0, !muted, None);
+      }
+    },
+    Command::MoveSinkInput(input_id, sink_id) => {
+      context
+        .introspect()
+        .move_sink_input_by_index(input_id.0, sink_id.0, None);
+    }
   }
 }
 
 fn handle_event(
   state: &Rc<RefCell<PulseState>>,
-  event_tx: &Sender<Event>,
   introspector: &Introspector,
   facility: Option<Facility>,
   operation: Option<Operation>,
@@ -436,45 +545,136 @@ fn handle_event(
           move |item| PulseState::handle_source_info(&state, item)
         });
       }
+      Facility::SinkInput => {
+        introspector.get_sink_input_info(index, {
+          let state = state.clone();
+          move |item| PulseState::handle_sink_input_info(&state, item)
+        });
+      }
       _ => trace!(?facility, ?operation, index, "Skipping event"),
     },
     Operation::Removed => match facility {
-      Facility::Sink if state.borrow_mut().sinks.remove(&index).is_some() => {
-        let _ = event_tx.send(Event::SinkRemoved(SinkId(index)));
+      Facility::Sink => {
+        let sink_id = SinkId(index);
+        let mut state = state.borrow_mut();
+        if state.sinks.remove(&index).is_some() {
+          // Notify individual sink subscribers that sink was removed
+          if let Some(subscribers) = state.sink_subscribers.remove(&sink_id) {
+            for tx in subscribers {
+              let _ = tx.send(SinkEvent::Removed);
+            }
+          }
+
+          // Notify list subscribers
+          state.notify_sink_list_subscribers(SinkListEvent::Removed(sink_id));
+        }
       }
-      Facility::Source if state.borrow_mut().sources.remove(&index).is_some() => {
-        let _ = event_tx.send(Event::SourceRemoved(SourceId(index)));
+      Facility::Source => {
+        let source_id = SourceId(index);
+        let mut state = state.borrow_mut();
+        if state.sources.remove(&index).is_some() {
+          // Notify individual source subscribers that source was removed
+          if let Some(subscribers) = state.source_subscribers.remove(&source_id) {
+            for tx in subscribers {
+              let _ = tx.send(SourceEvent::Removed);
+            }
+          }
+
+          // Notify list subscribers
+          state.notify_source_list_subscribers(SourceListEvent::Removed(source_id));
+        }
+      }
+      Facility::SinkInput => {
+        let sink_input_id = SinkInputId(index);
+        let mut state = state.borrow_mut();
+        if state.sink_inputs.remove(&index).is_some() {
+          if let Some(subscribers) = state.sink_input_subscribers.remove(&sink_input_id) {
+            for tx in subscribers {
+              let _ = tx.send(SinkInputEvent::Removed);
+            }
+          }
+
+          state.notify_sink_input_list_subscribers(SinkInputListEvent::Removed(sink_input_id));
+        }
       }
       _ => trace!(?facility, index, "Skipping remove event"),
     },
   }
 }
 
-#[derive(Debug)]
 struct PulseState {
   shutdown_tx: Option<oneshot::Sender<()>>,
-  event_tx: Sender<Event>,
   sinks: HashMap<u32, SinkInfo>,
   sources: HashMap<u32, SourceInfo>,
+  sink_inputs: HashMap<u32, SinkInputInfo>,
   default_sink_id: Option<SinkId>,
   default_source_id: Option<SourceId>,
+
+  // Subscriber tracking
+  sink_subscribers: HashMap<SinkId, Vec<Sender<SinkEvent>>>,
+  source_subscribers: HashMap<SourceId, Vec<Sender<SourceEvent>>>,
+  sink_input_subscribers: HashMap<SinkInputId, Vec<Sender<SinkInputEvent>>>,
+  sink_list_subscribers: Vec<Sender<SinkListEvent>>,
+  source_list_subscribers: Vec<Sender<SourceListEvent>>,
+  sink_input_list_subscribers: Vec<Sender<SinkInputListEvent>>,
 }
 
 impl PulseState {
-  fn new(event_tx: Sender<Event>) -> Self {
+  fn new() -> Self {
     Self {
       shutdown_tx: None,
-      event_tx,
       sinks: Default::default(),
       sources: Default::default(),
+      sink_inputs: Default::default(),
       default_sink_id: None,
       default_source_id: None,
+      sink_subscribers: Default::default(),
+      source_subscribers: Default::default(),
+      sink_input_subscribers: Default::default(),
+      sink_list_subscribers: Default::default(),
+      source_list_subscribers: Default::default(),
+      sink_input_list_subscribers: Default::default(),
     }
+  }
+
+  fn notify_sink_subscribers(&mut self, id: SinkId, event: SinkEvent) {
+    if let Some(subscribers) = self.sink_subscribers.get_mut(&id) {
+      subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+  }
+
+  fn notify_source_subscribers(&mut self, id: SourceId, event: SourceEvent) {
+    if let Some(subscribers) = self.source_subscribers.get_mut(&id) {
+      subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+  }
+
+  fn notify_sink_list_subscribers(&mut self, event: SinkListEvent) {
+    self
+      .sink_list_subscribers
+      .retain(|tx| tx.send(event.clone()).is_ok());
+  }
+
+  fn notify_source_list_subscribers(&mut self, event: SourceListEvent) {
+    self
+      .source_list_subscribers
+      .retain(|tx| tx.send(event.clone()).is_ok());
+  }
+
+  fn notify_sink_input_subscribers(&mut self, id: SinkInputId, event: SinkInputEvent) {
+    if let Some(subscribers) = self.sink_input_subscribers.get_mut(&id) {
+      subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+  }
+
+  fn notify_sink_input_list_subscribers(&mut self, event: SinkInputListEvent) {
+    self
+      .sink_input_list_subscribers
+      .retain(|tx| tx.send(event.clone()).is_ok());
   }
 
   fn handle_server_info(this: &Rc<RefCell<Self>>, info: &ServerInfo) {
     let mut this = this.borrow_mut();
-    let event_tx = this.event_tx.clone();
 
     let default_sink_id = info
       .default_sink_name
@@ -493,8 +693,21 @@ impl PulseState {
       });
 
     if default_sink_id != this.default_sink_id {
+      let old_default = this.default_sink_id;
       this.default_sink_id = default_sink_id;
-      let _ = event_tx.send(Event::DefaultSinkChanged(default_sink_id));
+
+      // Notify old default sink subscribers
+      if let Some(old_id) = old_default {
+        this.notify_sink_subscribers(old_id, SinkEvent::NoLongerDefault);
+      }
+
+      // Notify new default sink subscribers
+      if let Some(new_id) = default_sink_id {
+        this.notify_sink_subscribers(new_id, SinkEvent::BecameDefault);
+      }
+
+      // Notify list subscribers
+      this.notify_sink_list_subscribers(SinkListEvent::DefaultChanged(default_sink_id));
     }
 
     let default_source_id = info
@@ -514,8 +727,21 @@ impl PulseState {
       });
 
     if default_source_id != this.default_source_id {
+      let old_default = this.default_source_id;
       this.default_source_id = default_source_id;
-      let _ = event_tx.send(Event::DefaultSourceChanged(default_source_id));
+
+      // Notify old default source subscribers
+      if let Some(old_id) = old_default {
+        this.notify_source_subscribers(old_id, SourceEvent::NoLongerDefault);
+      }
+
+      // Notify new default source subscribers
+      if let Some(new_id) = default_source_id {
+        this.notify_source_subscribers(new_id, SourceEvent::BecameDefault);
+      }
+
+      // Notify list subscribers
+      this.notify_source_list_subscribers(SourceListEvent::DefaultChanged(default_source_id));
     }
   }
 
@@ -523,21 +749,22 @@ impl PulseState {
     let ListResult::Item(info) = info else { return };
 
     let mut this = this.borrow_mut();
-    let event_tx = this.event_tx.clone();
+    let sink_id = SinkId(info.index);
+
+    // Collect events to send after releasing the sink borrow
+    let mut events_to_send: Vec<SinkEvent> = Vec::new();
+    let mut list_event: Option<SinkListEvent> = None;
 
     if let Some(sink) = this.sinks.get_mut(&info.index) {
       if sink.volume != info.volume {
         sink.volume = info.volume.into();
         sink.base_volume = info.base_volume.into();
-        let _ = event_tx.send(Event::SinkVolumeChanged(
-          SinkId(info.index),
-          sink.volume.clone(),
-        ));
+        events_to_send.push(SinkEvent::VolumeChanged(sink.volume.clone()));
       }
 
       if sink.mute != info.mute {
         sink.mute = info.mute;
-        let _ = event_tx.send(Event::SinkMuteChanged(SinkId(info.index), info.mute));
+        events_to_send.push(SinkEvent::MuteChanged(info.mute));
       }
 
       if sink.name.as_ref().map(|s| s.as_str()) != info.name.as_deref()
@@ -551,11 +778,11 @@ impl PulseState {
           .description
           .as_ref()
           .map(|s| SharedString::from(s.to_string()));
-        let _ = event_tx.send(Event::SinkInfoChanged(sink.clone()));
+        events_to_send.push(SinkEvent::InfoChanged(sink.clone()));
       }
     } else {
       let managed = SinkInfo {
-        id: SinkId(info.index),
+        id: sink_id,
         name: info
           .name
           .as_ref()
@@ -570,7 +797,15 @@ impl PulseState {
       };
 
       this.sinks.insert(info.index, managed.clone());
-      let _ = event_tx.send(Event::SinkFound(managed));
+      list_event = Some(SinkListEvent::Added(managed));
+    }
+
+    // Now send events after releasing the sink borrow
+    for event in events_to_send {
+      this.notify_sink_subscribers(sink_id, event);
+    }
+    if let Some(event) = list_event {
+      this.notify_sink_list_subscribers(event);
     }
   }
 
@@ -578,21 +813,22 @@ impl PulseState {
     let ListResult::Item(info) = info else { return };
 
     let mut this = this.borrow_mut();
-    let event_tx = this.event_tx.clone();
+    let source_id = SourceId(info.index);
+
+    // Collect events to send after releasing the source borrow
+    let mut events_to_send: Vec<SourceEvent> = Vec::new();
+    let mut list_event: Option<SourceListEvent> = None;
 
     if let Some(source) = this.sources.get_mut(&info.index) {
       if source.volume != info.volume {
         source.volume = info.volume.into();
         source.base_volume = info.base_volume.into();
-        let _ = event_tx.send(Event::SourceVolumeChanged(
-          SourceId(info.index),
-          source.volume.clone(),
-        ));
+        events_to_send.push(SourceEvent::VolumeChanged(source.volume.clone()));
       }
 
       if source.mute != info.mute {
         source.mute = info.mute;
-        let _ = event_tx.send(Event::SourceMuteChanged(SourceId(info.index), info.mute));
+        events_to_send.push(SourceEvent::MuteChanged(info.mute));
       }
 
       if source.name.as_ref().map(|s| s.as_str()) != info.name.as_deref()
@@ -606,11 +842,11 @@ impl PulseState {
           .description
           .as_ref()
           .map(|s| SharedString::from(s.to_string()));
-        let _ = event_tx.send(Event::SourceInfoChanged(source.clone()));
+        events_to_send.push(SourceEvent::InfoChanged(source.clone()));
       }
     } else {
       let managed = SourceInfo {
-        id: SourceId(info.index),
+        id: source_id,
         name: info
           .name
           .as_ref()
@@ -625,7 +861,83 @@ impl PulseState {
       };
 
       this.sources.insert(info.index, managed.clone());
-      let _ = event_tx.send(Event::SourceFound(managed));
+      list_event = Some(SourceListEvent::Added(managed));
+    }
+
+    // Now send events after releasing the source borrow
+    for event in events_to_send {
+      this.notify_source_subscribers(source_id, event);
+    }
+    if let Some(event) = list_event {
+      this.notify_source_list_subscribers(event);
+    }
+  }
+
+  fn handle_sink_input_info(this: &Rc<RefCell<Self>>, info: ListResult<&introspect::SinkInputInfo>) {
+    let ListResult::Item(info) = info else { return };
+
+    let mut this = this.borrow_mut();
+    let sink_input_id = SinkInputId(info.index);
+    let sink_id = SinkId(info.sink);
+
+    // Extract application name from proplist
+    let application_name = info
+      .proplist
+      .get_str("application.name")
+      .map(|s| SharedString::from(s.to_string()));
+
+    let mut events_to_send: Vec<SinkInputEvent> = Vec::new();
+    let mut list_event: Option<SinkInputListEvent> = None;
+
+    if let Some(sink_input) = this.sink_inputs.get_mut(&info.index) {
+      // Check for sink change (moved to different output)
+      if sink_input.sink_id != sink_id {
+        sink_input.sink_id = sink_id;
+        events_to_send.push(SinkInputEvent::SinkChanged(sink_id));
+      }
+
+      if sink_input.volume != info.volume {
+        sink_input.volume = info.volume.into();
+        events_to_send.push(SinkInputEvent::VolumeChanged(sink_input.volume.clone()));
+      }
+
+      if sink_input.mute != info.mute {
+        sink_input.mute = info.mute;
+        events_to_send.push(SinkInputEvent::MuteChanged(info.mute));
+      }
+
+      if sink_input.name.as_ref().map(|s| s.as_str()) != info.name.as_deref()
+        || sink_input.application_name != application_name
+      {
+        sink_input.name = info
+          .name
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string()));
+        sink_input.application_name = application_name.clone();
+        events_to_send.push(SinkInputEvent::InfoChanged(sink_input.clone()));
+      }
+    } else {
+      let managed = SinkInputInfo {
+        id: sink_input_id,
+        name: info
+          .name
+          .as_ref()
+          .map(|s| SharedString::from(s.to_string())),
+        sink_id,
+        volume: info.volume.into(),
+        mute: info.mute,
+        application_name,
+      };
+
+      this.sink_inputs.insert(info.index, managed.clone());
+      list_event = Some(SinkInputListEvent::Added(managed));
+    }
+
+    for event in events_to_send {
+      this.notify_sink_input_subscribers(sink_input_id, event);
+    }
+    if let Some(event) = list_event {
+      this.notify_sink_input_list_subscribers(event);
     }
   }
 }

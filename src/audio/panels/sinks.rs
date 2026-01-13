@@ -11,18 +11,75 @@ use nucleo_matcher::{
 
 use crate::{
   audio::{
-    AudioEvent, AudioState,
+    AudioState,
     pulse::{SetMute, SetVolume},
-    types::{SinkId, SinkInfo},
+    types::{SinkEvent, SinkId, SinkInfo, SinkListEvent},
   },
   picker::{Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
 };
 
+pub struct SinkEntry {
+  sink: SinkInfo,
+  _event_listener: Task<()>,
+}
+
+impl SinkEntry {
+  pub fn new(sink: SinkInfo, audio_state: &Entity<AudioState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let sink_id = sink.id;
+    let event_rx = audio_state.read(cx).subscribe_sink(sink_id);
+
+    let event_listener = cx.spawn_in(window, async move |this, cx| {
+      while let Ok(event) = event_rx.recv_async().await {
+        let should_break = matches!(event, SinkEvent::Removed);
+
+        let _ = this.update(cx, |this, cx| {
+          match event {
+            SinkEvent::VolumeChanged(volume) => {
+              this.sink.volume = volume;
+              cx.notify();
+            }
+            SinkEvent::MuteChanged(mute) => {
+              this.sink.mute = mute;
+              cx.notify();
+            }
+            SinkEvent::InfoChanged(info) => {
+              this.sink = info;
+              cx.notify();
+            }
+            SinkEvent::BecameDefault | SinkEvent::NoLongerDefault => {
+              cx.notify();
+            }
+            SinkEvent::Removed => {
+              // Sink was removed, listener will stop
+            }
+          }
+        });
+
+        if should_break {
+          break;
+        }
+      }
+    });
+
+    Self {
+      sink,
+      _event_listener: event_listener,
+    }
+  }
+
+  pub fn sink(&self) -> &SinkInfo {
+    &self.sink
+  }
+}
+
 pub struct AudioSinksPanel {
   picker: Entity<Picker<SinksDelegate>>,
   audio_state: Entity<AudioState>,
+  sinks: Vec<Entity<SinkEntry>>,
   _subscriptions: Vec<Subscription>,
+  _list_subscription_task: Task<()>,
+  _initial_load_task: Task<()>,
 }
 
 const CONTEXT: &str = "sinks";
@@ -44,49 +101,97 @@ impl AudioSinksPanel {
       audio_state: audio_state.clone(),
     };
 
-    let sinks = audio_state
-      .read(cx)
-      .sinks
-      .values()
-      .cloned()
-      .collect::<Vec<_>>();
+    // Start with empty picker
+    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
 
-    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(sinks), window, cx));
+    // Load initial data async
+    let initial_load_task = cx.spawn_in(window, {
+      let picker = picker.clone();
+      let audio_state = audio_state.clone();
+      async move |this, cx| {
+        let sinks = cx
+          .update(|_, cx| {
+            let executor = cx.background_executor();
+            audio_state.read(cx).list_sinks(&executor)
+          })
+          .ok();
+        let Some(sinks_task) = sinks else { return };
+        let sinks = sinks_task.await;
 
-    let subscriptions = vec![
-      cx.subscribe_in(&audio_state, window, |this, audio_state, ev, window, cx| {
-        // TODO: Probably better to not replace the entire list and do a new search every time the
-        // volume changes, maybe we can differentiate between changes that affect the search and
-        // others?
-        // The sinks can pull their volume directly from the audio global.
-        if let AudioEvent::SinksChanged = ev {
-          let sinks = audio_state.read(cx).sinks.values().cloned().collect();
-          this.picker.update(cx, |picker, cx| {
-            picker.set_items(sinks, window, cx);
+        let _ = this.update_in(cx, |this, window, cx| {
+          let sink_entries: Vec<Entity<SinkEntry>> = sinks
+            .into_iter()
+            .map(|sink| cx.new(|cx| SinkEntry::new(sink, &audio_state, window, cx)))
+            .collect();
+
+          this.sinks = sink_entries.clone();
+          picker.update(cx, |picker, cx| {
+            picker.set_items(sink_entries, window, cx);
           });
+        });
+      }
+    });
+
+    // Subscribe to list changes
+    let list_rx = audio_state.read(cx).subscribe_sink_list();
+    let list_subscription_task = cx.spawn_in(window, {
+      let picker = picker.clone();
+      let audio_state = audio_state.clone();
+      async move |this, cx| {
+        while let Ok(event) = list_rx.recv_async().await {
+          match event {
+            SinkListEvent::Added(sink_info) => {
+              let _ = this.update_in(cx, |this, window, cx| {
+                let new_entry = cx.new(|cx| SinkEntry::new(sink_info, &audio_state, window, cx));
+                this.sinks.push(new_entry);
+
+                picker.update(cx, |picker, cx| {
+                  picker.set_items(this.sinks.clone(), window, cx);
+                });
+              });
+            }
+            SinkListEvent::Removed(sink_id) => {
+              let _ = this.update_in(cx, |this, window, cx| {
+                this.sinks.retain(|entry| entry.read(cx).sink().id != sink_id);
+
+                picker.update(cx, |picker, cx| {
+                  picker.set_items(this.sinks.clone(), window, cx);
+                });
+              });
+            }
+            SinkListEvent::DefaultChanged(_) => {
+              // Just notify to re-render (default_sink updated via AudioState's internal sub)
+              let _ = picker.update_in(cx, |_, _, cx| cx.notify());
+            }
+          }
         }
-      }),
-      cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
-        if let PickerEvent::Picked(item) = ev {
-          this
-            .audio_state
-            .update(cx, |state, cx| state.set_default_sink(item.id, cx))
-            .detach_and_log_err(cx);
-        }
-      }),
-    ];
+      }
+    });
+
+    let subscriptions = vec![cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
+      if let PickerEvent::Picked(entry) = ev {
+        let sink_id = entry.read(cx).sink().id;
+        this
+          .audio_state
+          .update(cx, |state, cx| state.set_default_sink(sink_id, cx))
+          .detach_and_log_err(cx);
+      }
+    })];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
     Self {
       picker,
       audio_state,
+      sinks: Vec::new(),
       _subscriptions: subscriptions,
+      _list_subscription_task: list_subscription_task,
+      _initial_load_task: initial_load_task,
     }
   }
 
   fn get_selected_id(&self, cx: &mut Context<Self>) -> Option<SinkId> {
-    self.picker.read(cx).get_selected_item().map(|item| item.id)
+    self.picker.read(cx).get_selected_item().map(|entry| entry.read(cx).sink().id)
   }
 
   fn volume_up(&mut self, _: &VolumeUp, _window: &mut Window, cx: &mut Context<Self>) {
@@ -190,7 +295,7 @@ struct SinksDelegate {
 }
 
 impl PickerDelegate for SinksDelegate {
-  type ListItem = SinkInfo;
+  type ListItem = Entity<SinkEntry>;
 
   fn render_list_item(
     &self,
@@ -199,8 +304,9 @@ impl PickerDelegate for SinksDelegate {
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
-    let is_default = self.audio_state.read(cx).default_sink == Some(item.id);
-    let volume_percent = item.volume.as_percent(item.base_volume);
+    let sink = item.read(cx).sink();
+    let is_default = self.audio_state.read(cx).default_sink == Some(sink.id);
+    let volume_percent = sink.volume.as_percent(sink.base_volume);
 
     v_flex()
       .w_full()
@@ -217,19 +323,19 @@ impl PickerDelegate for SinksDelegate {
               .text_ellipsis()
               .overflow_x_hidden()
               .when(is_default, |div| div.child("---> "))
-              .when(item.mute, |div| div.child("MUTE "))
+              .when(sink.mute, |div| div.child("MUTE "))
               .child(
-                item
+                sink
                   .description
                   .clone()
-                  .unwrap_or_else(|| item.name.clone().unwrap_or_default()),
+                  .unwrap_or_else(|| sink.name.clone().unwrap_or_default()),
               ),
           )
           .child(div().child(format!("{}%", volume_percent))),
       )
       .child(
         // Second row: full-width volume bar only
-        VolumeBar::new(volume_percent, item.mute),
+        VolumeBar::new(volume_percent, sink.mute),
       )
   }
 
@@ -255,10 +361,11 @@ impl PickerDelegate for SinksDelegate {
     let mut matches = Vec::new();
     let mut buf = Vec::new();
 
-    for (index, item) in items.iter().enumerate() {
+    for (index, entry) in items.iter().enumerate() {
+      let sink = entry.read(cx).sink();
       let mut max_score: Option<u32> = None;
 
-      if let Some(score) = item
+      if let Some(score) = sink
         .name
         .as_ref()
         .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))
@@ -270,7 +377,7 @@ impl PickerDelegate for SinksDelegate {
         }
       }
 
-      if let Some(score) = item
+      if let Some(score) = sink
         .description
         .as_ref()
         .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))
