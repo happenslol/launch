@@ -48,7 +48,7 @@ mod network_manager;
 mod ppp;
 mod secret_agent;
 mod settings;
-mod settings_connection;
+pub mod settings_connection;
 mod vpn_connection;
 mod vpn_plugin;
 mod wi_max_nsp;

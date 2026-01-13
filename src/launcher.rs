@@ -346,7 +346,7 @@ impl PickerDelegate for RootDelegate {
       )
   }
 
-  fn sort_items(&self, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
+  fn sort_items(&self, _cx: &App, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
     matches.sort_by_key(|(i, score)| {
       let (count, last_launch) = self
         .launches
