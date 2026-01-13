@@ -13,7 +13,10 @@ use crate::{
   audio::{
     AudioState,
     pulse::{SetMute, SetVolume},
-    types::{SinkId, SinkInfo, SinkInputEvent, SinkInputId, SinkInputInfo, SinkInputListEvent, SinkListEvent},
+    types::{
+      SinkId, SinkInfo, SinkInputEvent, SinkInputId, SinkInputInfo, SinkInputListEvent,
+      SinkListEvent,
+    },
   },
   picker::{Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
@@ -47,26 +50,24 @@ impl SinkInputEntry {
       while let Ok(event) = event_rx.recv_async().await {
         let should_break = matches!(event, SinkInputEvent::Removed);
 
-        let _ = this.update(cx, |this, cx| {
-          match event {
-            SinkInputEvent::VolumeChanged(volume) => {
-              this.sink_input.volume = volume;
-              cx.notify();
-            }
-            SinkInputEvent::MuteChanged(mute) => {
-              this.sink_input.mute = mute;
-              cx.notify();
-            }
-            SinkInputEvent::SinkChanged(sink_id) => {
-              this.sink_input.sink_id = sink_id;
-              cx.notify();
-            }
-            SinkInputEvent::InfoChanged(info) => {
-              this.sink_input = info;
-              cx.notify();
-            }
-            SinkInputEvent::Removed => {}
+        let _ = this.update(cx, |this, cx| match event {
+          SinkInputEvent::VolumeChanged(volume) => {
+            this.sink_input.volume = volume;
+            cx.notify();
           }
+          SinkInputEvent::MuteChanged(mute) => {
+            this.sink_input.mute = mute;
+            cx.notify();
+          }
+          SinkInputEvent::SinkChanged(sink_id) => {
+            this.sink_input.sink_id = sink_id;
+            cx.notify();
+          }
+          SinkInputEvent::InfoChanged(info) => {
+            this.sink_input = info;
+            cx.notify();
+          }
+          SinkInputEvent::Removed => {}
         });
 
         if should_break {
@@ -138,10 +139,7 @@ impl AudioStreamsPanel {
       async move |this, cx| {
         // Load sink inputs
         let sink_inputs = cx
-          .update(|_, cx| {
-            let executor = cx.background_executor();
-            audio_state.read(cx).list_sink_inputs(&executor)
-          })
+          .update(|_, cx| audio_state.read(cx).list_sink_inputs(cx))
           .ok();
         let Some(sink_inputs_task) = sink_inputs else {
           return;
@@ -149,12 +147,7 @@ impl AudioStreamsPanel {
         let sink_inputs = sink_inputs_task.await;
 
         // Load sinks for the picker
-        let sinks = cx
-          .update(|_, cx| {
-            let executor = cx.background_executor();
-            audio_state.read(cx).list_sinks(&executor)
-          })
-          .ok();
+        let sinks = cx.update(|_, cx| audio_state.read(cx).list_sinks(cx)).ok();
         let Some(sinks_task) = sinks else { return };
         let sinks = sinks_task.await;
 
@@ -184,8 +177,8 @@ impl AudioStreamsPanel {
           match event {
             SinkInputListEvent::Added(input_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                let new_entry =
-                  cx.new(|cx| SinkInputEntry::new(input_info, &audio_state, &this.sinks, window, cx));
+                let new_entry = cx
+                  .new(|cx| SinkInputEntry::new(input_info, &audio_state, &this.sinks, window, cx));
                 this.sink_inputs.push(new_entry);
 
                 picker.update(cx, |picker, cx| {
@@ -195,7 +188,8 @@ impl AudioStreamsPanel {
             }
             SinkInputListEvent::Removed(input_id) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                this.sink_inputs
+                this
+                  .sink_inputs
                   .retain(|entry| entry.read(cx).sink_input().id != input_id);
 
                 picker.update(cx, |picker, cx| {
@@ -252,13 +246,15 @@ impl AudioStreamsPanel {
     });
 
     // Handle picker selection - open sink picker
-    let subscriptions = vec![cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
-      if let PickerEvent::Picked(entry) = ev {
-        let input_id = entry.read(cx).sink_input().id;
-        let current_sink_id = entry.read(cx).sink_input().sink_id;
-        this.open_sink_picker(input_id, current_sink_id, window, cx);
-      }
-    })];
+    let subscriptions = vec![
+      cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
+        if let PickerEvent::Picked(entry) = ev {
+          let input_id = entry.read(cx).sink_input().id;
+          let current_sink_id = entry.read(cx).sink_input().sink_id;
+          this.open_sink_picker(input_id, current_sink_id, window, cx);
+        }
+      }),
+    ];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
@@ -282,9 +278,7 @@ impl AudioStreamsPanel {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    let delegate = SinkPickerDelegate {
-      current_sink_id,
-    };
+    let delegate = SinkPickerDelegate { current_sink_id };
 
     let sink_picker = cx.new(|cx| Picker::new(delegate, Arc::new(self.sinks.clone()), window, cx));
 
@@ -297,7 +291,11 @@ impl AudioStreamsPanel {
           this.audio_state.read(cx).move_sink_input(input_id, sink_id);
 
           // Update the entry's sink description
-          if let Some(entry) = this.sink_inputs.iter().find(|e| e.read(cx).sink_input().id == input_id) {
+          if let Some(entry) = this
+            .sink_inputs
+            .iter()
+            .find(|e| e.read(cx).sink_input().id == input_id)
+          {
             entry.update(cx, |entry, cx| {
               entry.sink_input.sink_id = sink_id;
               entry.update_sink_description(&this.sinks);

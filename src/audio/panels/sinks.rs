@@ -25,7 +25,12 @@ pub struct SinkEntry {
 }
 
 impl SinkEntry {
-  pub fn new(sink: SinkInfo, audio_state: &Entity<AudioState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+  pub fn new(
+    sink: SinkInfo,
+    audio_state: &Entity<AudioState>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Self {
     let sink_id = sink.id;
     let event_rx = audio_state.read(cx).subscribe_sink(sink_id);
 
@@ -109,12 +114,7 @@ impl AudioSinksPanel {
       let picker = picker.clone();
       let audio_state = audio_state.clone();
       async move |this, cx| {
-        let sinks = cx
-          .update(|_, cx| {
-            let executor = cx.background_executor();
-            audio_state.read(cx).list_sinks(&executor)
-          })
-          .ok();
+        let sinks = cx.update(|_, cx| audio_state.read(cx).list_sinks(cx)).ok();
         let Some(sinks_task) = sinks else { return };
         let sinks = sinks_task.await;
 
@@ -152,7 +152,9 @@ impl AudioSinksPanel {
             }
             SinkListEvent::Removed(sink_id) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                this.sinks.retain(|entry| entry.read(cx).sink().id != sink_id);
+                this
+                  .sinks
+                  .retain(|entry| entry.read(cx).sink().id != sink_id);
 
                 picker.update(cx, |picker, cx| {
                   picker.set_items(this.sinks.clone(), window, cx);
@@ -168,15 +170,17 @@ impl AudioSinksPanel {
       }
     });
 
-    let subscriptions = vec![cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
-      if let PickerEvent::Picked(entry) = ev {
-        let sink_id = entry.read(cx).sink().id;
-        this
-          .audio_state
-          .update(cx, |state, cx| state.set_default_sink(sink_id, cx))
-          .detach_and_log_err(cx);
-      }
-    })];
+    let subscriptions = vec![
+      cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
+        if let PickerEvent::Picked(entry) = ev {
+          let sink_id = entry.read(cx).sink().id;
+          this
+            .audio_state
+            .update(cx, |state, cx| state.set_default_sink(sink_id, cx))
+            .detach_and_log_err(cx);
+        }
+      }),
+    ];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
@@ -191,7 +195,11 @@ impl AudioSinksPanel {
   }
 
   fn get_selected_id(&self, cx: &mut Context<Self>) -> Option<SinkId> {
-    self.picker.read(cx).get_selected_item().map(|entry| entry.read(cx).sink().id)
+    self
+      .picker
+      .read(cx)
+      .get_selected_item()
+      .map(|entry| entry.read(cx).sink().id)
   }
 
   fn volume_up(&mut self, _: &VolumeUp, _window: &mut Window, cx: &mut Context<Self>) {

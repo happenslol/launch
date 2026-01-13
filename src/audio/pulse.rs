@@ -152,10 +152,7 @@ impl PulseThread {
   }
 }
 
-fn thread_main(
-  notify_fd: OwnedFd,
-  command_rx: Receiver<Command>,
-) -> Result<(), PulseError> {
+fn thread_main(notify_fd: OwnedFd, command_rx: Receiver<Command>) -> Result<(), PulseError> {
   let state = Rc::new(RefCell::new(PulseState::new()));
   let mut main_loop = Mainloop::new().ok_or(PulseError::MainLoopCreate)?;
   let mut context = Context::new(&main_loop, "launch").ok_or(PulseError::ContextCreate)?;
@@ -873,7 +870,10 @@ impl PulseState {
     }
   }
 
-  fn handle_sink_input_info(this: &Rc<RefCell<Self>>, info: ListResult<&introspect::SinkInputInfo>) {
+  fn handle_sink_input_info(
+    this: &Rc<RefCell<Self>>,
+    info: ListResult<&introspect::SinkInputInfo>,
+  ) {
     let ListResult::Item(info) = info else { return };
 
     let mut this = this.borrow_mut();

@@ -27,7 +27,12 @@ pub struct SourceEntry {
 }
 
 impl SourceEntry {
-  pub fn new(source: SourceInfo, audio_state: &Entity<AudioState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+  pub fn new(
+    source: SourceInfo,
+    audio_state: &Entity<AudioState>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Self {
     let source_id = source.id;
     let event_rx = audio_state.read(cx).subscribe_source(source_id);
 
@@ -112,10 +117,7 @@ impl AudioSourcesPanel {
       let audio_state = audio_state.clone();
       async move |this, cx| {
         let sources = cx
-          .update(|_, cx| {
-            let executor = cx.background_executor();
-            audio_state.read(cx).list_sources(&executor)
-          })
+          .update(|_, cx| audio_state.read(cx).list_sources(cx))
           .ok();
         let Some(sources_task) = sources else { return };
         let sources = sources_task.await;
@@ -144,7 +146,8 @@ impl AudioSourcesPanel {
           match event {
             SourceListEvent::Added(source_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                let new_entry = cx.new(|cx| SourceEntry::new(source_info, &audio_state, window, cx));
+                let new_entry =
+                  cx.new(|cx| SourceEntry::new(source_info, &audio_state, window, cx));
                 this.sources.push(new_entry);
 
                 picker.update(cx, |picker, cx| {
@@ -154,7 +157,9 @@ impl AudioSourcesPanel {
             }
             SourceListEvent::Removed(source_id) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                this.sources.retain(|entry| entry.read(cx).source().id != source_id);
+                this
+                  .sources
+                  .retain(|entry| entry.read(cx).source().id != source_id);
 
                 picker.update(cx, |picker, cx| {
                   picker.set_items(this.sources.clone(), window, cx);
@@ -170,15 +175,17 @@ impl AudioSourcesPanel {
       }
     });
 
-    let subscriptions = vec![cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
-      if let PickerEvent::Picked(entry) = ev {
-        let source_id = entry.read(cx).source().id;
-        this
-          .audio_state
-          .update(cx, |state, cx| state.set_default_source(source_id, cx))
-          .detach_and_log_err(cx);
-      }
-    })];
+    let subscriptions = vec![
+      cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
+        if let PickerEvent::Picked(entry) = ev {
+          let source_id = entry.read(cx).source().id;
+          this
+            .audio_state
+            .update(cx, |state, cx| state.set_default_source(source_id, cx))
+            .detach_and_log_err(cx);
+        }
+      }),
+    ];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
@@ -193,7 +200,11 @@ impl AudioSourcesPanel {
   }
 
   fn get_selected_id(&self, cx: &mut Context<Self>) -> Option<SourceId> {
-    self.picker.read(cx).get_selected_item().map(|entry| entry.read(cx).source().id)
+    self
+      .picker
+      .read(cx)
+      .get_selected_item()
+      .map(|entry| entry.read(cx).source().id)
   }
 
   fn volume_up(&mut self, _: &VolumeUp, _window: &mut Window, cx: &mut Context<Self>) {

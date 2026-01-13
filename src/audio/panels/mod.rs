@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 
-pub use sinks::VolumeBar;
 use sinks::AudioSinksPanel;
+pub use sinks::VolumeBar;
 use sources::AudioSourcesPanel;
 use streams::AudioStreamsPanel;
 
@@ -38,11 +38,7 @@ pub fn get_items() -> Vec<RootItem> {
       id: "streams".into(),
       icon: None,
       name: "Playback Streams".into(),
-      terms: vec![
-        "streams".into(),
-        "playback".into(),
-        "applications".into(),
-      ],
+      terms: vec!["streams".into(), "playback".into(), "applications".into()],
       view: Arc::new(|window, cx| cx.new(|cx| AudioStreamsPanel::new(window, cx)).into()),
     },
   ]

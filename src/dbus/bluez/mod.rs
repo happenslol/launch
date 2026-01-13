@@ -12,9 +12,7 @@ pub struct BlueZ {
 
 impl BlueZ {
   pub async fn new(conn: &zbus::Connection) -> Result<Self> {
-    Ok(Self {
-      conn: conn.clone(),
-    })
+    Ok(Self { conn: conn.clone() })
   }
 
   pub async fn get_adapter(&self) -> Result<Option<Adapter>> {
@@ -71,7 +69,9 @@ impl BlueZ {
     Ok(devices)
   }
 
-  pub async fn interfaces_added(&self) -> Result<impl Stream<Item = (OwnedObjectPath, bool)> + use<>> {
+  pub async fn interfaces_added(
+    &self,
+  ) -> Result<impl Stream<Item = (OwnedObjectPath, bool)> + use<>> {
     use zbus::fdo;
 
     let object_manager = fdo::ObjectManagerProxy::builder(&self.conn)
@@ -83,7 +83,9 @@ impl BlueZ {
     let stream = object_manager.receive_interfaces_added().await?;
     Ok(stream.filter_map(|signal| async move {
       let args = signal.args().ok()?;
-      let is_device = args.interfaces_and_properties.contains_key("org.bluez.Device1");
+      let is_device = args
+        .interfaces_and_properties
+        .contains_key("org.bluez.Device1");
       let path = args.object_path.clone().into();
       Some((path, is_device))
     }))
@@ -201,16 +203,12 @@ impl Device {
 
   pub async fn listen_alias_changed(&self) -> Result<impl Stream<Item = String> + use<>> {
     let stream = self.device_proxy.receive_alias_changed().await;
-    Ok(stream.filter_map(|signal| async move {
-      signal.get().await.ok()
-    }))
+    Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
   }
 
   pub async fn listen_connected_changed(&self) -> Result<impl Stream<Item = bool> + use<>> {
     let stream = self.device_proxy.receive_connected_changed().await;
-    Ok(stream.filter_map(|signal| async move {
-      signal.get().await.ok()
-    }))
+    Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
   }
 
   pub async fn listen_battery_changed(&self) -> Result<impl Stream<Item = Option<u8>> + use<>> {
@@ -220,9 +218,7 @@ impl Device {
       .await?;
 
     let stream = battery_proxy.receive_percentage_changed().await;
-    Ok(stream.filter_map(|signal| async move {
-      signal.get().await.ok().map(Some)
-    }))
+    Ok(stream.filter_map(|signal| async move { signal.get().await.ok().map(Some) }))
   }
 }
 

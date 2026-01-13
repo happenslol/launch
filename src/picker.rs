@@ -53,11 +53,7 @@ pub trait PickerDelegate: Sized + 'static {
     items: Arc<Vec<Self::ListItem>>,
   ) -> Task<()>;
 
-  fn sort_items(
-    &self,
-    _items: &[Self::ListItem],
-    matches: &mut [(usize, u32)],
-  ) {
+  fn sort_items(&self, _items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
     // Default implementation: sort by score descending
     matches.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
   }

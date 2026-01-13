@@ -5,7 +5,7 @@ pub mod types;
 use anyhow::{Result, anyhow};
 use flume::Receiver;
 use futures::channel::oneshot;
-use gpui::{App, BackgroundExecutor, Entity, Global, Task, prelude::*};
+use gpui::{App, Entity, Global, Task, prelude::*};
 
 use crate::audio::{
   pulse::{Command, PulseThread, SetMute, SetVolume},
@@ -87,40 +87,46 @@ impl AudioState {
   }
 
   // Query methods
-  pub fn list_sinks(&self, executor: &BackgroundExecutor) -> Task<Vec<SinkInfo>> {
+  pub fn list_sinks(&self, cx: &App) -> Task<Vec<SinkInfo>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::ListSinks(tx));
-    executor.spawn(async move { rx.await.unwrap_or_default() })
+    cx.background_executor()
+      .spawn(async move { rx.await.unwrap_or_default() })
   }
 
-  pub fn list_sources(&self, executor: &BackgroundExecutor) -> Task<Vec<SourceInfo>> {
+  pub fn list_sources(&self, cx: &App) -> Task<Vec<SourceInfo>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::ListSources(tx));
-    executor.spawn(async move { rx.await.unwrap_or_default() })
+    cx.background_executor()
+      .spawn(async move { rx.await.unwrap_or_default() })
   }
 
-  pub fn get_sink_info(&self, id: SinkId, executor: &BackgroundExecutor) -> Task<Option<SinkInfo>> {
+  pub fn get_sink_info(&self, id: SinkId, cx: &App) -> Task<Option<SinkInfo>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::GetSinkInfo(id, tx));
-    executor.spawn(async move { rx.await.ok().flatten() })
+    cx.background_executor()
+      .spawn(async move { rx.await.ok().flatten() })
   }
 
-  pub fn get_source_info(&self, id: SourceId, executor: &BackgroundExecutor) -> Task<Option<SourceInfo>> {
+  pub fn get_source_info(&self, id: SourceId, cx: &App) -> Task<Option<SourceInfo>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::GetSourceInfo(id, tx));
-    executor.spawn(async move { rx.await.ok().flatten() })
+    cx.background_executor()
+      .spawn(async move { rx.await.ok().flatten() })
   }
 
-  pub fn get_default_sink(&self, executor: &BackgroundExecutor) -> Task<Option<SinkId>> {
+  pub fn get_default_sink(&self, cx: &App) -> Task<Option<SinkId>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::GetDefaultSink(tx));
-    executor.spawn(async move { rx.await.ok().flatten() })
+    cx.background_executor()
+      .spawn(async move { rx.await.ok().flatten() })
   }
 
-  pub fn get_default_source(&self, executor: &BackgroundExecutor) -> Task<Option<SourceId>> {
+  pub fn get_default_source(&self, cx: &App) -> Task<Option<SourceId>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::GetDefaultSource(tx));
-    executor.spawn(async move { rx.await.ok().flatten() })
+    cx.background_executor()
+      .spawn(async move { rx.await.ok().flatten() })
   }
 
   // Subscription methods
@@ -176,7 +182,9 @@ impl AudioState {
   }
 
   pub fn set_source_volume(&self, source: SourceId, set: SetVolume) {
-    self.pulse.send_command(Command::SetSourceVolume(source, set))
+    self
+      .pulse
+      .send_command(Command::SetSourceVolume(source, set))
   }
 
   pub fn set_source_mute(&self, source: SourceId, set: SetMute) {
@@ -184,10 +192,11 @@ impl AudioState {
   }
 
   // Sink input query methods
-  pub fn list_sink_inputs(&self, executor: &BackgroundExecutor) -> Task<Vec<SinkInputInfo>> {
+  pub fn list_sink_inputs(&self, cx: &App) -> Task<Vec<SinkInputInfo>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::ListSinkInputs(tx));
-    executor.spawn(async move { rx.await.unwrap_or_default() })
+    cx.background_executor()
+      .spawn(async move { rx.await.unwrap_or_default() })
   }
 
   // Sink input subscription methods
@@ -205,7 +214,9 @@ impl AudioState {
 
   // Sink input action methods
   pub fn set_sink_input_volume(&self, id: SinkInputId, set: SetVolume) {
-    self.pulse.send_command(Command::SetSinkInputVolume(id, set))
+    self
+      .pulse
+      .send_command(Command::SetSinkInputVolume(id, set))
   }
 
   pub fn set_sink_input_mute(&self, id: SinkInputId, set: SetMute) {
