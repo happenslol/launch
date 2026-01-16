@@ -37,6 +37,7 @@ pub struct SinkInputInfo {
   pub volume: ChannelVolumes,
   pub mute: bool,
   pub application_name: Option<SharedString>,
+  pub icon_name: Option<SharedString>,
 }
 
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]

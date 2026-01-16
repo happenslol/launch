@@ -1,8 +1,9 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
-  App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render,
-  SharedString, Styled, Subscription, Task, Window, actions, div, prelude::*, rgb,
+  App, AppContext, Context, Entity, FocusHandle, Focusable, ImageSource, IntoElement, KeyBinding,
+  Render, Resource, SharedString, Styled, Subscription, Task, Window, actions, div, img,
+  prelude::*, rgb,
 };
 use nucleo_matcher::{
   Config, Matcher, Utf32Str,
@@ -20,6 +21,7 @@ use crate::{
   },
   picker::{Picker, PickerDelegate, PickerEvent},
   util::{h_flex, v_flex},
+  xdg,
 };
 
 use super::VolumeBar;
@@ -27,6 +29,7 @@ use super::VolumeBar;
 pub struct SinkInputEntry {
   sink_input: SinkInputInfo,
   sink_description: Option<SharedString>,
+  icon: Option<Resource>,
   _event_listener: Task<()>,
 }
 
@@ -35,6 +38,7 @@ impl SinkInputEntry {
     sink_input: SinkInputInfo,
     audio_state: &Entity<AudioState>,
     sinks: &[SinkInfo],
+    locales: &[String],
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
@@ -45,6 +49,14 @@ impl SinkInputEntry {
       .iter()
       .find(|s| s.id == sink_input.sink_id)
       .and_then(|s| s.description.clone().or_else(|| s.name.clone()));
+
+    let icon = sink_input
+      .application_name
+      .as_ref()
+      .and_then(|app_name| xdg::get_icon_for_app(app_name, locales))
+      .map(|path| Resource::Path(path.into()));
+
+    let locales = locales.to_vec();
 
     let event_listener = cx.spawn_in(window, async move |this, cx| {
       while let Ok(event) = event_rx.recv_async().await {
@@ -65,6 +77,7 @@ impl SinkInputEntry {
           }
           SinkInputEvent::InfoChanged(info) => {
             this.sink_input = info;
+            this.update_from_info(&locales);
             cx.notify();
           }
           SinkInputEvent::Removed => {}
@@ -79,6 +92,7 @@ impl SinkInputEntry {
     Self {
       sink_input,
       sink_description,
+      icon,
       _event_listener: event_listener,
     }
   }
@@ -91,11 +105,24 @@ impl SinkInputEntry {
     self.sink_description.as_ref()
   }
 
+  pub fn icon(&self) -> Option<&Resource> {
+    self.icon.as_ref()
+  }
+
   pub fn update_sink_description(&mut self, sinks: &[SinkInfo]) {
     self.sink_description = sinks
       .iter()
       .find(|s| s.id == self.sink_input.sink_id)
       .and_then(|s| s.description.clone().or_else(|| s.name.clone()));
+  }
+
+  pub fn update_from_info(&mut self, locales: &[String]) {
+    self.icon = self
+      .sink_input
+      .application_name
+      .as_ref()
+      .and_then(|app_name| xdg::get_icon_for_app(app_name, locales))
+      .map(|path| Resource::Path(path.into()));
   }
 }
 
@@ -105,6 +132,7 @@ pub struct AudioStreamsPanel {
   audio_state: Entity<AudioState>,
   sink_inputs: Vec<Entity<SinkInputEntry>>,
   sinks: Vec<SinkInfo>,
+  locales: Vec<String>,
   _subscriptions: Vec<Subscription>,
   _list_subscription_task: Task<()>,
   _sink_list_subscription_task: Task<()>,
@@ -132,10 +160,13 @@ impl AudioStreamsPanel {
 
     let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
 
+    let locales = freedesktop_desktop_entry::get_languages_from_env();
+
     // Load initial data async
     let initial_load_task = cx.spawn_in(window, {
       let picker = picker.clone();
       let audio_state = audio_state.clone();
+      let locales = locales.clone();
       async move |this, cx| {
         // Load sink inputs
         let sink_inputs = cx
@@ -156,10 +187,13 @@ impl AudioStreamsPanel {
 
           let entries: Vec<Entity<SinkInputEntry>> = sink_inputs
             .into_iter()
-            .map(|input| cx.new(|cx| SinkInputEntry::new(input, &audio_state, &sinks, window, cx)))
+            .map(|input| {
+              cx.new(|cx| SinkInputEntry::new(input, &audio_state, &sinks, &locales, window, cx))
+            })
             .collect();
 
           this.sink_inputs = entries.clone();
+          this.locales = locales.clone();
           picker.update(cx, |picker, cx| {
             picker.set_items(entries, window, cx);
           });
@@ -172,13 +206,15 @@ impl AudioStreamsPanel {
     let list_subscription_task = cx.spawn_in(window, {
       let picker = picker.clone();
       let audio_state = audio_state.clone();
+      let locales = locales.clone();
       async move |this, cx| {
         while let Ok(event) = list_rx.recv_async().await {
           match event {
             SinkInputListEvent::Added(input_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                let new_entry = cx
-                  .new(|cx| SinkInputEntry::new(input_info, &audio_state, &this.sinks, window, cx));
+                let new_entry = cx.new(|cx| {
+                  SinkInputEntry::new(input_info, &audio_state, &this.sinks, &locales, window, cx)
+                });
                 this.sink_inputs.push(new_entry);
 
                 picker.update(cx, |picker, cx| {
@@ -264,6 +300,7 @@ impl AudioStreamsPanel {
       audio_state,
       sink_inputs: Vec::new(),
       sinks: Vec::new(),
+      locales,
       _subscriptions: subscriptions,
       _list_subscription_task: list_subscription_task,
       _sink_list_subscription_task: sink_list_subscription_task,
@@ -416,6 +453,8 @@ impl PickerDelegate for StreamsDelegate {
     let entry = item.read(cx);
     let sink_input = entry.sink_input();
 
+    let icon = entry.icon();
+
     // Use NORMAL volume as base since sink inputs don't have base_volume
     let base_volume = crate::audio::types::Volume(pulse::volume::Volume::NORMAL.0);
     let volume_percent = sink_input.volume.as_percent(base_volume);
@@ -446,10 +485,20 @@ impl PickerDelegate for StreamsDelegate {
           .child(
             h_flex()
               .flex_1()
-              .text_ellipsis()
-              .overflow_x_hidden()
-              .when(sink_input.mute, |div| div.child("MUTE "))
-              .child(display_name),
+              .gap_2()
+              .items_center()
+              .when_some(icon, |this, icon| {
+                this.child(img(ImageSource::Resource(icon.clone())).size_5())
+              })
+              .when_none(&icon, |this| this.child(div().size_5()))
+              .child(
+                h_flex()
+                  .flex_1()
+                  .text_ellipsis()
+                  .overflow_x_hidden()
+                  .when(sink_input.mute, |div| div.child("MUTE "))
+                  .child(display_name),
+              ),
           )
           .child(div().child(format!("{}%", volume_percent))),
       )

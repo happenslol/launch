@@ -60,6 +60,32 @@ pub fn get_icon(name: &str) -> Option<PathBuf> {
   lookup.find()
 }
 
+pub fn get_icon_for_app(app_name: &str, locales: &[String]) -> Option<PathBuf> {
+  let entries: Vec<_> = Iter::new(default_paths())
+    .entries(Some(locales))
+    .filter_map(|entry| {
+      let name = entry.name(locales).unwrap_or_default();
+      if name.to_lowercase() == app_name.to_lowercase()
+        || entry.appid.to_lowercase() == app_name.to_lowercase()
+      {
+        Some(entry)
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  for entry in entries {
+    if let Some(icon) = entry.icon() {
+      if let Some(path) = get_icon(icon) {
+        return Some(path);
+      }
+    }
+  }
+
+  None
+}
+
 pub fn start(entry: &DesktopEntry) -> Result<()> {
   let cmd = entry.parse_exec()?;
 

@@ -886,6 +886,13 @@ impl PulseState {
       .get_str("application.name")
       .map(|s| SharedString::from(s.to_string()));
 
+    // Extract icon name from proplist, fall back to application name
+    let icon_name = info
+      .proplist
+      .get_str("application.icon")
+      .or_else(|| info.proplist.get_str("application.name"))
+      .map(|s| SharedString::from(s.to_string()));
+
     let mut events_to_send: Vec<SinkInputEvent> = Vec::new();
     let mut list_event: Option<SinkInputListEvent> = None;
 
@@ -908,12 +915,14 @@ impl PulseState {
 
       if sink_input.name.as_ref().map(|s| s.as_str()) != info.name.as_deref()
         || sink_input.application_name != application_name
+        || sink_input.icon_name != icon_name
       {
         sink_input.name = info
           .name
           .as_ref()
           .map(|s| SharedString::from(s.to_string()));
         sink_input.application_name = application_name.clone();
+        sink_input.icon_name = icon_name.clone();
         events_to_send.push(SinkInputEvent::InfoChanged(sink_input.clone()));
       }
     } else {
@@ -927,6 +936,7 @@ impl PulseState {
         volume: info.volume.into(),
         mute: info.mute,
         application_name,
+        icon_name,
       };
 
       this.sink_inputs.insert(info.index, managed.clone());
