@@ -420,12 +420,17 @@ impl PickerDelegate for StreamsDelegate {
     let base_volume = crate::audio::types::Volume(pulse::volume::Volume::NORMAL.0);
     let volume_percent = sink_input.volume.as_percent(base_volume);
 
-    // Display name: prefer application_name, fall back to name
-    let display_name = sink_input
-      .application_name
-      .clone()
-      .or_else(|| sink_input.name.clone())
-      .unwrap_or_else(|| "Unknown Stream".into());
+    let app_name = sink_input.application_name.clone();
+    let media_name = sink_input.name.clone();
+
+    let display_name = match (app_name, media_name) {
+      (Some(app), Some(media)) => format!("{} • {}", app, media),
+      (Some(app), None) => app.to_string(),
+      (None, Some(media)) => media.to_string(),
+      (None, None) => "Unknown Stream".into(),
+    };
+
+    let display_name = SharedString::from(display_name);
 
     // Get cached sink description
     let sink_description = entry.sink_description().cloned();

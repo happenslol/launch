@@ -224,8 +224,9 @@ impl WifiPanel {
             .into_iter()
             .filter(|ap| !ap.ssid.is_empty())
             .map(|ap| {
-              let is_connected =
-                active_hw_address.as_ref().is_some_and(|addr| addr == &ap.hw_address);
+              let is_connected = active_hw_address
+                .as_ref()
+                .is_some_and(|addr| addr == &ap.hw_address);
               let known_conn = known_connections
                 .iter()
                 .find(|(ssid, _)| ssid == &ap.ssid)
@@ -287,8 +288,9 @@ impl WifiPanel {
             .into_iter()
             .filter(|ap| !ap.ssid.is_empty())
             .map(|ap| {
-              let is_connected =
-                active_hw_address.as_ref().is_some_and(|addr| addr == &ap.hw_address);
+              let is_connected = active_hw_address
+                .as_ref()
+                .is_some_and(|addr| addr == &ap.hw_address);
               let known_conn = known_connections
                 .iter()
                 .find(|(ssid, _)| ssid == &ap.ssid)
@@ -368,8 +370,9 @@ impl WifiPanel {
           .into_iter()
           .filter(|ap| !ap.ssid.is_empty())
           .map(|ap| {
-            let is_connected =
-              active_hw_address.as_ref().is_some_and(|addr| addr == &ap.hw_address);
+            let is_connected = active_hw_address
+              .as_ref()
+              .is_some_and(|addr| addr == &ap.hw_address);
             let known_conn = known_connections
               .iter()
               .find(|(ssid, _)| ssid == &ap.ssid)
@@ -453,7 +456,9 @@ impl Render for WifiPanel {
       .key_context(CONTEXT)
       .on_action(cx.listener(Self::refresh))
       .size_full()
-      .when(self.is_scanning, |this| this.child(div().child("Scanning...")))
+      .when(self.is_scanning, |this| {
+        this.child(div().child("Scanning..."))
+      })
       .child(self.picker.clone())
   }
 }
@@ -486,7 +491,13 @@ impl PickerDelegate for WifiDelegate {
     v_flex()
       .w_full()
       .when(is_selected, |this| this.bg(rgb(0x444444)))
-      .child(div().w_full().text_ellipsis().overflow_x_hidden().child(status_text))
+      .child(
+        div()
+          .w_full()
+          .text_ellipsis()
+          .overflow_x_hidden()
+          .child(status_text),
+      )
       .child(div().child(info_text))
   }
 
@@ -532,8 +543,16 @@ impl PickerDelegate for WifiDelegate {
       let entry_a = items[*idx_a].read(cx);
       let entry_b = items[*idx_b].read(cx);
 
-      let a_data = (entry_a.is_connected, entry_a.is_known, entry_a.access_point.strength);
-      let b_data = (entry_b.is_connected, entry_b.is_known, entry_b.access_point.strength);
+      let a_data = (
+        entry_a.is_connected,
+        entry_a.is_known,
+        entry_a.access_point.strength,
+      );
+      let b_data = (
+        entry_b.is_connected,
+        entry_b.is_known,
+        entry_b.access_point.strength,
+      );
 
       match (a_data.0, b_data.0) {
         (true, false) => std::cmp::Ordering::Less,
