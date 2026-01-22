@@ -12,6 +12,7 @@ mod input;
 mod launcher;
 mod logging;
 mod network;
+mod matcher;
 mod picker;
 mod util;
 mod xdg;
@@ -37,6 +38,7 @@ fn main() -> Result<()> {
   let args = Args::try_parse()?;
 
   Application::new().with_assets(Assets).run(move |cx| {
+    matcher::init(cx);
     dbus::init(cx);
     audio::init(cx);
     InputState::init(cx);

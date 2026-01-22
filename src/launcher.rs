@@ -212,8 +212,6 @@ impl Launcher {
       RootItem::Panel { view, .. } => {
         let panel = view(window, cx);
         self.active_panel = Some(panel);
-        // Don't call cx.focus_self here - let the panel keep its focus
-        // The panel's constructor already focused its internal search input
         cx.notify();
       }
     }

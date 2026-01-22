@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeMap, HashSet},
+  collections::{BTreeMap, HashMap, HashSet},
   path::PathBuf,
   process,
 };
@@ -7,6 +7,7 @@ use std::{
 use anyhow::Result;
 use fork::Fork;
 use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths};
+use gpui::Resource;
 
 use crate::launcher::RootItem;
 
@@ -60,36 +61,42 @@ pub fn get_icon(name: &str) -> Option<PathBuf> {
   lookup.find()
 }
 
-pub fn get_icon_for_app(app_name: &str, locales: &[String]) -> Option<PathBuf> {
-  let entries: Vec<_> = Iter::new(default_paths())
-    .entries(Some(locales))
-    .filter_map(|entry| {
-      let name = entry.name(locales).unwrap_or_default();
-      if name.to_lowercase() == app_name.to_lowercase()
-        || entry.appid.to_lowercase() == app_name.to_lowercase()
-      {
-        Some(entry)
-      } else {
-        None
-      }
-    })
-    .collect();
+pub fn get_icons_by_app_name(locales: &[String]) -> HashMap<String, Resource> {
+  let entries: Vec<_> = Iter::new(default_paths()).entries(Some(locales)).collect();
+
+  let mut result = HashMap::new();
 
   for entry in entries {
-    if let Some(icon) = entry.icon() {
-      if let Some(path) = get_icon(icon) {
-        return Some(path);
+    let name = entry.name(locales).unwrap_or_default();
+    if let Some(icon_name) = entry.icon() {
+      if let Some(icon_path) = get_icon(icon_name) {
+        let resource = Resource::Path(icon_path.into());
+
+        let name_lower = name.to_lowercase();
+        result.entry(name_lower).or_insert_with(|| resource.clone());
+
+        let appid_lower = entry.appid.to_lowercase();
+        result
+          .entry(appid_lower)
+          .or_insert_with(|| resource.clone());
+
+        if let Some(generic_name) = entry.generic_name(locales) {
+          let generic_lower = generic_name.to_lowercase();
+          result
+            .entry(generic_lower)
+            .or_insert_with(|| resource.clone());
+        }
       }
     }
   }
 
-  None
+  result
 }
 
 pub fn start(entry: &DesktopEntry) -> Result<()> {
   let cmd = entry.parse_exec()?;
 
-  // TODO: If we want to capture the child's output, we have to create pipes and set out own
+  // TODO: If we want to capture child's output, we have to create pipes and set out own
   // stdin/out/err to them before forking, then set them back to our own in the parent.
 
   if let Fork::Child = fork::fork()? {

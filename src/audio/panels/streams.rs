@@ -30,6 +30,7 @@ pub struct SinkInputEntry {
   sink_input: SinkInputInfo,
   sink_description: Option<SharedString>,
   icon: Option<Resource>,
+  _icon_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Resource>>>,
   _event_listener: Task<()>,
 }
 
@@ -38,7 +39,7 @@ impl SinkInputEntry {
     sink_input: SinkInputInfo,
     audio_state: &Entity<AudioState>,
     sinks: &[SinkInfo],
-    locales: &[String],
+    icon_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Resource>>>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
@@ -50,14 +51,12 @@ impl SinkInputEntry {
       .find(|s| s.id == sink_input.sink_id)
       .and_then(|s| s.description.clone().or_else(|| s.name.clone()));
 
-    let icon = sink_input
-      .application_name
-      .as_ref()
-      .and_then(|app_name| xdg::get_icon_for_app(app_name, locales))
-      .map(|path| Resource::Path(path.into()));
+    let icon = sink_input.application_name.as_ref().and_then(|app_name| {
+      let cache = icon_cache.lock().unwrap();
+      cache.get(&app_name.to_lowercase()).cloned()
+    });
 
-    let locales = locales.to_vec();
-
+    let icon_cache_clone = icon_cache.clone();
     let event_listener = cx.spawn_in(window, async move |this, cx| {
       while let Ok(event) = event_rx.recv_async().await {
         let should_break = matches!(event, SinkInputEvent::Removed);
@@ -77,7 +76,7 @@ impl SinkInputEntry {
           }
           SinkInputEvent::InfoChanged(info) => {
             this.sink_input = info;
-            this.update_from_info(&locales);
+            this.update_from_info();
             cx.notify();
           }
           SinkInputEvent::Removed => {}
@@ -93,6 +92,7 @@ impl SinkInputEntry {
       sink_input,
       sink_description,
       icon,
+      _icon_cache: icon_cache_clone,
       _event_listener: event_listener,
     }
   }
@@ -116,13 +116,15 @@ impl SinkInputEntry {
       .and_then(|s| s.description.clone().or_else(|| s.name.clone()));
   }
 
-  pub fn update_from_info(&mut self, locales: &[String]) {
+  pub fn update_from_info(&mut self) {
     self.icon = self
       .sink_input
       .application_name
       .as_ref()
-      .and_then(|app_name| xdg::get_icon_for_app(app_name, locales))
-      .map(|path| Resource::Path(path.into()));
+      .and_then(|app_name| {
+        let cache = self._icon_cache.lock().unwrap();
+        cache.get(&app_name.to_lowercase()).cloned()
+      });
   }
 }
 
@@ -132,11 +134,12 @@ pub struct AudioStreamsPanel {
   audio_state: Entity<AudioState>,
   sink_inputs: Vec<Entity<SinkInputEntry>>,
   sinks: Vec<SinkInfo>,
-  locales: Vec<String>,
+  _icon_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Resource>>>,
   _subscriptions: Vec<Subscription>,
   _list_subscription_task: Task<()>,
   _sink_list_subscription_task: Task<()>,
   _initial_load_task: Task<()>,
+  _icon_refresh_task: Task<()>,
 }
 
 const CONTEXT: &str = "streams";
@@ -161,12 +164,36 @@ impl AudioStreamsPanel {
     let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
 
     let locales = freedesktop_desktop_entry::get_languages_from_env();
+    let icon_cache = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
+    let icon_refresh_task = cx.spawn_in(window, {
+      let locales = locales.clone();
+      async move |this, cx| {
+        let icons = cx
+          .background_spawn(async move { xdg::get_icons_by_app_name(&locales) })
+          .await;
+
+        let _ = this.update(cx, |this, cx| {
+          let mut cache = this._icon_cache.lock().unwrap();
+          cache.extend(icons);
+
+          for entry in &this.sink_inputs {
+            entry.update(cx, |entry, cx| {
+              entry.update_from_info();
+              cx.notify();
+            });
+          }
+
+          cx.notify();
+        });
+      }
+    });
 
     // Load initial data async
     let initial_load_task = cx.spawn_in(window, {
       let picker = picker.clone();
       let audio_state = audio_state.clone();
-      let locales = locales.clone();
+      let icon_cache = icon_cache.clone();
       async move |this, cx| {
         // Load sink inputs
         let sink_inputs = cx
@@ -188,12 +215,13 @@ impl AudioStreamsPanel {
           let entries: Vec<Entity<SinkInputEntry>> = sink_inputs
             .into_iter()
             .map(|input| {
-              cx.new(|cx| SinkInputEntry::new(input, &audio_state, &sinks, &locales, window, cx))
+              cx.new(|cx| {
+                SinkInputEntry::new(input, &audio_state, &sinks, icon_cache.clone(), window, cx)
+              })
             })
             .collect();
 
           this.sink_inputs = entries.clone();
-          this.locales = locales.clone();
           picker.update(cx, |picker, cx| {
             picker.set_items(entries, window, cx);
           });
@@ -206,14 +234,21 @@ impl AudioStreamsPanel {
     let list_subscription_task = cx.spawn_in(window, {
       let picker = picker.clone();
       let audio_state = audio_state.clone();
-      let locales = locales.clone();
+      let icon_cache = icon_cache.clone();
       async move |this, cx| {
         while let Ok(event) = list_rx.recv_async().await {
           match event {
             SinkInputListEvent::Added(input_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
                 let new_entry = cx.new(|cx| {
-                  SinkInputEntry::new(input_info, &audio_state, &this.sinks, &locales, window, cx)
+                  SinkInputEntry::new(
+                    input_info,
+                    &audio_state,
+                    &this.sinks,
+                    icon_cache.clone(),
+                    window,
+                    cx,
+                  )
                 });
                 this.sink_inputs.push(new_entry);
 
@@ -300,11 +335,12 @@ impl AudioStreamsPanel {
       audio_state,
       sink_inputs: Vec::new(),
       sinks: Vec::new(),
-      locales,
+      _icon_cache: icon_cache,
       _subscriptions: subscriptions,
       _list_subscription_task: list_subscription_task,
       _sink_list_subscription_task: sink_list_subscription_task,
       _initial_load_task: initial_load_task,
+      _icon_refresh_task: icon_refresh_task,
     }
   }
 

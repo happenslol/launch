@@ -6,7 +6,7 @@ use gpui::{
   Task, Window, actions, div, prelude::*, rgb,
 };
 use nucleo_matcher::{
-  Config, Matcher, Utf32Str,
+  Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
 use zvariant::OwnedObjectPath;
@@ -16,23 +16,30 @@ use crate::{
     GlobalDbusConnection,
     networkmanager::{AccessPoint, NetworkManager, WirelessDevice},
   },
+  matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent},
-  util::v_flex,
+  util::{ResultExt, v_flex},
 };
 
 actions!(wifi, [Refresh]);
 
 const CONTEXT: &str = "wifi";
 
+#[derive(Clone)]
 pub struct WifiEntry {
+  search_string: String,
+  entry: Entity<WifiEntryInner>,
+}
+
+pub struct WifiEntryInner {
   access_point: AccessPoint,
   pub is_connected: bool,
   pub is_known: bool,
   pub connection_path: Option<OwnedObjectPath>,
-  _property_listeners: Vec<Task<()>>,
+  _listeners: Vec<Task<()>>,
 }
 
-impl WifiEntry {
+impl WifiEntryInner {
   pub fn new(
     access_point: AccessPoint,
     is_connected: bool,
@@ -41,29 +48,7 @@ impl WifiEntry {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
-    let mut entry = Self {
-      access_point: access_point.clone(),
-      is_connected,
-      is_known,
-      connection_path,
-      _property_listeners: Vec::new(),
-    };
-
-    entry.spawn_property_listeners(&access_point, window, cx);
-    entry
-  }
-
-  pub fn access_point(&self) -> &AccessPoint {
-    &self.access_point
-  }
-
-  fn spawn_property_listeners(
-    &mut self,
-    access_point: &AccessPoint,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
-    let strength_listener = cx.spawn_in(window, {
+    let listeners = vec![cx.spawn_in(window, {
       let access_point = access_point.clone();
       async move |this, cx| {
         let strength_stream = cx
@@ -86,9 +71,44 @@ impl WifiEntry {
           });
         }
       }
+    })];
+
+    WifiEntryInner {
+      access_point,
+      is_connected,
+      is_known,
+      connection_path,
+      _listeners: listeners,
+    }
+  }
+}
+
+impl WifiEntry {
+  pub fn new(
+    access_point: AccessPoint,
+    is_connected: bool,
+    is_known: bool,
+    connection_path: Option<OwnedObjectPath>,
+    window: &mut Window,
+    cx: &mut App,
+  ) -> Self {
+    let search_string = access_point.ssid.to_string();
+
+    let entity = cx.new(|cx| {
+      WifiEntryInner::new(
+        access_point,
+        is_connected,
+        is_known,
+        connection_path,
+        window,
+        cx,
+      )
     });
 
-    self._property_listeners.push(strength_listener);
+    Self {
+      search_string,
+      entry: entity,
+    }
   }
 }
 
@@ -96,7 +116,7 @@ pub struct WifiPanel {
   picker: Entity<Picker<WifiDelegate>>,
   network_manager: Option<NetworkManager>,
   device: Option<WirelessDevice>,
-  entries: Vec<Entity<WifiEntry>>,
+  entries: Vec<WifiEntry>,
   is_scanning: bool,
   _scan_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
@@ -112,8 +132,8 @@ impl WifiPanel {
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
         if let PickerEvent::Picked(wifi_entry) = ev {
-          let entry = wifi_entry.read(cx);
-          let access_point = entry.access_point().clone();
+          let entry = wifi_entry.entry.read(cx);
+          let access_point = entry.access_point.clone();
           let is_connected = entry.is_connected;
           let is_known = entry.is_known;
           let connection_path = entry.connection_path.clone();
@@ -220,7 +240,7 @@ impl WifiPanel {
           this.network_manager = Some(nm.clone());
           this.device = Some(device.clone());
 
-          let entries: Vec<Entity<WifiEntry>> = initial_access_points
+          let entries: Vec<WifiEntry> = initial_access_points
             .into_iter()
             .filter(|ap| !ap.ssid.is_empty())
             .map(|ap| {
@@ -233,7 +253,7 @@ impl WifiPanel {
                 .map(|(_, path)| path.clone());
               let is_known = known_conn.is_some();
 
-              cx.new(|cx| WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx))
+              WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx)
             })
             .collect();
 
@@ -284,7 +304,7 @@ impl WifiPanel {
         .update_in(cx, |this, window, cx| {
           this.is_scanning = false;
 
-          let entries: Vec<Entity<WifiEntry>> = access_points
+          let entries: Vec<WifiEntry> = access_points
             .into_iter()
             .filter(|ap| !ap.ssid.is_empty())
             .map(|ap| {
@@ -297,7 +317,7 @@ impl WifiPanel {
                 .map(|(_, path)| path.clone());
               let is_known = known_conn.is_some();
 
-              cx.new(|cx| WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx))
+              WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx)
             })
             .collect();
 
@@ -366,7 +386,7 @@ impl WifiPanel {
       let _ = this.update_in(cx, |this, window, cx| {
         this.is_scanning = false;
 
-        let entries: Vec<Entity<WifiEntry>> = access_points
+        let entries: Vec<WifiEntry> = access_points
           .into_iter()
           .filter(|ap| !ap.ssid.is_empty())
           .map(|ap| {
@@ -379,7 +399,7 @@ impl WifiPanel {
               .map(|(_, path)| path.clone());
             let is_known = known_conn.is_some();
 
-            cx.new(|cx| WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx))
+            WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx)
           })
           .collect();
 
@@ -466,7 +486,7 @@ impl Render for WifiPanel {
 struct WifiDelegate {}
 
 impl PickerDelegate for WifiDelegate {
-  type ListItem = Entity<WifiEntry>;
+  type ListItem = WifiEntry;
 
   fn render_list_item(
     &self,
@@ -475,8 +495,8 @@ impl PickerDelegate for WifiDelegate {
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
-    let entry = item.read(cx);
-    let ap = entry.access_point();
+    let entry = &item.entry.read(cx);
+    let ap = &entry.access_point;
 
     let mut status_text = String::new();
     if entry.is_connected {
@@ -518,57 +538,26 @@ impl PickerDelegate for WifiDelegate {
       return Task::ready(());
     }
 
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
-    let mut matches = Vec::new();
-    let mut buf = Vec::new();
+    let matchers = MatcherPool::global(cx);
+    cx.spawn_in(window, async move |cx, window| {
+      let mut matcher = matchers.get().await.unwrap();
 
-    for (index, item) in items.iter().enumerate() {
-      let ap = item.read(cx).access_point();
+      let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+      let mut matches = Vec::new();
+      let mut buf = Vec::new();
 
-      if let Some(score) = needle.score(Utf32Str::new(&ap.ssid, &mut buf), &mut matcher) {
-        matches.push((index, score));
+      for (index, item) in items.iter().enumerate() {
+        if let Some(score) =
+          needle.score(Utf32Str::new(&item.search_string, &mut buf), &mut matcher)
+        {
+          matches.push((index, score));
+        }
       }
-    }
 
-    cx.defer_in(window, move |picker, _window, cx| {
-      picker.complete_search(cx, search_id, Some(matches));
-    });
-
-    Task::ready(())
-  }
-
-  fn sort_items(&self, cx: &App, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
-    matches.sort_by(|(idx_a, score_a), (idx_b, score_b)| {
-      let entry_a = items[*idx_a].read(cx);
-      let entry_b = items[*idx_b].read(cx);
-
-      let a_data = (
-        entry_a.is_connected,
-        entry_a.is_known,
-        entry_a.access_point.strength,
-      );
-      let b_data = (
-        entry_b.is_connected,
-        entry_b.is_known,
-        entry_b.access_point.strength,
-      );
-
-      match (a_data.0, b_data.0) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => match (a_data.1, b_data.1) {
-          (true, false) => std::cmp::Ordering::Less,
-          (false, true) => std::cmp::Ordering::Greater,
-          _ => {
-            if score_a == score_b {
-              b_data.2.cmp(&a_data.2)
-            } else {
-              score_b.cmp(score_a)
-            }
-          }
-        },
-      }
-    });
+      cx.update_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, Some(matches));
+      })
+      .log_err();
+    })
   }
 }

@@ -22,6 +22,7 @@ pub fn init(cx: &mut App) {
 }
 
 impl GlobalDbusConnection {
+  // TODO: Wait for connection to be ready here?
   pub fn system(cx: &mut App) -> Option<zbus::Connection> {
     let this = cx.global::<Self>();
     if let Some((_, conn)) = this.system.as_ref() {
