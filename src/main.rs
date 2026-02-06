@@ -23,7 +23,7 @@ use std::process;
 use anyhow::Result;
 use clap::Parser;
 use fork::Fork;
-use gpui::{App, Application, prelude::*};
+use gpui::{App, Application, QuitMode, prelude::*};
 use tracing::{error, info};
 
 use crate::{
@@ -65,7 +65,7 @@ fn main() -> Result<()> {
 
         let receiver = instance::listen(listener);
 
-        Application::new().with_assets(Assets).run(move |cx| {
+        Application::new().with_assets(Assets).with_quit_mode(QuitMode::Explicit).run(move |cx| {
           matcher::init(cx);
           dbus::init(cx);
           audio::init(cx);
