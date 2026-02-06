@@ -160,7 +160,7 @@ impl Launcher {
       return;
     }
 
-    cx.quit();
+    window.remove_window();
   }
 
   async fn refresh_app_icons(
@@ -206,7 +206,7 @@ impl Launcher {
 
     match &item {
       RootItem::App { entry, .. } => match xdg::start(entry) {
-        Ok(_) => cx.quit(),
+        Ok(_) => window.remove_window(),
         Err(err) => error!(?err, "Failed to start process"),
       },
       RootItem::Panel { view, .. } => {
