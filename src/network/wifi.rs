@@ -27,6 +27,7 @@ const CONTEXT: &str = "wifi";
 
 #[derive(Clone)]
 pub struct WifiEntry {
+  id: String,
   search_string: String,
   entry: Entity<WifiEntryInner>,
 }
@@ -94,6 +95,9 @@ impl WifiEntry {
   ) -> Self {
     let search_string = access_point.ssid.to_string();
 
+    // Use the path as the ID, this is guaranteed to be unique.
+    let id = access_point.path.to_string();
+
     let entity = cx.new(|cx| {
       WifiEntryInner::new(
         access_point,
@@ -106,6 +110,7 @@ impl WifiEntry {
     });
 
     Self {
+      id,
       search_string,
       entry: entity,
     }
@@ -386,25 +391,44 @@ impl WifiPanel {
       let _ = this.update_in(cx, |this, window, cx| {
         this.is_scanning = false;
 
-        let entries: Vec<WifiEntry> = access_points
+        // Check for added and removed connections, the entries themselves will listen to internal
+        // changes and update themselves.
+        this
+          .entries
+          .retain(|entry| access_points.iter().any(|ap| ap.path.as_str() == entry.id));
+
+        let added = access_points
           .into_iter()
-          .filter(|ap| !ap.ssid.is_empty())
-          .map(|ap| {
-            let is_connected = active_hw_address
-              .as_ref()
-              .is_some_and(|addr| addr == &ap.hw_address);
-            let known_conn = known_connections
-              .iter()
-              .find(|(ssid, _)| ssid == &ap.ssid)
-              .map(|(_, path)| path.clone());
-            let is_known = known_conn.is_some();
-
-            WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx)
+          .filter(|found| {
+            !found.ssid.is_empty()
+              && !this
+                .entries
+                .iter()
+                .any(|entry| entry.id == found.path.as_str())
           })
-          .collect();
+          .collect::<Vec<_>>();
 
-        this.entries = entries;
+        for ap in added {
+          let is_connected = active_hw_address
+            .as_ref()
+            .is_some_and(|addr| addr == &ap.hw_address);
+          let known_conn = known_connections
+            .iter()
+            .find(|(ssid, _)| ssid == &ap.ssid)
+            .map(|(_, path)| path.clone());
+          let is_known = known_conn.is_some();
 
+          this.entries.push(WifiEntry::new(
+            ap,
+            is_connected,
+            is_known,
+            known_conn,
+            window,
+            cx,
+          ));
+        }
+
+        // TODO: Can we somehow not clone the items here?
         picker.update(cx, |picker, cx| {
           picker.set_items(this.entries.clone(), window, cx);
         });
@@ -541,7 +565,6 @@ impl PickerDelegate for WifiDelegate {
     let matchers = MatcherPool::global(cx);
     cx.spawn_in(window, async move |cx, window| {
       let mut matcher = matchers.get().await.unwrap();
-
       let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
       let mut matches = Vec::new();
       let mut buf = Vec::new();
