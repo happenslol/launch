@@ -5,7 +5,7 @@ use gpui::{
   RenderOnce, Styled, Subscription, Task, Window, actions, div, prelude::*, px, relative, rgb,
 };
 use nucleo_matcher::{
-  Config, Matcher, Utf32Str,
+  Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
 
@@ -15,16 +15,50 @@ use crate::{
     pulse::{SetMute, SetVolume},
     types::{SinkEvent, SinkId, SinkInfo, SinkListEvent},
   },
+  matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent},
-  util::{h_flex, v_flex},
+  util::{ResultExt, h_flex, v_flex},
 };
 
+#[derive(Clone)]
 pub struct SinkEntry {
+  id: SinkId,
+  search_string: String,
+  entry: Entity<SinkEntryInner>,
+}
+
+impl SinkEntry {
+  pub fn new(
+    sink: SinkInfo,
+    audio_state: &Entity<AudioState>,
+    window: &mut Window,
+    cx: &mut App,
+  ) -> Self {
+    let id = sink.id;
+    let mut search_parts = Vec::new();
+    if let Some(ref name) = sink.name {
+      search_parts.push(name.to_string());
+    }
+    if let Some(ref desc) = sink.description {
+      search_parts.push(desc.to_string());
+    }
+    let search_string = search_parts.join(" ");
+    let entry = cx.new(|cx| SinkEntryInner::new(sink, audio_state, window, cx));
+
+    Self {
+      id,
+      search_string,
+      entry,
+    }
+  }
+}
+
+pub struct SinkEntryInner {
   sink: SinkInfo,
   _event_listener: Task<()>,
 }
 
-impl SinkEntry {
+impl SinkEntryInner {
   pub fn new(
     sink: SinkInfo,
     audio_state: &Entity<AudioState>,
@@ -72,16 +106,12 @@ impl SinkEntry {
       _event_listener: event_listener,
     }
   }
-
-  pub fn sink(&self) -> &SinkInfo {
-    &self.sink
-  }
 }
 
 pub struct AudioSinksPanel {
   picker: Entity<Picker<SinksDelegate>>,
   audio_state: Entity<AudioState>,
-  sinks: Vec<Entity<SinkEntry>>,
+  sinks: Vec<SinkEntry>,
   _subscriptions: Vec<Subscription>,
   _list_subscription_task: Task<()>,
   _initial_load_task: Task<()>,
@@ -119,14 +149,13 @@ impl AudioSinksPanel {
         let sinks = sinks_task.await;
 
         let _ = this.update_in(cx, |this, window, cx| {
-          let sink_entries: Vec<Entity<SinkEntry>> = sinks
+          this.sinks = sinks
             .into_iter()
-            .map(|sink| cx.new(|cx| SinkEntry::new(sink, &audio_state, window, cx)))
+            .map(|sink| SinkEntry::new(sink, &audio_state, window, cx))
             .collect();
 
-          this.sinks = sink_entries.clone();
           picker.update(cx, |picker, cx| {
-            picker.set_items(sink_entries, window, cx);
+            picker.set_items(this.sinks.clone(), window, cx);
           });
         });
       }
@@ -142,7 +171,7 @@ impl AudioSinksPanel {
           match event {
             SinkListEvent::Added(sink_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                let new_entry = cx.new(|cx| SinkEntry::new(sink_info, &audio_state, window, cx));
+                let new_entry = SinkEntry::new(sink_info, &audio_state, window, cx);
                 this.sinks.push(new_entry);
 
                 picker.update(cx, |picker, cx| {
@@ -152,9 +181,7 @@ impl AudioSinksPanel {
             }
             SinkListEvent::Removed(sink_id) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                this
-                  .sinks
-                  .retain(|entry| entry.read(cx).sink().id != sink_id);
+                this.sinks.retain(|entry| entry.id != sink_id);
 
                 picker.update(cx, |picker, cx| {
                   picker.set_items(this.sinks.clone(), window, cx);
@@ -173,10 +200,9 @@ impl AudioSinksPanel {
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
         if let PickerEvent::Picked(entry) = ev {
-          let sink_id = entry.read(cx).sink().id;
           this
             .audio_state
-            .update(cx, |state, cx| state.set_default_sink(sink_id, cx))
+            .update(cx, |state, cx| state.set_default_sink(entry.id, cx))
             .detach_and_log_err(cx);
         }
       }),
@@ -199,7 +225,7 @@ impl AudioSinksPanel {
       .picker
       .read(cx)
       .get_selected_item()
-      .map(|entry| entry.read(cx).sink().id)
+      .map(|entry| entry.id)
   }
 
   fn volume_up(&mut self, _: &VolumeUp, _window: &mut Window, cx: &mut Context<Self>) {
@@ -303,7 +329,7 @@ struct SinksDelegate {
 }
 
 impl PickerDelegate for SinksDelegate {
-  type ListItem = Entity<SinkEntry>;
+  type ListItem = SinkEntry;
 
   fn render_list_item(
     &self,
@@ -312,7 +338,7 @@ impl PickerDelegate for SinksDelegate {
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
-    let sink = item.read(cx).sink();
+    let sink = &item.entry.read(cx).sink;
     let is_default = self.audio_state.read(cx).default_sink == Some(sink.id);
     let volume_percent = sink.volume.as_percent(sink.base_volume);
 
@@ -364,48 +390,25 @@ impl PickerDelegate for SinksDelegate {
       return Task::ready(());
     }
 
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
-    let mut matches = Vec::new();
-    let mut buf = Vec::new();
+    let matchers = MatcherPool::global(cx);
+    cx.spawn_in(window, async move |cx, window| {
+      let mut matcher = matchers.get().await.unwrap();
+      let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+      let mut matches = Vec::new();
+      let mut buf = Vec::new();
 
-    for (index, entry) in items.iter().enumerate() {
-      let sink = entry.read(cx).sink();
-      let mut max_score: Option<u32> = None;
-
-      if let Some(score) = sink
-        .name
-        .as_ref()
-        .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))
-      {
-        max_score = if let Some(max_score) = max_score {
-          Some(max_score.max(score))
-        } else {
-          Some(score)
+      for (index, item) in items.iter().enumerate() {
+        if let Some(score) =
+          needle.score(Utf32Str::new(&item.search_string, &mut buf), &mut matcher)
+        {
+          matches.push((index, score));
         }
       }
 
-      if let Some(score) = sink
-        .description
-        .as_ref()
-        .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))
-      {
-        max_score = if let Some(max_score) = max_score {
-          Some(max_score.max(score))
-        } else {
-          Some(score)
-        }
-      }
-
-      if let Some(score) = max_score {
-        matches.push((index, score));
-      }
-    }
-
-    cx.defer_in(window, move |picker, _window, cx| {
-      picker.complete_search(cx, search_id, Some(matches));
-    });
-
-    Task::ready(())
+      cx.update_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, Some(matches));
+      })
+      .log_err();
+    })
   }
 }

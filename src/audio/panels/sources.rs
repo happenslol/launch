@@ -5,7 +5,7 @@ use gpui::{
   Styled, Subscription, Task, Window, actions, div, prelude::*, rgb,
 };
 use nucleo_matcher::{
-  Config, Matcher, Utf32Str,
+  Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
 
@@ -15,18 +15,52 @@ use crate::{
     pulse::{SetMute, SetVolume},
     types::{SourceEvent, SourceId, SourceInfo, SourceListEvent},
   },
+  matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent},
-  util::v_flex,
+  util::{ResultExt, v_flex},
 };
 
 use super::VolumeBar;
 
+#[derive(Clone)]
 pub struct SourceEntry {
+  id: SourceId,
+  search_string: String,
+  entry: Entity<SourceEntryInner>,
+}
+
+impl SourceEntry {
+  pub fn new(
+    source: SourceInfo,
+    audio_state: &Entity<AudioState>,
+    window: &mut Window,
+    cx: &mut App,
+  ) -> Self {
+    let id = source.id;
+    let mut search_parts = Vec::new();
+    if let Some(ref name) = source.name {
+      search_parts.push(name.to_string());
+    }
+    if let Some(ref desc) = source.description {
+      search_parts.push(desc.to_string());
+    }
+    let search_string = search_parts.join(" ");
+    let entry = cx.new(|cx| SourceEntryInner::new(source, audio_state, window, cx));
+
+    Self {
+      id,
+      search_string,
+      entry,
+    }
+  }
+}
+
+pub struct SourceEntryInner {
   source: SourceInfo,
   _event_listener: Task<()>,
 }
 
-impl SourceEntry {
+impl SourceEntryInner {
   pub fn new(
     source: SourceInfo,
     audio_state: &Entity<AudioState>,
@@ -74,16 +108,12 @@ impl SourceEntry {
       _event_listener: event_listener,
     }
   }
-
-  pub fn source(&self) -> &SourceInfo {
-    &self.source
-  }
 }
 
 pub struct AudioSourcesPanel {
   picker: Entity<Picker<SourcesDelegate>>,
   audio_state: Entity<AudioState>,
-  sources: Vec<Entity<SourceEntry>>,
+  sources: Vec<SourceEntry>,
   _subscriptions: Vec<Subscription>,
   _list_subscription_task: Task<()>,
   _initial_load_task: Task<()>,
@@ -123,14 +153,13 @@ impl AudioSourcesPanel {
         let sources = sources_task.await;
 
         let _ = this.update_in(cx, |this, window, cx| {
-          let source_entries: Vec<Entity<SourceEntry>> = sources
+          this.sources = sources
             .into_iter()
-            .map(|source| cx.new(|cx| SourceEntry::new(source, &audio_state, window, cx)))
+            .map(|source| SourceEntry::new(source, &audio_state, window, cx))
             .collect();
 
-          this.sources = source_entries.clone();
           picker.update(cx, |picker, cx| {
-            picker.set_items(source_entries, window, cx);
+            picker.set_items(this.sources.clone(), window, cx);
           });
         });
       }
@@ -146,8 +175,7 @@ impl AudioSourcesPanel {
           match event {
             SourceListEvent::Added(source_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                let new_entry =
-                  cx.new(|cx| SourceEntry::new(source_info, &audio_state, window, cx));
+                let new_entry = SourceEntry::new(source_info, &audio_state, window, cx);
                 this.sources.push(new_entry);
 
                 picker.update(cx, |picker, cx| {
@@ -157,9 +185,7 @@ impl AudioSourcesPanel {
             }
             SourceListEvent::Removed(source_id) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                this
-                  .sources
-                  .retain(|entry| entry.read(cx).source().id != source_id);
+                this.sources.retain(|entry| entry.id != source_id);
 
                 picker.update(cx, |picker, cx| {
                   picker.set_items(this.sources.clone(), window, cx);
@@ -178,10 +204,9 @@ impl AudioSourcesPanel {
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
         if let PickerEvent::Picked(entry) = ev {
-          let source_id = entry.read(cx).source().id;
           this
             .audio_state
-            .update(cx, |state, cx| state.set_default_source(source_id, cx))
+            .update(cx, |state, cx| state.set_default_source(entry.id, cx))
             .detach_and_log_err(cx);
         }
       }),
@@ -204,7 +229,7 @@ impl AudioSourcesPanel {
       .picker
       .read(cx)
       .get_selected_item()
-      .map(|entry| entry.read(cx).source().id)
+      .map(|entry| entry.id)
   }
 
   fn volume_up(&mut self, _: &VolumeUp, _window: &mut Window, cx: &mut Context<Self>) {
@@ -264,7 +289,7 @@ struct SourcesDelegate {
 }
 
 impl PickerDelegate for SourcesDelegate {
-  type ListItem = Entity<SourceEntry>;
+  type ListItem = SourceEntry;
 
   fn render_list_item(
     &self,
@@ -275,7 +300,7 @@ impl PickerDelegate for SourcesDelegate {
   ) -> impl IntoElement {
     use crate::util::h_flex;
 
-    let source = item.read(cx).source();
+    let source = &item.entry.read(cx).source;
     let is_default = self.audio_state.read(cx).default_source == Some(source.id);
     let volume_percent = source.volume.as_percent(source.base_volume);
 
@@ -323,48 +348,25 @@ impl PickerDelegate for SourcesDelegate {
       return Task::ready(());
     }
 
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
-    let mut matches = Vec::new();
-    let mut buf = Vec::new();
+    let matchers = MatcherPool::global(cx);
+    cx.spawn_in(window, async move |cx, window| {
+      let mut matcher = matchers.get().await.unwrap();
+      let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+      let mut matches = Vec::new();
+      let mut buf = Vec::new();
 
-    for (index, entry) in items.iter().enumerate() {
-      let source = entry.read(cx).source();
-      let mut max_score: Option<u32> = None;
-
-      if let Some(score) = source
-        .name
-        .as_ref()
-        .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))
-      {
-        max_score = if let Some(max_score) = max_score {
-          Some(max_score.max(score))
-        } else {
-          Some(score)
+      for (index, item) in items.iter().enumerate() {
+        if let Some(score) =
+          needle.score(Utf32Str::new(&item.search_string, &mut buf), &mut matcher)
+        {
+          matches.push((index, score));
         }
       }
 
-      if let Some(score) = source
-        .description
-        .as_ref()
-        .and_then(|name| needle.score(Utf32Str::new(name, &mut buf), &mut matcher))
-      {
-        max_score = if let Some(max_score) = max_score {
-          Some(max_score.max(score))
-        } else {
-          Some(score)
-        }
-      }
-
-      if let Some(score) = max_score {
-        matches.push((index, score));
-      }
-    }
-
-    cx.defer_in(window, move |picker, _window, cx| {
-      picker.complete_search(cx, search_id, Some(matches));
-    });
-
-    Task::ready(())
+      cx.update_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, Some(matches));
+      })
+      .log_err();
+    })
   }
 }

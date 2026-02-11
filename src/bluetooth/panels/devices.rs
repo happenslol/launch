@@ -6,7 +6,7 @@ use gpui::{
   Subscription, Task, Window, div, prelude::*, rgb,
 };
 use nucleo_matcher::{
-  Config, Matcher, Utf32Str,
+  Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
 use tracing::error;
@@ -16,16 +16,38 @@ use crate::{
     GlobalDbusConnection,
     bluez::{Adapter, BlueZ, Device},
   },
+  matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent},
-  util::v_flex,
+  util::{ResultExt, v_flex},
 };
 
-pub struct DeviceEntry {
+#[derive(Clone)]
+pub struct BluetoothEntry {
+  id: String,
+  search_string: String,
+  entry: Entity<DeviceEntryInner>,
+}
+
+impl BluetoothEntry {
+  pub fn new(device: Device, window: &mut Window, cx: &mut App) -> Self {
+    let id = device.address.to_string();
+    let search_string = format!("{} {}", device.name, device.address);
+    let entry = cx.new(|cx| DeviceEntryInner::new(device, window, cx));
+
+    Self {
+      id,
+      search_string,
+      entry,
+    }
+  }
+}
+
+pub struct DeviceEntryInner {
   device: Device,
   _property_listeners: Vec<Task<()>>,
 }
 
-impl DeviceEntry {
+impl DeviceEntryInner {
   pub fn new(device: Device, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let mut entry = Self {
       device: device.clone(),
@@ -34,10 +56,6 @@ impl DeviceEntry {
 
     entry.spawn_property_listeners(&device, window, cx);
     entry
-  }
-
-  pub fn device(&self) -> &Device {
-    &self.device
   }
 
   fn spawn_property_listeners(
@@ -131,7 +149,7 @@ pub struct BluetoothDevicesPanel {
   picker: Entity<Picker<DevicesDelegate>>,
   bluez: Option<BlueZ>,
   adapter: Option<Adapter>,
-  devices: Vec<Entity<DeviceEntry>>,
+  devices: Vec<BluetoothEntry>,
   _device_updates_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
@@ -145,8 +163,8 @@ impl BluetoothDevicesPanel {
 
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
-        if let PickerEvent::Picked(device_entry) = ev {
-          let device = device_entry.read(cx).device().clone();
+        if let PickerEvent::Picked(bluetooth_entry) = ev {
+          let device = bluetooth_entry.entry.read(cx).device.clone();
           this.handle_device_picked(device, window, cx);
         }
       }),
@@ -225,12 +243,10 @@ impl BluetoothDevicesPanel {
           this.bluez = Some(bluez.clone());
           this.adapter = Some(adapter.clone());
 
-          let device_entries: Vec<Entity<DeviceEntry>> = devices
+          this.devices = devices
             .into_iter()
-            .map(|device| cx.new(|cx| DeviceEntry::new(device, window, cx)))
+            .map(|device| BluetoothEntry::new(device, window, cx))
             .collect();
-
-          this.devices = device_entries;
 
           picker.update(cx, |picker, cx| {
             picker.set_items(this.devices.clone(), window, cx);
@@ -283,15 +299,15 @@ impl BluetoothDevicesPanel {
 
         if let Ok(device) = device_result {
           let _ = this.update_in(cx, |this, window, cx| {
-            let device_address = device.address.clone();
+            let device_address = device.address.to_string();
 
             let already_exists = this
               .devices
               .iter()
-              .any(|entry| entry.read(cx).device().address == device_address);
+              .any(|entry| entry.id == device_address);
 
             if !already_exists {
-              let new_entry = cx.new(|cx| DeviceEntry::new(device, window, cx));
+              let new_entry = BluetoothEntry::new(device, window, cx);
               this.devices.push(new_entry);
 
               let picker = this.picker.clone();
@@ -343,7 +359,7 @@ impl Render for BluetoothDevicesPanel {
 struct DevicesDelegate {}
 
 impl PickerDelegate for DevicesDelegate {
-  type ListItem = Entity<DeviceEntry>;
+  type ListItem = BluetoothEntry;
 
   fn render_list_item(
     &self,
@@ -352,7 +368,7 @@ impl PickerDelegate for DevicesDelegate {
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
-    let device = item.read(cx).device();
+    let device = &item.entry.read(cx).device;
     let mut status_text = String::new();
     if device.connected {
       status_text.push_str("CONNECTED ");
@@ -401,34 +417,25 @@ impl PickerDelegate for DevicesDelegate {
       return Task::ready(());
     }
 
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
-    let mut matches = Vec::new();
-    let mut buf = Vec::new();
+    let matchers = MatcherPool::global(cx);
+    cx.spawn_in(window, async move |cx, window| {
+      let mut matcher = matchers.get().await.unwrap();
+      let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+      let mut matches = Vec::new();
+      let mut buf = Vec::new();
 
-    for (index, item) in items.iter().enumerate() {
-      // TODO: Is it cheaper to store the string outside of the entity so we don't have to
-      // read here?
-      let device = item.read(cx).device();
-      let mut max_score: Option<u32> = None;
-
-      if let Some(score) = needle.score(Utf32Str::new(&device.name, &mut buf), &mut matcher) {
-        max_score = Some(score);
+      for (index, item) in items.iter().enumerate() {
+        if let Some(score) =
+          needle.score(Utf32Str::new(&item.search_string, &mut buf), &mut matcher)
+        {
+          matches.push((index, score));
+        }
       }
 
-      if let Some(score) = needle.score(Utf32Str::new(&device.address, &mut buf), &mut matcher) {
-        max_score = Some(max_score.map_or(score, |s| s.max(score)));
-      }
-
-      if let Some(score) = max_score {
-        matches.push((index, score));
-      }
-    }
-
-    cx.defer_in(window, move |picker, _window, cx| {
-      picker.complete_search(cx, search_id, Some(matches));
-    });
-
-    Task::ready(())
+      cx.update_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, Some(matches));
+      })
+      .log_err();
+    })
   }
 }

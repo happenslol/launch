@@ -19,7 +19,7 @@ use gpui::{
   px, rgb, rgba,
 };
 use nucleo_matcher::{
-  Config, Matcher, Utf32Str,
+  Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
 use tracing::error;
@@ -27,6 +27,7 @@ use tracing::error;
 use crate::{
   audio, bluetooth,
   db::DB,
+  matcher::MatcherPool,
   network,
   picker::{Picker, PickerDelegate, PickerEvent},
   util::{ResultExt, h_flex, v_flex},
@@ -375,11 +376,12 @@ impl PickerDelegate for RootDelegate {
     }
 
     let locales = self.xdg_locales.clone();
+    let matchers = MatcherPool::global(cx);
 
     cx.spawn_in(window, async move |picker, cx| {
       let Some(matches) = cx
         .background_spawn(async move {
-          let mut matcher = Matcher::new(Config::DEFAULT);
+          let mut matcher = matchers.get().await.unwrap();
           let mut matches = Vec::new();
           let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
           let mut buf = Vec::new();
