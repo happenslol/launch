@@ -1,9 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, atomic::AtomicBool};
 
 use futures::StreamExt;
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Styled, Subscription,
-  Task, Window, actions, div, prelude::*, rgb,
+  App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, SharedString, Styled,
+  Subscription, Task, Window, actions, div, prelude::*, rgb,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -29,7 +30,9 @@ const CONTEXT: &str = "wifi";
 pub struct WifiEntry {
   id: String,
   search_string: String,
+  is_known: bool,
   entry: Entity<WifiEntryInner>,
+  alternate_paths: HashSet<String>,
 }
 
 pub struct WifiEntryInner {
@@ -112,9 +115,42 @@ impl WifiEntry {
     Self {
       id,
       search_string,
+      is_known,
       entry: entity,
+      alternate_paths: HashSet::new(),
     }
   }
+}
+
+/// Deduplicates access points by SSID, keeping the one with the highest signal strength.
+/// Returns the winning access points along with the set of alternate object paths for each.
+fn deduplicate_access_points(
+  access_points: Vec<AccessPoint>,
+) -> Vec<(AccessPoint, HashSet<String>)> {
+  let mut best_by_ssid: HashMap<SharedString, (AccessPoint, HashSet<String>)> = HashMap::new();
+
+  for ap in access_points {
+    if ap.ssid.is_empty() {
+      continue;
+    }
+
+    match best_by_ssid.entry(ap.ssid.clone()) {
+      std::collections::hash_map::Entry::Occupied(mut entry) => {
+        let (existing, alternates): &mut (AccessPoint, HashSet<String>) = entry.get_mut();
+        if ap.strength > existing.strength {
+          alternates.insert(existing.path.to_string());
+          *existing = ap;
+        } else {
+          alternates.insert(ap.path.to_string());
+        }
+      }
+      std::collections::hash_map::Entry::Vacant(entry) => {
+        entry.insert((ap, HashSet::new()));
+      }
+    }
+  }
+
+  best_by_ssid.into_values().collect()
 }
 
 pub struct WifiPanel {
@@ -245,10 +281,11 @@ impl WifiPanel {
           this.network_manager = Some(nm.clone());
           this.device = Some(device.clone());
 
-          let entries: Vec<WifiEntry> = initial_access_points
+          let deduplicated = deduplicate_access_points(initial_access_points);
+
+          let entries: Vec<WifiEntry> = deduplicated
             .into_iter()
-            .filter(|ap| !ap.ssid.is_empty())
-            .map(|ap| {
+            .map(|(ap, alternate_paths)| {
               let is_connected = active_hw_address
                 .as_ref()
                 .is_some_and(|addr| addr == &ap.hw_address);
@@ -258,7 +295,10 @@ impl WifiPanel {
                 .map(|(_, path)| path.clone());
               let is_known = known_conn.is_some();
 
-              WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx)
+              let mut entry =
+                WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
+              entry.alternate_paths = alternate_paths;
+              entry
             })
             .collect();
 
@@ -309,10 +349,11 @@ impl WifiPanel {
         .update_in(cx, |this, window, cx| {
           this.is_scanning = false;
 
-          let entries: Vec<WifiEntry> = access_points
+          let deduplicated = deduplicate_access_points(access_points);
+
+          let entries: Vec<WifiEntry> = deduplicated
             .into_iter()
-            .filter(|ap| !ap.ssid.is_empty())
-            .map(|ap| {
+            .map(|(ap, alternate_paths)| {
               let is_connected = active_hw_address
                 .as_ref()
                 .is_some_and(|addr| addr == &ap.hw_address);
@@ -322,7 +363,10 @@ impl WifiPanel {
                 .map(|(_, path)| path.clone());
               let is_known = known_conn.is_some();
 
-              WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx)
+              let mut entry =
+                WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
+              entry.alternate_paths = alternate_paths;
+              entry
             })
             .collect();
 
@@ -391,24 +435,35 @@ impl WifiPanel {
       let _ = this.update_in(cx, |this, window, cx| {
         this.is_scanning = false;
 
-        // Check for added and removed connections, the entries themselves will listen to internal
-        // changes and update themselves.
-        this
-          .entries
-          .retain(|entry| access_points.iter().any(|ap| ap.path.as_str() == entry.id));
+        let deduplicated = deduplicate_access_points(access_points);
 
-        let added = access_points
-          .into_iter()
-          .filter(|found| {
-            !found.ssid.is_empty()
-              && !this
-                .entries
-                .iter()
-                .any(|entry| entry.id == found.path.as_str())
+        // Collect all paths that are represented (primary + alternates) in the new scan.
+        let all_new_paths: HashSet<String> = deduplicated
+          .iter()
+          .flat_map(|(ap, alternates)| {
+            std::iter::once(ap.path.to_string()).chain(alternates.iter().cloned())
           })
-          .collect::<Vec<_>>();
+          .collect();
 
-        for ap in added {
+        // Retain entries whose primary or alternate paths still appear in the new scan.
+        this.entries.retain(|entry| {
+          all_new_paths.contains(&entry.id)
+            || entry
+              .alternate_paths
+              .iter()
+              .any(|path| all_new_paths.contains(path))
+        });
+
+        for (ap, alternate_paths) in deduplicated {
+          let already_exists = this.entries.iter().any(|entry| {
+            entry.id == ap.path.as_str()
+              || entry.alternate_paths.contains(ap.path.as_str())
+          });
+
+          if already_exists {
+            continue;
+          }
+
           let is_connected = active_hw_address
             .as_ref()
             .is_some_and(|addr| addr == &ap.hw_address);
@@ -418,14 +473,10 @@ impl WifiPanel {
             .map(|(_, path)| path.clone());
           let is_known = known_conn.is_some();
 
-          this.entries.push(WifiEntry::new(
-            ap,
-            is_connected,
-            is_known,
-            known_conn,
-            window,
-            cx,
-          ));
+          let mut entry =
+            WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
+          entry.alternate_paths = alternate_paths;
+          this.entries.push(entry);
         }
 
         // TODO: Can we somehow not clone the items here?
@@ -511,6 +562,10 @@ struct WifiDelegate {}
 
 impl PickerDelegate for WifiDelegate {
   type ListItem = WifiEntry;
+
+  fn sort_items(&self, _cx: &App, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
+    matches.sort_by_key(|(index, score)| (std::cmp::Reverse(items[*index].is_known), std::cmp::Reverse(*score)));
+  }
 
   fn render_list_item(
     &self,
