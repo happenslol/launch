@@ -12,8 +12,8 @@ mod input;
 mod instance;
 mod launcher;
 mod logging;
-mod network;
 mod matcher;
+mod network;
 mod picker;
 mod util;
 mod xdg;
@@ -26,6 +26,8 @@ use fork::Fork;
 use gpui::{App, Application, QuitMode, prelude::*};
 use tracing::{error, info};
 
+use flume::Receiver;
+
 use crate::{
   assets::{Assets, load_embedded_fonts},
   input::state::InputState,
@@ -37,11 +39,18 @@ use crate::{
 #[derive(Debug, Parser)]
 struct Args {
   panel: Option<String>,
+  #[arg(long)]
+  no_daemon: bool,
 }
 
 fn main() -> Result<()> {
   logging::init();
   let args = Args::try_parse()?;
+
+  if args.no_daemon {
+    run_app(args.panel, None);
+    return Ok(());
+  }
 
   let role = instance::acquire()?;
 
@@ -60,41 +69,58 @@ fn main() -> Result<()> {
           process::exit(1);
         }
         if fork::redirect_stdio().is_err() {
-          eprintln!("Failed to redirect stdio: {}", std::io::Error::last_os_error());
+          eprintln!(
+            "Failed to redirect stdio: {}",
+            std::io::Error::last_os_error()
+          );
         }
 
         let receiver = instance::listen(listener);
-
-        Application::new().with_assets(Assets).with_quit_mode(QuitMode::Explicit).run(move |cx| {
-          matcher::init(cx);
-          dbus::init(cx);
-          audio::init(cx);
-          InputState::init(cx);
-          load_embedded_fonts(cx).unwrap();
-
-          open_launcher_window(cx, args.panel);
-
-          cx.spawn(async move |cx| {
-            while let Ok(message) = receiver.recv_async().await {
-              match message {
-                Message::Open { panel } => {
-                  cx.update(|cx| {
-                    if cx.windows().is_empty() {
-                      open_launcher_window(cx, panel);
-                    }
-                  })
-                  .log_err();
-                }
-              }
-            }
-          })
-          .detach();
-        });
+        run_app(args.panel, Some(receiver));
       }
     }
   }
 
   Ok(())
+}
+
+fn run_app(panel: Option<String>, receiver: Option<Receiver<Message>>) {
+  let mode = if receiver.is_some() {
+    QuitMode::Explicit
+  } else {
+    QuitMode::LastWindowClosed
+  };
+
+  Application::new()
+    .with_assets(Assets)
+    .with_quit_mode(mode)
+    .run(move |cx| {
+      matcher::init(cx);
+      dbus::init(cx);
+      audio::init(cx);
+      InputState::init(cx);
+      load_embedded_fonts(cx).unwrap();
+
+      open_launcher_window(cx, panel);
+
+      if let Some(receiver) = receiver {
+        cx.spawn(async move |cx| {
+          while let Ok(message) = receiver.recv_async().await {
+            match message {
+              Message::Open { panel } => {
+                cx.update(|cx| {
+                  if cx.windows().is_empty() {
+                    open_launcher_window(cx, panel);
+                  }
+                })
+                .log_err();
+              }
+            }
+          }
+        })
+        .detach();
+      }
+    });
 }
 
 fn open_launcher_window(cx: &mut App, panel: Option<String>) {
