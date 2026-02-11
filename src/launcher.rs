@@ -34,7 +34,7 @@ use crate::{
   xdg::{self, get_icon},
 };
 
-actions!(launcher, [Quit]);
+actions!(launcher, [Quit, GoBack]);
 const CONTEXT: &str = "launcher";
 
 pub struct Launcher {
@@ -69,7 +69,10 @@ impl Launcher {
   }
 
   pub fn new(window: &mut Window, cx: &mut Context<Self>, panel: Option<String>) -> Self {
-    cx.bind_keys([KeyBinding::new("escape", Quit, Some(CONTEXT))]);
+    cx.bind_keys([
+      KeyBinding::new("escape", Quit, Some(CONTEXT)),
+      KeyBinding::new("shift-escape", GoBack, Some(CONTEXT)),
+    ]);
 
     let launches = Arc::new(DB.get_launches());
     let xdg_icon_path_cache = cx.new(|_| DB.get_desktop_entry_icon_paths());
@@ -150,7 +153,11 @@ impl Launcher {
     }
   }
 
-  fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+  fn quit(&mut self, _: &Quit, window: &mut Window, _cx: &mut Context<Self>) {
+    window.remove_window();
+  }
+
+  fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
     if self.active_panel.take().is_some() {
       cx.notify();
       // Defer focusing the root picker so it happens after the panel is removed from the render tree
@@ -158,10 +165,7 @@ impl Launcher {
       window.defer(cx, move |window, cx| {
         window.focus(&picker.read(cx).search_input.focus_handle(cx));
       });
-      return;
     }
-
-    window.remove_window();
   }
 
   async fn refresh_app_icons(
@@ -239,6 +243,7 @@ impl Render for Launcher {
       .font_family("Noto Sans")
       .text_color(rgb(0xFFFFFF))
       .on_action(cx.listener(Self::quit))
+      .on_action(cx.listener(Self::go_back))
       .rounded_lg()
       .size_full()
       .border_1()
