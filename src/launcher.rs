@@ -213,6 +213,12 @@ impl Launcher {
       RootItem::Panel { view, .. } => {
         let panel = view(window, cx);
         self.active_panel = Some(panel);
+        let search_input = self.picker.read(cx).search_input.clone();
+        window.defer(cx, move |window, cx| {
+          search_input.update(cx, |input, cx| {
+            input.clean(window, cx);
+          });
+        });
         cx.notify();
       }
     }
