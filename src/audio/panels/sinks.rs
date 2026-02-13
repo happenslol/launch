@@ -16,7 +16,7 @@ use crate::{
     types::{SinkEvent, SinkId, SinkInfo, SinkListEvent},
   },
   matcher::MatcherPool,
-  picker::{Picker, PickerDelegate, PickerEvent},
+  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
 };
 
@@ -276,7 +276,8 @@ impl Render for AudioSinksPanel {
       .on_action(cx.listener(Self::volume_up))
       .on_action(cx.listener(Self::volume_down))
       .on_action(cx.listener(Self::mute))
-      .child(self.picker.clone())
+      .child(picker_input(&self.picker))
+      .child(picker_results(&self.picker))
   }
 }
 

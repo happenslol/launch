@@ -9,29 +9,16 @@ use std::{
 use gpui::{
   App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding,
   ScrollStrategy, StyleRefinement, Subscription, Task, UniformListScrollHandle, Window, actions,
-  div, prelude::*, rgb, uniform_list,
+  div, prelude::*, uniform_list,
 };
 
-use crate::{
-  input::{
-    input,
-    state::{InputEvent, InputState},
-  },
-  util::v_flex,
+use crate::input::{
+  input,
+  state::{InputEvent, InputState},
 };
 
 actions!(picker, [SelectNext, SelectPrev]);
 
-// TODO: I don't like the delegate pattern, the composition-y API of the text input feels a lot
-// better. Maybe this could be refactored into multiple pieces:
-// - PickerState<Item> (or just Picker)
-// - PickerResults<Item>
-// - PickerSearchInput
-//
-// Then we can render each entity by passing the state into it.
-//
-// The items would need to implement IntoElement or something? The main thing we want to abstract
-// over is the items/matches/selected_index and the search task/cancellation logic.
 pub trait PickerDelegate: Sized + 'static {
   type ListItem: Clone;
 
@@ -322,37 +309,28 @@ impl<D: PickerDelegate> Render for Picker<D> {
       .as_ref()
       .map_or_else(|| self.items.len(), |matches| matches.len());
 
-    v_flex()
-      .track_focus(&self.focus_handle)
-      .on_action(cx.listener(Self::select_next))
-      .on_action(cx.listener(Self::select_prev))
-      .size_full()
-      .child(input(&self.search_input).p_2().text_color(rgb(0xFFFFFF)))
-      .child(
-        uniform_list(
-          "matches",
-          count,
-          cx.processor(|this, range: Range<usize>, window, cx| {
-            range
-              .map(|ix| {
-                let is_selected = this.selected_index.is_some_and(|selected| selected == ix);
-                let resolved_ix = this.matches.as_ref().map_or(ix, |matches| {
-                  let (resolved_ix, _) = matches[ix];
-                  resolved_ix
-                });
+    uniform_list(
+      "matches",
+      count,
+      cx.processor(|this, range: Range<usize>, window, cx| {
+        range
+          .map(|ix| {
+            let is_selected = this.selected_index.is_some_and(|selected| selected == ix);
+            let resolved_ix = this.matches.as_ref().map_or(ix, |matches| {
+              let (resolved_ix, _) = matches[ix];
+              resolved_ix
+            });
 
-                this.render_list_item(window, cx, resolved_ix, is_selected)
-              })
-              .collect()
-          }),
-        )
-        .track_scroll(&self.list_scroll_handle)
-        .h_full(),
-      )
+            this.render_list_item(window, cx, resolved_ix, is_selected)
+          })
+          .collect()
+      }),
+    )
+    .track_scroll(&self.list_scroll_handle)
+    .flex_grow()
   }
 }
 
-#[allow(dead_code)]
 pub fn picker_input<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerInput<D> {
   PickerInput {
     picker: picker.clone(),
@@ -360,7 +338,7 @@ pub fn picker_input<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerInpu
   }
 }
 
-#[allow(dead_code)]
+#[derive(IntoElement)]
 pub struct PickerInput<D: PickerDelegate> {
   picker: Entity<Picker<D>>,
   style: StyleRefinement,
@@ -372,13 +350,19 @@ impl<D: PickerDelegate> Styled for PickerInput<D> {
   }
 }
 
-// impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
-//   fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-//     todo!()
-//   }
-// }
+impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
+  fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    let search_input = self.picker.read(cx).search_input.clone();
+    let focus_handle = self.picker.read(cx).focus_handle.clone();
 
-#[allow(dead_code)]
+    div()
+      .track_focus(&focus_handle)
+      .on_action(window.listener_for(&self.picker, Picker::select_next))
+      .on_action(window.listener_for(&self.picker, Picker::select_prev))
+      .child(input(&search_input))
+  }
+}
+
 pub fn picker_results<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerResults<D> {
   PickerResults {
     picker: picker.clone(),
@@ -386,7 +370,7 @@ pub fn picker_results<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerRe
   }
 }
 
-#[allow(dead_code)]
+#[derive(IntoElement)]
 pub struct PickerResults<D: PickerDelegate> {
   picker: Entity<Picker<D>>,
   style: StyleRefinement,
@@ -398,8 +382,8 @@ impl<D: PickerDelegate> Styled for PickerResults<D> {
   }
 }
 
-// impl<D: PickerDelegate> RenderOnce for PickerResults<D> {
-//   fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-//     todo!()
-//   }
-// }
+impl<D: PickerDelegate> RenderOnce for PickerResults<D> {
+  fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    self.picker
+  }
+}

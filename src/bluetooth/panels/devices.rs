@@ -17,7 +17,7 @@ use crate::{
     bluez::{Adapter, BlueZ, Device},
   },
   matcher::MatcherPool,
-  picker::{Picker, PickerDelegate, PickerEvent},
+  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, v_flex},
 };
 
@@ -352,7 +352,8 @@ impl Render for BluetoothDevicesPanel {
     v_flex()
       .key_context(CONTEXT)
       .size_full()
-      .child(self.picker.clone())
+      .child(picker_input(&self.picker))
+      .child(picker_results(&self.picker))
   }
 }
 

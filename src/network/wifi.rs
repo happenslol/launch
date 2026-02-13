@@ -18,7 +18,7 @@ use crate::{
     networkmanager::{AccessPoint, NetworkManager, WirelessDevice},
   },
   matcher::MatcherPool,
-  picker::{Picker, PickerDelegate, PickerEvent},
+  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, v_flex},
 };
 
@@ -554,7 +554,8 @@ impl Render for WifiPanel {
       .when(self.is_scanning, |this| {
         this.child(div().child("Scanning..."))
       })
-      .child(self.picker.clone())
+      .child(picker_input(&self.picker))
+      .child(picker_results(&self.picker))
   }
 }
 

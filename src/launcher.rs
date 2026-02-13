@@ -29,7 +29,7 @@ use crate::{
   db::DB,
   matcher::MatcherPool,
   network,
-  picker::{Picker, PickerDelegate, PickerEvent},
+  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
   xdg::{self, get_icon},
 };
@@ -253,7 +253,11 @@ impl Render for Launcher {
       .when_some(self.active_panel.as_ref(), |div, panel| {
         div.child(panel.clone())
       })
-      .when_none(&self.active_panel, |div| div.child(self.picker.clone()))
+      .when_none(&self.active_panel, |div| {
+        div
+          .child(picker_input(&self.picker))
+          .child(picker_results(&self.picker))
+      })
   }
 }
 

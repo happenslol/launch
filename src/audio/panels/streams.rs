@@ -20,7 +20,7 @@ use crate::{
     },
   },
   matcher::MatcherPool,
-  picker::{Picker, PickerDelegate, PickerEvent},
+  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
   xdg,
 };
@@ -481,13 +481,18 @@ impl Render for AudioStreamsPanel {
       .on_action(cx.listener(Self::mute))
       .on_action(cx.listener(Self::close_sink_picker_action))
       .child(if let Some((_, sink_picker)) = &self.sink_picker {
-        div()
+        v_flex()
           .key_context(SINK_PICKER_CONTEXT)
           .size_full()
-          .child(sink_picker.clone())
+          .child(picker_input(sink_picker))
+          .child(picker_results(sink_picker))
           .into_any_element()
       } else {
-        self.picker.clone().into_any_element()
+        v_flex()
+          .size_full()
+          .child(picker_input(&self.picker))
+          .child(picker_results(&self.picker))
+          .into_any_element()
       })
   }
 }

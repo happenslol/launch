@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::{
   launcher::RootItem,
-  picker::{Picker, PickerDelegate},
+  picker::{Picker, PickerDelegate, picker_input, picker_results},
   util::{h_flex, v_flex},
 };
 
@@ -65,7 +65,8 @@ impl Render for NetworkPanel {
     v_flex()
       .key_context(CONTEXT)
       .size_full()
-      .child(self.picker.clone())
+      .child(picker_input(&self.picker))
+      .child(picker_results(&self.picker))
   }
 }
 
