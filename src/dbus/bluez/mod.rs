@@ -121,6 +121,7 @@ impl Adapter {
     Ok(())
   }
 
+  #[allow(dead_code)]
   pub async fn stop_discovery(&self) -> Result<()> {
     self.proxy.stop_discovery().await?;
     Ok(())
@@ -197,6 +198,7 @@ impl Device {
     Ok(())
   }
 
+  #[allow(dead_code)]
   pub fn object_path(&self) -> &OwnedObjectPath {
     &self.path
   }

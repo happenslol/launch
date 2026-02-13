@@ -63,6 +63,7 @@ impl NetworkManager {
     })
   }
 
+  #[allow(dead_code)]
   pub fn connection(&self) -> &zbus::Connection {
     &self.conn
   }
@@ -229,6 +230,7 @@ impl WirelessDevice {
     &self.path
   }
 
+  #[allow(dead_code)]
   pub fn connection(&self) -> &zbus::Connection {
     self.device_proxy.inner().connection()
   }
@@ -286,6 +288,7 @@ impl WirelessDevice {
     Ok(access_points)
   }
 
+  #[allow(dead_code)]
   pub async fn access_point_changes(&self) -> impl Stream<Item = Vec<AccessPoint>> {
     self
       .wireless_proxy

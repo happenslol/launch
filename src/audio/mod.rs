@@ -101,6 +101,7 @@ impl AudioState {
       .spawn(async move { rx.await.unwrap_or_default() })
   }
 
+  #[allow(dead_code)]
   pub fn get_sink_info(&self, id: SinkId, cx: &App) -> Task<Option<SinkInfo>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::GetSinkInfo(id, tx));
@@ -108,6 +109,7 @@ impl AudioState {
       .spawn(async move { rx.await.ok().flatten() })
   }
 
+  #[allow(dead_code)]
   pub fn get_source_info(&self, id: SourceId, cx: &App) -> Task<Option<SourceInfo>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::GetSourceInfo(id, tx));
@@ -115,6 +117,7 @@ impl AudioState {
       .spawn(async move { rx.await.ok().flatten() })
   }
 
+  #[allow(dead_code)]
   pub fn get_default_sink(&self, cx: &App) -> Task<Option<SinkId>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::GetDefaultSink(tx));
@@ -122,6 +125,7 @@ impl AudioState {
       .spawn(async move { rx.await.ok().flatten() })
   }
 
+  #[allow(dead_code)]
   pub fn get_default_source(&self, cx: &App) -> Task<Option<SourceId>> {
     let (tx, rx) = oneshot::channel();
     self.pulse.send_command(Command::GetDefaultSource(tx));
