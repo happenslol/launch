@@ -7,7 +7,6 @@ use std::{
 use anyhow::Result;
 use fork::Fork;
 use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths};
-use futures::{StreamExt as _, stream::FuturesUnordered};
 use gpui::{App, Entity, Global, Resource, Task, prelude::*};
 
 use crate::{db::DB, launcher::RootItem, util::ResultExt};
@@ -38,37 +37,65 @@ impl XdgIconCache {
     self.cache.get(name)
   }
 
-  pub fn refresh(&mut self, icon_names: Vec<String>, cx: &mut Context<Self>) {
+  pub fn refresh(&mut self, locales: Vec<String>, cx: &mut Context<Self>) {
     if self.refresh_task.is_some() {
       return;
     }
 
     self.refresh_task = Some(cx.spawn(async move |this, cx| {
-      let result = FuturesUnordered::from_iter(icon_names.chunks(10).map(|names| {
-        let names = names.to_vec();
-        cx.background_spawn(async move {
-          names
-            .iter()
-            .filter_map(|name| get_icon(name).map(|icon| (name.clone(), icon)))
-            .collect::<HashMap<_, _>>()
+      let (db_entries, cache_entries) = cx
+        .background_spawn(async move {
+          let entries: Vec<_> = Iter::new(default_paths())
+            .entries(Some(&locales))
+            .collect();
+
+          let mut db_entries = HashMap::new();
+          let mut cache_entries = HashMap::new();
+
+          for entry in &entries {
+            let Some(icon_name) = entry.icon() else {
+              continue;
+            };
+
+            let Some(icon_path) = get_icon(icon_name) else {
+              continue;
+            };
+
+            db_entries
+              .entry(icon_name.to_string())
+              .or_insert_with(|| icon_path.clone());
+
+            let resource = Resource::Path(icon_path.into());
+
+            cache_entries
+              .entry(icon_name.to_string())
+              .or_insert_with(|| resource.clone());
+
+            let name = entry.name(&locales).unwrap_or_default();
+            cache_entries
+              .entry(name.to_lowercase())
+              .or_insert_with(|| resource.clone());
+
+            cache_entries
+              .entry(entry.appid.to_lowercase())
+              .or_insert_with(|| resource.clone());
+
+            if let Some(generic_name) = entry.generic_name(&locales) {
+              cache_entries
+                .entry(generic_name.to_lowercase())
+                .or_insert_with(|| resource.clone());
+            }
+          }
+
+          (db_entries, cache_entries)
         })
-      }))
-      .collect::<Vec<_>>()
-      .await
-      .into_iter()
-      .flatten()
-      .collect::<HashMap<_, _>>();
+        .await;
 
-      DB.store_desktop_entry_icon_paths(&result);
-
-      let result = result
-        .into_iter()
-        .map(|(k, v)| (k, Resource::Path(v.into())))
-        .collect::<HashMap<_, _>>();
+      DB.store_desktop_entry_icon_paths(&db_entries);
 
       this
         .update(cx, |this, cx| {
-          this.cache.extend(result);
+          this.cache.extend(cache_entries);
           this.refresh_task = None;
           cx.notify();
         })
@@ -125,38 +152,6 @@ pub fn get_icon(name: &str) -> Option<PathBuf> {
   }
 
   lookup.find()
-}
-
-pub fn get_icons_by_app_name(locales: &[String]) -> HashMap<String, Resource> {
-  let entries: Vec<_> = Iter::new(default_paths()).entries(Some(locales)).collect();
-
-  let mut result = HashMap::new();
-
-  for entry in entries {
-    let name = entry.name(locales).unwrap_or_default();
-    if let Some(icon_name) = entry.icon() {
-      if let Some(icon_path) = get_icon(icon_name) {
-        let resource = Resource::Path(icon_path.into());
-
-        let name_lower = name.to_lowercase();
-        result.entry(name_lower).or_insert_with(|| resource.clone());
-
-        let appid_lower = entry.appid.to_lowercase();
-        result
-          .entry(appid_lower)
-          .or_insert_with(|| resource.clone());
-
-        if let Some(generic_name) = entry.generic_name(locales) {
-          let generic_lower = generic_name.to_lowercase();
-          result
-            .entry(generic_lower)
-            .or_insert_with(|| resource.clone());
-        }
-      }
-    }
-  }
-
-  result
 }
 
 pub fn start(entry: &DesktopEntry) -> Result<()> {

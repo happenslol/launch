@@ -84,10 +84,10 @@ impl Launcher {
     let mut items = vec![];
 
     let locales = freedesktop_desktop_entry::get_languages_from_env();
-    let (desktop_items, icon_names) = xdg::get_items(&locales).unwrap();
+    let (desktop_items, _) = xdg::get_items(&locales).unwrap();
 
     icon_cache.update(cx, |cache, cx| {
-      cache.refresh(icon_names, cx);
+      cache.refresh(locales.clone(), cx);
     });
 
     items.extend(desktop_items);

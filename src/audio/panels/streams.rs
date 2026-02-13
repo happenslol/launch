@@ -2,8 +2,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, ImageSource, IntoElement, KeyBinding,
-  Render, Resource, SharedString, Styled, Subscription, Task, Window, actions, div, img,
-  prelude::*, rgb, rgba,
+  Render, SharedString, Styled, Subscription, Task, Window, actions, div, img, prelude::*, rgb,
+  rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -22,7 +22,7 @@ use crate::{
   matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
-  xdg,
+  xdg::XdgIconCache,
 };
 
 use super::VolumeBar;
@@ -39,7 +39,6 @@ impl StreamEntry {
     sink_input: SinkInputInfo,
     audio_state: &Entity<AudioState>,
     sinks: &[SinkInfo],
-    icon_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Resource>>>,
     window: &mut Window,
     cx: &mut App,
   ) -> Self {
@@ -53,7 +52,7 @@ impl StreamEntry {
     }
     let search_string = search_parts.join(" ");
     let entry =
-      cx.new(|cx| SinkInputEntryInner::new(sink_input, audio_state, sinks, icon_cache, window, cx));
+      cx.new(|cx| SinkInputEntryInner::new(sink_input, audio_state, sinks, window, cx));
 
     Self {
       id,
@@ -66,8 +65,6 @@ impl StreamEntry {
 pub struct SinkInputEntryInner {
   sink_input: SinkInputInfo,
   sink_description: Option<SharedString>,
-  icon: Option<Resource>,
-  _icon_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Resource>>>,
   _event_listener: Task<()>,
 }
 
@@ -76,7 +73,6 @@ impl SinkInputEntryInner {
     sink_input: SinkInputInfo,
     audio_state: &Entity<AudioState>,
     sinks: &[SinkInfo],
-    icon_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Resource>>>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
@@ -88,12 +84,6 @@ impl SinkInputEntryInner {
       .find(|s| s.id == sink_input.sink_id)
       .and_then(|s| s.description.clone().or_else(|| s.name.clone()));
 
-    let icon = sink_input.application_name.as_ref().and_then(|app_name| {
-      let cache = icon_cache.lock().unwrap();
-      cache.get(&app_name.to_lowercase()).cloned()
-    });
-
-    let icon_cache_clone = icon_cache.clone();
     let event_listener = cx.spawn_in(window, async move |this, cx| {
       while let Ok(event) = event_rx.recv_async().await {
         let should_break = matches!(event, SinkInputEvent::Removed);
@@ -113,7 +103,6 @@ impl SinkInputEntryInner {
           }
           SinkInputEvent::InfoChanged(info) => {
             this.sink_input = info;
-            this.update_from_info();
             cx.notify();
           }
           SinkInputEvent::Removed => {}
@@ -128,8 +117,6 @@ impl SinkInputEntryInner {
     Self {
       sink_input,
       sink_description,
-      icon,
-      _icon_cache: icon_cache_clone,
       _event_listener: event_listener,
     }
   }
@@ -140,17 +127,6 @@ impl SinkInputEntryInner {
       .find(|s| s.id == self.sink_input.sink_id)
       .and_then(|s| s.description.clone().or_else(|| s.name.clone()));
   }
-
-  pub fn update_from_info(&mut self) {
-    self.icon = self
-      .sink_input
-      .application_name
-      .as_ref()
-      .and_then(|app_name| {
-        let cache = self._icon_cache.lock().unwrap();
-        cache.get(&app_name.to_lowercase()).cloned()
-      });
-  }
 }
 
 pub struct AudioStreamsPanel {
@@ -159,12 +135,10 @@ pub struct AudioStreamsPanel {
   audio_state: Entity<AudioState>,
   sink_inputs: Vec<StreamEntry>,
   sinks: Vec<SinkInfo>,
-  _icon_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Resource>>>,
   _subscriptions: Vec<Subscription>,
   _list_subscription_task: Task<()>,
   _sink_list_subscription_task: Task<()>,
   _initial_load_task: Task<()>,
-  _icon_refresh_task: Task<()>,
 }
 
 const CONTEXT: &str = "streams";
@@ -192,37 +166,10 @@ impl AudioStreamsPanel {
       picker
     });
 
-    let locales = freedesktop_desktop_entry::get_languages_from_env();
-    let icon_cache = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-
-    let icon_refresh_task = cx.spawn_in(window, {
-      let locales = locales.clone();
-      async move |this, cx| {
-        let icons = cx
-          .background_spawn(async move { xdg::get_icons_by_app_name(&locales) })
-          .await;
-
-        let _ = this.update(cx, |this, cx| {
-          let mut cache = this._icon_cache.lock().unwrap();
-          cache.extend(icons);
-
-          for stream_entry in &this.sink_inputs {
-            stream_entry.entry.update(cx, |inner, cx| {
-              inner.update_from_info();
-              cx.notify();
-            });
-          }
-
-          cx.notify();
-        });
-      }
-    });
-
     // Load initial data async
     let initial_load_task = cx.spawn_in(window, {
       let picker = picker.clone();
       let audio_state = audio_state.clone();
-      let icon_cache = icon_cache.clone();
       async move |this, cx| {
         // Load sink inputs
         let sink_inputs = cx
@@ -244,7 +191,7 @@ impl AudioStreamsPanel {
           this.sink_inputs = sink_inputs
             .into_iter()
             .map(|input| {
-              StreamEntry::new(input, &audio_state, &sinks, icon_cache.clone(), window, cx)
+              StreamEntry::new(input, &audio_state, &sinks, window, cx)
             })
             .collect();
 
@@ -260,7 +207,6 @@ impl AudioStreamsPanel {
     let list_subscription_task = cx.spawn_in(window, {
       let picker = picker.clone();
       let audio_state = audio_state.clone();
-      let icon_cache = icon_cache.clone();
       async move |this, cx| {
         while let Ok(event) = list_rx.recv_async().await {
           match event {
@@ -270,7 +216,6 @@ impl AudioStreamsPanel {
                   input_info,
                   &audio_state,
                   &this.sinks,
-                  icon_cache.clone(),
                   window,
                   cx,
                 );
@@ -356,12 +301,10 @@ impl AudioStreamsPanel {
       audio_state,
       sink_inputs: Vec::new(),
       sinks: Vec::new(),
-      _icon_cache: icon_cache,
       _subscriptions: subscriptions,
       _list_subscription_task: list_subscription_task,
       _sink_list_subscription_task: sink_list_subscription_task,
       _initial_load_task: initial_load_task,
-      _icon_refresh_task: icon_refresh_task,
     }
   }
 
@@ -513,10 +456,15 @@ impl PickerDelegate for StreamsDelegate {
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
+    let icon_cache = XdgIconCache::global(cx);
+    let icon_cache = icon_cache.read(cx);
     let inner = item.entry.read(cx);
     let sink_input = &inner.sink_input;
 
-    let icon = inner.icon.as_ref();
+    let icon = sink_input
+      .application_name
+      .as_ref()
+      .and_then(|name| icon_cache.get(&name.to_lowercase()));
 
     // Use NORMAL volume as base since sink inputs don't have base_volume
     let base_volume = crate::audio::types::Volume(pulse::volume::Volume::NORMAL.0);
