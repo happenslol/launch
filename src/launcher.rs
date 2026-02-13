@@ -8,11 +8,10 @@ use std::{
 };
 
 use freedesktop_desktop_entry::DesktopEntry;
-use futures::{StreamExt as _, stream::FuturesUnordered};
 use gpui::{
-  AnyView, App, AsyncWindowContext, Bounds, Entity, FocusHandle, Focusable, ImageSource,
-  KeyBinding, Resource, SharedString, Size, Subscription, Task, WeakEntity, Window, WindowBounds,
-  WindowKind, WindowOptions, actions, div, img,
+  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, Resource,
+  SharedString, Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions,
+  div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -31,7 +30,7 @@ use crate::{
   network,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
-  xdg::{self, get_icon},
+  xdg::{self, XdgIconCache},
 };
 
 actions!(launcher, [Quit, GoBack]);
@@ -41,7 +40,6 @@ pub struct Launcher {
   focus_handle: FocusHandle,
   picker: Entity<Picker<RootDelegate>>,
   active_panel: Option<AnyView>,
-  xdg_icon_path_cache: Entity<HashMap<String, Resource>>,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -81,18 +79,16 @@ impl Launcher {
     ]);
 
     let launches = Arc::new(DB.get_launches());
-    let xdg_icon_path_cache = cx.new(|_| DB.get_desktop_entry_icon_paths());
+    let icon_cache = XdgIconCache::global(cx);
 
     let mut items = vec![];
 
     let locales = freedesktop_desktop_entry::get_languages_from_env();
     let (desktop_items, icon_names) = xdg::get_items(&locales).unwrap();
 
-    // Find app icon paths, this is pretty slow
-    cx.spawn_in(window, async move |this, cx| {
-      Self::refresh_app_icons(this, cx, icon_names).await
-    })
-    .detach();
+    icon_cache.update(cx, |cache, cx| {
+      cache.refresh(icon_names, cx);
+    });
 
     items.extend(desktop_items);
     items.extend(audio::panels::get_items());
@@ -103,7 +99,7 @@ impl Launcher {
 
     let picker = cx.new(|cx| {
       Picker::new(
-        RootDelegate::new(launches, locales, xdg_icon_path_cache.clone()),
+        RootDelegate::new(launches, locales, icon_cache),
         items.clone(),
         window,
         cx,
@@ -154,7 +150,6 @@ impl Launcher {
       focus_handle: cx.focus_handle(),
       picker,
       active_panel,
-      xdg_icon_path_cache,
       _subscriptions: subscriptions,
     }
   }
@@ -172,44 +167,6 @@ impl Launcher {
         window.focus(&picker.read(cx).search_input.focus_handle(cx));
       });
     }
-  }
-
-  async fn refresh_app_icons(
-    this: WeakEntity<Self>,
-    cx: &mut AsyncWindowContext,
-    icon_names: Vec<String>,
-  ) {
-    // TODO: fork the icon lookups crate and make it actually async
-    let result = FuturesUnordered::from_iter(icon_names.chunks(10).map(|names| {
-      let names = names.to_vec();
-      cx.background_spawn(async move {
-        names
-          .iter()
-          .filter_map(|name| get_icon(name).map(|icon| (name.clone(), icon)))
-          .collect::<HashMap<_, _>>()
-      })
-    }))
-    .collect::<Vec<_>>()
-    .await
-    .into_iter()
-    .flatten()
-    .collect::<HashMap<_, _>>();
-
-    DB.store_desktop_entry_icon_paths(&result);
-
-    let result = result
-      .into_iter()
-      .map(|(k, v)| (k, Resource::Path(v.into())))
-      .collect::<HashMap<_, _>>();
-
-    this
-      .update(cx, |this, cx| {
-        this.xdg_icon_path_cache.update(cx, |cache, cx| {
-          cache.extend(result);
-          cx.notify();
-        })
-      })
-      .log_err();
   }
 
   fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
@@ -269,7 +226,7 @@ impl Render for Launcher {
 
 struct RootDelegate {
   launches: Arc<HashMap<String, (u32, u64)>>,
-  xdg_icon_path_cache: Entity<HashMap<String, Resource>>,
+  icon_cache: Entity<XdgIconCache>,
   xdg_locales: Vec<String>,
 }
 
@@ -277,12 +234,12 @@ impl RootDelegate {
   fn new(
     launches: Arc<HashMap<String, (u32, u64)>>,
     xdg_locales: Vec<String>,
-    xdg_icon_path_cache: Entity<HashMap<String, Resource>>,
+    icon_cache: Entity<XdgIconCache>,
   ) -> Self {
     Self {
       launches,
       xdg_locales,
-      xdg_icon_path_cache,
+      icon_cache,
     }
   }
 }
@@ -331,7 +288,7 @@ impl PickerDelegate for RootDelegate {
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
-    let icon_cache = self.xdg_icon_path_cache.read(cx);
+    let icon_cache = self.icon_cache.read(cx);
 
     h_flex()
       .w_full()

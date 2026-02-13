@@ -7,9 +7,75 @@ use std::{
 use anyhow::Result;
 use fork::Fork;
 use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths};
-use gpui::Resource;
+use futures::{StreamExt as _, stream::FuturesUnordered};
+use gpui::{App, Entity, Global, Resource, Task, prelude::*};
 
-use crate::launcher::RootItem;
+use crate::{db::DB, launcher::RootItem, util::ResultExt};
+
+pub struct XdgIconCache {
+  cache: HashMap<String, Resource>,
+  refresh_task: Option<Task<()>>,
+}
+
+struct GlobalXdgIconCache(Entity<XdgIconCache>);
+
+impl Global for GlobalXdgIconCache {}
+
+pub fn init(cx: &mut App) {
+  let entity = cx.new(|_| XdgIconCache {
+    cache: DB.get_desktop_entry_icon_paths(),
+    refresh_task: None,
+  });
+  cx.set_global(GlobalXdgIconCache(entity));
+}
+
+impl XdgIconCache {
+  pub fn global(cx: &App) -> Entity<Self> {
+    cx.global::<GlobalXdgIconCache>().0.clone()
+  }
+
+  pub fn get(&self, name: &str) -> Option<&Resource> {
+    self.cache.get(name)
+  }
+
+  pub fn refresh(&mut self, icon_names: Vec<String>, cx: &mut Context<Self>) {
+    if self.refresh_task.is_some() {
+      return;
+    }
+
+    self.refresh_task = Some(cx.spawn(async move |this, cx| {
+      let result = FuturesUnordered::from_iter(icon_names.chunks(10).map(|names| {
+        let names = names.to_vec();
+        cx.background_spawn(async move {
+          names
+            .iter()
+            .filter_map(|name| get_icon(name).map(|icon| (name.clone(), icon)))
+            .collect::<HashMap<_, _>>()
+        })
+      }))
+      .collect::<Vec<_>>()
+      .await
+      .into_iter()
+      .flatten()
+      .collect::<HashMap<_, _>>();
+
+      DB.store_desktop_entry_icon_paths(&result);
+
+      let result = result
+        .into_iter()
+        .map(|(k, v)| (k, Resource::Path(v.into())))
+        .collect::<HashMap<_, _>>();
+
+      this
+        .update(cx, |this, cx| {
+          this.cache.extend(result);
+          this.refresh_task = None;
+          cx.notify();
+        })
+        .log_err();
+    }));
+  }
+}
 
 pub fn get_items(locales: &[String]) -> Result<(Vec<RootItem>, Vec<String>)> {
   let desktop_entries = Iter::new(default_paths())
