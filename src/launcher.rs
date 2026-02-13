@@ -255,7 +255,7 @@ impl Render for Launcher {
       })
       .when_none(&self.active_panel, |div| {
         div
-          .child(picker_input(&self.picker))
+          .child(picker_input(&self.picker).text_size(px(18.)))
           .child(picker_results(&self.picker))
       })
   }

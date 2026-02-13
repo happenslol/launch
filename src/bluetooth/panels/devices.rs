@@ -3,7 +3,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use futures::StreamExt;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled,
-  Subscription, Task, Window, div, prelude::*, rgb, rgba,
+  Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -158,8 +158,11 @@ const CONTEXT: &str = "bluetooth";
 
 impl BluetoothDevicesPanel {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-    let delegate = DevicesDelegate {};
-    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
+    let picker = cx.new(|cx| {
+      let mut picker = Picker::new(DevicesDelegate, Arc::new(vec![]), window, cx);
+      picker.placeholder("Search bluetooth devices...", cx);
+      picker
+    });
 
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
@@ -352,12 +355,12 @@ impl Render for BluetoothDevicesPanel {
     v_flex()
       .key_context(CONTEXT)
       .size_full()
-      .child(picker_input(&self.picker))
+      .child(picker_input(&self.picker).show_back_button(true))
       .child(picker_results(&self.picker))
   }
 }
 
-struct DevicesDelegate {}
+struct DevicesDelegate;
 
 impl PickerDelegate for DevicesDelegate {
   type ListItem = BluetoothEntry;

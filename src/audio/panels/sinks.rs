@@ -138,7 +138,11 @@ impl AudioSinksPanel {
     };
 
     // Start with empty picker
-    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
+    let picker = cx.new(|cx| {
+      let mut picker = Picker::new(delegate, Arc::new(vec![]), window, cx);
+      picker.placeholder("Search audio outputs...", cx);
+      picker
+    });
 
     // Load initial data async
     let initial_load_task = cx.spawn_in(window, {
@@ -277,7 +281,7 @@ impl Render for AudioSinksPanel {
       .on_action(cx.listener(Self::volume_up))
       .on_action(cx.listener(Self::volume_down))
       .on_action(cx.listener(Self::mute))
-      .child(picker_input(&self.picker))
+      .child(picker_input(&self.picker).show_back_button(true))
       .child(picker_results(&self.picker))
   }
 }

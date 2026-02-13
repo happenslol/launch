@@ -4,7 +4,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use futures::StreamExt;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, SharedString, Styled,
-  Subscription, Task, Window, actions, div, prelude::*, rgb, rgba,
+  Subscription, Task, Window, actions, div, prelude::*, px, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -168,7 +168,11 @@ impl WifiPanel {
     cx.bind_keys([KeyBinding::new("ctrl-r", Refresh, Some(CONTEXT))]);
 
     let delegate = WifiDelegate {};
-    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
+    let picker = cx.new(|cx| {
+      let mut picker = Picker::new(delegate, Arc::new(vec![]), window, cx);
+      picker.placeholder("Search wifi networks...", cx);
+      picker
+    });
 
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
@@ -554,7 +558,7 @@ impl Render for WifiPanel {
       .when(self.is_scanning, |this| {
         this.child(div().child("Scanning..."))
       })
-      .child(picker_input(&self.picker))
+      .child(picker_input(&self.picker).show_back_button(true))
       .child(picker_results(&self.picker))
   }
 }

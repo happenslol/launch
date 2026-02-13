@@ -5,7 +5,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use anyhow::Result;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, SharedString, Task, Window,
-  prelude::*, rgba,
+  prelude::*, px, rgba,
 };
 
 use crate::{
@@ -42,7 +42,11 @@ const CONTEXT: &str = "network";
 
 impl NetworkPanel {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-    let picker = cx.new(|cx| Picker::new(NetworkDelegate {}, Arc::new(vec![]), window, cx));
+    let picker = cx.new(|cx| {
+      let mut picker = Picker::new(NetworkDelegate {}, Arc::new(vec![]), window, cx);
+      picker.placeholder("Search networks...", cx);
+      picker
+    });
     cx.focus_view(&picker, window);
 
     let dbus_task = cx.spawn_in(window, async move |_this, _cx| Ok(()));
@@ -65,7 +69,7 @@ impl Render for NetworkPanel {
     v_flex()
       .key_context(CONTEXT)
       .size_full()
-      .child(picker_input(&self.picker))
+      .child(picker_input(&self.picker).show_back_button(true))
       .child(picker_results(&self.picker))
   }
 }

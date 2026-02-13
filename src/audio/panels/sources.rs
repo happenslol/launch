@@ -139,7 +139,11 @@ impl AudioSourcesPanel {
     };
 
     // Start with empty picker
-    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
+    let picker = cx.new(|cx| {
+      let mut picker = Picker::new(delegate, Arc::new(vec![]), window, cx);
+      picker.placeholder("Search audio inputs...", cx);
+      picker
+    });
 
     // Load initial data async
     let initial_load_task = cx.spawn_in(window, {

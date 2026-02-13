@@ -8,7 +8,9 @@
       "Bash(cargo test:*)"
     ],
     "additionalDirectories": [
-      "/home/happens/code/zed"
+      "/home/happens/code/zed",
+      "/home/happens/code/gpui-component",
+      "/home/happens/resources/tabler-icons/icons"
     ]
   }
 }

@@ -136,6 +136,15 @@ A "panel" is a view that is rendered in the launcher window. Panels can be selec
 
 To be shown in the launcher, panels should have a `get_items` function which returns a list of `RootItem`s.
 
+# Icons
+
+SVG icons are embedded as assets and rendered using the `Icon` component in `src/icon.rs`.
+
+To add a new icon:
+1. Copy the SVG from `/home/happens/resources/tabler-icons/icons/outline/` into `assets/icons/`
+2. Add a variant to the `IconName` enum in `src/icon.rs` with the matching file stem
+3. Use `Icon::new(IconName::Variant)` in UI code
+
 # dbus
 
 This project uses zbus to communicate with the system and user dbus. Each dbus service has a module in `src/dbus`, with the following structure:

@@ -630,7 +630,7 @@ impl Element for TextElement {
     let font_size = style.font_size.to_pixels(window.rem_size());
     let mut bounds = bounds;
 
-    let placeholder_color = rgb(0xAAAAAA);
+    let placeholder_color = rgb(0x555555);
     let foreground = rgb(0xFFFFFF);
 
     let (display_text, text_color) = if is_empty {

@@ -187,7 +187,11 @@ impl AudioStreamsPanel {
     let audio_state = AudioState::global(cx);
     let delegate = StreamsDelegate;
 
-    let picker = cx.new(|cx| Picker::new(delegate, Arc::new(vec![]), window, cx));
+    let picker = cx.new(|cx| {
+      let mut picker = Picker::new(delegate, Arc::new(vec![]), window, cx);
+      picker.placeholder("Search playback streams...", cx);
+      picker
+    });
 
     let locales = freedesktop_desktop_entry::get_languages_from_env();
     let icon_cache = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -371,7 +375,11 @@ impl AudioStreamsPanel {
   ) {
     let delegate = SinkPickerDelegate { current_sink_id };
 
-    let sink_picker = cx.new(|cx| Picker::new(delegate, Arc::new(self.sinks.clone()), window, cx));
+    let sink_picker = cx.new(|cx| {
+      let mut picker = Picker::new(delegate, Arc::new(self.sinks.clone()), window, cx);
+      picker.placeholder("Search audio outputs...", cx);
+      picker
+    });
 
     // Subscribe to sink picker selection
     let subscription = cx.subscribe_in(&sink_picker, window, {

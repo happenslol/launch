@@ -7,15 +7,17 @@ use std::{
 };
 
 use gpui::{
-  App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding,
-  ScrollStrategy, StyleRefinement, Subscription, Task, UniformListScrollHandle, Window, actions,
-  div, prelude::*, px, rgba, uniform_list,
+  Action, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+  KeyBinding, Pixels, ScrollStrategy, SharedString, StyleRefinement, Subscription, Task,
+  UniformListScrollHandle, Window, actions, div, prelude::*, rems, rgb, rgba, uniform_list,
 };
 
+use crate::icon::{Icon, IconName};
 use crate::input::{
   input,
   state::{InputEvent, InputState},
 };
+use crate::launcher::GoBack;
 
 actions!(picker, [SelectNext, SelectPrev]);
 
@@ -87,7 +89,7 @@ impl<D: PickerDelegate> Picker<D> {
     ]);
 
     let has_items = !items.is_empty();
-    let search_input = cx.new(|cx| InputState::new(window, cx));
+    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search..."));
 
     let mut this = Self {
       delegate,
@@ -146,6 +148,12 @@ impl<D: PickerDelegate> Picker<D> {
     cx.notify();
 
     self.update_matches(window, cx);
+  }
+
+  pub fn placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+    self.search_input.update(cx, |state, _cx| {
+      state.placeholder = placeholder.into();
+    });
   }
 
   pub fn get_selected_item(&self) -> Option<&D::ListItem> {
@@ -336,6 +344,8 @@ pub fn picker_input<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerInpu
   PickerInput {
     picker: picker.clone(),
     style: StyleRefinement::default(),
+    show_back_button: false,
+    text_size: None,
   }
 }
 
@@ -343,6 +353,20 @@ pub fn picker_input<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerInpu
 pub struct PickerInput<D: PickerDelegate> {
   picker: Entity<Picker<D>>,
   style: StyleRefinement,
+  show_back_button: bool,
+  text_size: Option<Pixels>,
+}
+
+impl<D: PickerDelegate> PickerInput<D> {
+  pub fn show_back_button(mut self, show: bool) -> Self {
+    self.show_back_button = show;
+    self
+  }
+
+  pub fn text_size(mut self, size: Pixels) -> Self {
+    self.text_size = Some(size);
+    self
+  }
 }
 
 impl<D: PickerDelegate> Styled for PickerInput<D> {
@@ -360,11 +384,36 @@ impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
       .track_focus(&focus_handle)
       .on_action(window.listener_for(&self.picker, Picker::select_next))
       .on_action(window.listener_for(&self.picker, Picker::select_prev))
-      .px_4()
-      .py_3()
+      .p_3()
       .border_b_1()
       .border_color(rgba(0xFFFFFF12))
-      .child(input(&search_input).text_size(px(18.)))
+      .when_some(self.text_size, |this, size: Pixels| this.text_size(size))
+      .child(
+        div()
+          .flex()
+          .flex_row()
+          .items_center()
+          .gap_2()
+          .h(rems(1.5))
+          .when(self.show_back_button, |this| {
+            this.child(
+              div()
+                .id("back-button")
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .bg(rgba(0xFFFFFF0F))
+                .p_1()
+                .cursor_pointer()
+                .on_click(|_event, window, cx| {
+                  window.dispatch_action(GoBack.boxed_clone(), cx);
+                })
+                .child(Icon::new(IconName::ArrowLeft).color(rgb(0xCCCCCC).into())),
+            )
+          })
+          .child(input(&search_input).flex_grow()),
+      )
   }
 }
 

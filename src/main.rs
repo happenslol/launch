@@ -8,6 +8,7 @@ mod audio;
 mod bluetooth;
 mod db;
 mod dbus;
+mod icon;
 mod input;
 mod instance;
 mod launcher;
