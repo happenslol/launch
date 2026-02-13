@@ -46,7 +46,13 @@ pub struct Launcher {
 }
 
 impl Launcher {
-  pub fn get_window_options() -> WindowOptions {
+  pub fn get_window_options(no_keyboard_capture: bool) -> WindowOptions {
+    let keyboard_interactivity = if no_keyboard_capture {
+      KeyboardInteractivity::OnDemand
+    } else {
+      KeyboardInteractivity::Exclusive
+    };
+
     WindowOptions {
       titlebar: None,
       app_id: Some("launch".to_string()),
@@ -62,7 +68,7 @@ impl Launcher {
         exclusive_zone: None,
         exclusive_edge: None,
         margin: None,
-        keyboard_interactivity: KeyboardInteractivity::Exclusive,
+        keyboard_interactivity,
       }),
       ..Default::default()
     }

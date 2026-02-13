@@ -52,9 +52,8 @@ impl StreamEntry {
       search_parts.push(app_name.to_string());
     }
     let search_string = search_parts.join(" ");
-    let entry = cx.new(|cx| {
-      SinkInputEntryInner::new(sink_input, audio_state, sinks, icon_cache, window, cx)
-    });
+    let entry =
+      cx.new(|cx| SinkInputEntryInner::new(sink_input, audio_state, sinks, icon_cache, window, cx));
 
     Self {
       id,
@@ -382,19 +381,16 @@ impl AudioStreamsPanel {
     });
 
     // Subscribe to sink picker selection
-    let subscription = cx.subscribe_in(&sink_picker, window, {
-      let input_id = input_id;
+    let subscription = cx.subscribe_in(
+      &sink_picker,
+      window,
       move |this, _picker, ev, window, cx| {
         if let PickerEvent::Picked(sink) = ev {
           let sink_id = sink.id;
           this.audio_state.read(cx).move_sink_input(input_id, sink_id);
 
           // Update the entry's sink description
-          if let Some(stream_entry) = this
-            .sink_inputs
-            .iter()
-            .find(|e| e.id == input_id)
-          {
+          if let Some(stream_entry) = this.sink_inputs.iter().find(|e| e.id == input_id) {
             stream_entry.entry.update(cx, |inner, cx| {
               inner.sink_input.sink_id = sink_id;
               inner.update_sink_description(&this.sinks);
@@ -404,8 +400,8 @@ impl AudioStreamsPanel {
 
           this.close_sink_picker(window, cx);
         }
-      }
-    });
+      },
+    );
 
     cx.focus_view(&sink_picker.read(cx).search_input.clone(), window);
     self._subscriptions.push(subscription);

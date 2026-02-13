@@ -42,6 +42,8 @@ struct Args {
   panel: Option<String>,
   #[arg(long)]
   no_daemon: bool,
+  #[arg(long)]
+  no_keyboard_capture: bool,
 }
 
 fn main() -> Result<()> {
@@ -49,7 +51,7 @@ fn main() -> Result<()> {
   let args = Args::try_parse()?;
 
   if args.no_daemon {
-    run_app(args.panel, None);
+    run_app(args.panel, args.no_keyboard_capture, None);
     return Ok(());
   }
 
@@ -77,7 +79,7 @@ fn main() -> Result<()> {
         }
 
         let receiver = instance::listen(listener);
-        run_app(args.panel, Some(receiver));
+        run_app(args.panel, args.no_keyboard_capture, Some(receiver));
       }
     }
   }
@@ -85,7 +87,7 @@ fn main() -> Result<()> {
   Ok(())
 }
 
-fn run_app(panel: Option<String>, receiver: Option<Receiver<Message>>) {
+fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Receiver<Message>>) {
   let mode = if receiver.is_some() {
     QuitMode::Explicit
   } else {
@@ -102,7 +104,7 @@ fn run_app(panel: Option<String>, receiver: Option<Receiver<Message>>) {
       InputState::init(cx);
       load_embedded_fonts(cx).unwrap();
 
-      open_launcher_window(cx, panel);
+      open_launcher_window(cx, panel, no_keyboard_capture);
 
       if let Some(receiver) = receiver {
         cx.spawn(async move |cx| {
@@ -111,7 +113,7 @@ fn run_app(panel: Option<String>, receiver: Option<Receiver<Message>>) {
               Message::Open { panel } => {
                 cx.update(|cx| {
                   if cx.windows().is_empty() {
-                    open_launcher_window(cx, panel);
+                    open_launcher_window(cx, panel, no_keyboard_capture);
                   }
                 })
                 .log_err();
@@ -124,8 +126,8 @@ fn run_app(panel: Option<String>, receiver: Option<Receiver<Message>>) {
     });
 }
 
-fn open_launcher_window(cx: &mut App, panel: Option<String>) {
-  if let Err(err) = cx.open_window(Launcher::get_window_options(), move |window, cx| {
+fn open_launcher_window(cx: &mut App, panel: Option<String>, no_keyboard_capture: bool) {
+  if let Err(err) = cx.open_window(Launcher::get_window_options(no_keyboard_capture), move |window, cx| {
     cx.new(move |cx| Launcher::new(window, cx, panel))
   }) {
     error!(?err, "Failed to launch");
