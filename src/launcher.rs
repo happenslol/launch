@@ -52,7 +52,7 @@ impl Launcher {
       app_id: Some("launch".to_string()),
       window_bounds: Some(WindowBounds::Windowed(Bounds {
         origin: point(px(0.), px(0.)),
-        size: Size::new(px(800.), px(800.)),
+        size: Size::new(px(800.), px(450.)),
       })),
       window_background: gpui::WindowBackgroundAppearance::Transparent,
       kind: WindowKind::LayerShell(LayerShellOptions {
@@ -244,12 +244,12 @@ impl Render for Launcher {
       .text_color(rgb(0xFFFFFF))
       .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::go_back))
-      .rounded_lg()
+      .rounded_xl()
       .size_full()
       .border_1()
-      .p_2()
-      .border_color(rgb(0x444444))
-      .bg(rgba(0x212121FF))
+      .border_color(rgba(0xFFFFFF15))
+      .bg(rgba(0x171717F0))
+      .overflow_hidden()
       .when_some(self.active_panel.as_ref(), |div, panel| {
         div.child(panel.clone())
       })
@@ -329,10 +329,12 @@ impl PickerDelegate for RootDelegate {
 
     h_flex()
       .w_full()
-      .p_1()
-      .when(is_selected, |this| this.bg(rgb(0x444444)))
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .justify_between()
-      .child(h_flex().gap_1().map(|this| {
+      .child(h_flex().gap_2().map(|this| {
         match item {
           RootItem::App { entry, name } => {
             let icon = entry.icon().and_then(|icon| icon_cache.get(icon));
@@ -355,7 +357,8 @@ impl PickerDelegate for RootDelegate {
       .child(
         h_flex()
           .gap_1()
-          .text_color(rgb(0xAAAAAA))
+          .text_color(rgb(0x888888))
+          .text_sm()
           .child(item.type_label()),
       )
   }

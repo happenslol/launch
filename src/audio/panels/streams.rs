@@ -3,7 +3,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, ImageSource, IntoElement, KeyBinding,
   Render, Resource, SharedString, Styled, Subscription, Task, Window, actions, div, img,
-  prelude::*, rgb,
+  prelude::*, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -535,7 +535,10 @@ impl PickerDelegate for StreamsDelegate {
 
     v_flex()
       .w_full()
-      .when(is_selected, |this| this.bg(rgb(0x444444)))
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .gap_1()
       .child(
         h_flex()
@@ -626,7 +629,10 @@ impl PickerDelegate for SinkPickerDelegate {
 
     h_flex()
       .w_full()
-      .when(is_selected, |this| this.bg(rgb(0x444444)))
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .gap_2()
       .child(
         h_flex()

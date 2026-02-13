@@ -2,7 +2,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render,
-  Styled, Subscription, Task, Window, actions, div, prelude::*, rgb,
+  Styled, Subscription, Task, Window, actions, div, prelude::*, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -307,7 +307,10 @@ impl PickerDelegate for SourcesDelegate {
 
     v_flex()
       .w_full()
-      .when(is_selected, |this| this.bg(rgb(0x444444)))
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .gap_1()
       .child(
         h_flex()

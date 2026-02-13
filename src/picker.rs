@@ -9,7 +9,7 @@ use std::{
 use gpui::{
   App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding,
   ScrollStrategy, StyleRefinement, Subscription, Task, UniformListScrollHandle, Window, actions,
-  div, prelude::*, uniform_list,
+  div, prelude::*, px, rgba, uniform_list,
 };
 
 use crate::input::{
@@ -328,6 +328,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
     )
     .track_scroll(&self.list_scroll_handle)
     .flex_grow()
+    .p_2()
   }
 }
 
@@ -359,7 +360,11 @@ impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
       .track_focus(&focus_handle)
       .on_action(window.listener_for(&self.picker, Picker::select_next))
       .on_action(window.listener_for(&self.picker, Picker::select_prev))
-      .child(input(&search_input))
+      .px_4()
+      .py_3()
+      .border_b_1()
+      .border_color(rgba(0xFFFFFF12))
+      .child(input(&search_input).text_size(px(18.)))
   }
 }
 

@@ -5,7 +5,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use anyhow::Result;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, SharedString, Task, Window,
-  prelude::*, rgb,
+  prelude::*, rgba,
 };
 
 use crate::{
@@ -89,11 +89,10 @@ impl PickerDelegate for NetworkDelegate {
   ) -> impl IntoElement {
     h_flex()
       .w_full()
-      .when_else(
-        is_selected,
-        |div| div.bg(rgb(0xDDDDDD)),
-        |div| div.bg(rgb(0xFFFFFF)),
-      )
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .child(item.name.clone())
   }
 

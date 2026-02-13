@@ -4,7 +4,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use futures::StreamExt;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, SharedString, Styled,
-  Subscription, Task, Window, actions, div, prelude::*, rgb,
+  Subscription, Task, Window, actions, div, prelude::*, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -590,7 +590,10 @@ impl PickerDelegate for WifiDelegate {
 
     v_flex()
       .w_full()
-      .when(is_selected, |this| this.bg(rgb(0x444444)))
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .child(
         div()
           .w_full()
@@ -598,7 +601,12 @@ impl PickerDelegate for WifiDelegate {
           .overflow_x_hidden()
           .child(status_text),
       )
-      .child(div().child(info_text))
+      .child(
+        div()
+          .text_sm()
+          .text_color(rgb(0x888888))
+          .child(info_text),
+      )
   }
 
   fn update_matches(

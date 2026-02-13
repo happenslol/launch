@@ -3,7 +3,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use futures::StreamExt;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled,
-  Subscription, Task, Window, div, prelude::*, rgb,
+  Subscription, Task, Window, div, prelude::*, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -386,9 +386,11 @@ impl PickerDelegate for DevicesDelegate {
 
     v_flex()
       .w_full()
-      .when(is_selected, |this| this.bg(rgb(0x444444)))
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .child(
-        // First row: device name with status
         div()
           .w_full()
           .text_ellipsis()
@@ -396,8 +398,10 @@ impl PickerDelegate for DevicesDelegate {
           .child(status_text),
       )
       .child(
-        // Second row: battery info (or empty space)
-        div().child(battery_text),
+        div()
+          .text_sm()
+          .text_color(rgb(0x888888))
+          .child(battery_text),
       )
   }
 
