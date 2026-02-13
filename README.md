@@ -10,12 +10,9 @@
 - wingsuit
 - squirrel
 - glide
-
-# todo
-
-- back button
-- styling
-- leader key
+- jumpdrive
+- jumpspace
+- spacejump
 
 # inline
 
