@@ -6,6 +6,7 @@
 mod assets;
 mod audio;
 mod bluetooth;
+mod clipboard;
 mod db;
 mod dbus;
 mod icon;
@@ -128,9 +129,10 @@ fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Re
 }
 
 fn open_launcher_window(cx: &mut App, panel: Option<String>, no_keyboard_capture: bool) {
-  if let Err(err) = cx.open_window(Launcher::get_window_options(no_keyboard_capture), move |window, cx| {
-    cx.new(move |cx| Launcher::new(window, cx, panel))
-  }) {
+  if let Err(err) = cx.open_window(
+    Launcher::get_window_options(no_keyboard_capture),
+    move |window, cx| cx.new(move |cx| Launcher::new(window, cx, panel)),
+  ) {
     error!(?err, "Failed to launch");
   }
 }

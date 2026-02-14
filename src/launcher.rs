@@ -10,7 +10,7 @@ use std::{
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
   AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString,
-  Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, img,
+  Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -33,6 +33,14 @@ use crate::{
   xdg::{self, XdgIconCache},
 };
 
+struct FendInterrupt(Arc<AtomicBool>);
+
+impl fend_core::Interrupt for FendInterrupt {
+  fn should_interrupt(&self) -> bool {
+    self.0.load(Ordering::Acquire)
+  }
+}
+
 actions!(launcher, [Quit, GoBack]);
 const CONTEXT: &str = "launcher";
 
@@ -40,6 +48,9 @@ pub struct Launcher {
   focus_handle: FocusHandle,
   picker: Entity<Picker<RootDelegate>>,
   active_panel: Option<AnyView>,
+  fend_result: Option<SharedString>,
+  fend_cancel_flag: Arc<AtomicBool>,
+  fend_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -132,16 +143,8 @@ impl Launcher {
       window,
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
         PickerEvent::Picked(item) => this.launch(item.clone(), window, cx),
-        PickerEvent::QueryChanged(_query) => {
-          // let query = query.clone();
-          //
-          // cx.background_spawn(async move {
-          //   println!("Query changed: {query}");
-          //   let mut context = fend_core::Context::new();
-          //   let result = fend_core::evaluate(&query, &mut context);
-          //   println!("Result: {result:#?}");
-          // })
-          // .detach();
+        PickerEvent::QueryChanged(query) => {
+          this.update_fend_result(query.clone(), window, cx);
         }
       },
     )];
@@ -150,8 +153,61 @@ impl Launcher {
       focus_handle: cx.focus_handle(),
       picker,
       active_panel,
+      fend_result: None,
+      fend_cancel_flag: Arc::new(AtomicBool::new(false)),
+      fend_task: None,
       _subscriptions: subscriptions,
     }
+  }
+
+  fn update_fend_result(
+    &mut self,
+    query: String,
+    _window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.fend_cancel_flag.store(true, Ordering::Release);
+    self.fend_cancel_flag = Arc::new(AtomicBool::new(false));
+    self.fend_result = None;
+    self.fend_task = None;
+    cx.notify();
+
+    if query.is_empty() {
+      return;
+    }
+
+    let cancel_flag = self.fend_cancel_flag.clone();
+    self.fend_task = Some(cx.spawn({
+      let cancel_flag = cancel_flag.clone();
+      async move |this, cx| {
+        let result = cx
+          .background_spawn(async move {
+            let interrupt = FendInterrupt(cancel_flag);
+            let mut context = fend_core::Context::new();
+            let expr =
+              fend_core::parse_with_interrupt(&query, &mut context, &interrupt).ok()?;
+            if !expr.contains_computation() {
+              return None;
+            }
+            let result =
+              fend_core::evaluate_expr_with_interrupt(expr, &mut context, &interrupt).ok()?;
+            if result.output_is_empty() {
+              return None;
+            }
+            Some(SharedString::from(result.get_main_result().to_string()))
+          })
+          .await;
+
+        if let Some(result) = result {
+          this
+            .update(cx, |this, cx| {
+              this.fend_result = Some(result);
+              cx.notify();
+            })
+            .log_err();
+        }
+      }
+    }));
   }
 
   fn quit(&mut self, _: &Quit, window: &mut Window, _cx: &mut Context<Self>) {
@@ -216,9 +272,24 @@ impl Render for Launcher {
       .when_some(self.active_panel.as_ref(), |div, panel| {
         div.child(panel.clone())
       })
-      .when_none(&self.active_panel, |div| {
-        div
+      .when_none(&self.active_panel, |this| {
+        this
           .child(picker_input(&self.picker).text_size(px(18.)))
+          .when_some(self.fend_result.clone(), |this, result| {
+            this.child(
+              h_flex()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(rgba(0xFFFFFF12))
+                .gap_2()
+                .text_color(rgb(0x888888))
+                .child("=")
+                .child(
+                  div().text_color(rgb(0xFFFFFF)).child(result),
+                ),
+            )
+          })
           .child(picker_results(&self.picker))
       })
   }
