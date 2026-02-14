@@ -1800,8 +1800,7 @@ dependencies = [
 [[package]]
 name = "fend-core"
 version = "1.5.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f775cab5068a34b942b110dcb11f42c96d376b681c45e604884da6059cb9d2c"
+source = "git+https://github.com/happenslol/fend#b556e7015258a15050d417295b2fd7a23a194e0b"
 
 [[package]]
 name = "filedescriptor"
