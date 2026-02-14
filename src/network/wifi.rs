@@ -4,7 +4,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use futures::StreamExt;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, SharedString, Styled,
-  Subscription, Task, Window, actions, div, prelude::*, px, rgb, rgba,
+  Subscription, Task, Window, actions, div, prelude::*, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -555,10 +555,11 @@ impl Render for WifiPanel {
       .key_context(CONTEXT)
       .on_action(cx.listener(Self::refresh))
       .size_full()
-      .when(self.is_scanning, |this| {
-        this.child(div().child("Scanning..."))
-      })
-      .child(picker_input(&self.picker).show_back_button(true))
+      .child(
+        picker_input(&self.picker)
+          .show_back_button(true)
+          .is_loading(self.is_scanning),
+      )
       .child(picker_results(&self.picker))
   }
 }

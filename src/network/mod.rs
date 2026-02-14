@@ -5,7 +5,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use anyhow::Result;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, SharedString, Task, Window,
-  prelude::*, px, rgba,
+  prelude::*, rgba,
 };
 
 use crate::{

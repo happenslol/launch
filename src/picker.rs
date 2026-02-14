@@ -12,7 +12,7 @@ use gpui::{
   UniformListScrollHandle, Window, actions, div, prelude::*, rems, rgb, rgba, uniform_list,
 };
 
-use crate::icon::{Icon, IconName};
+use crate::icon::{Icon, IconName, Spinner};
 use crate::input::{
   input,
   state::{InputEvent, InputState},
@@ -345,6 +345,7 @@ pub fn picker_input<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerInpu
     picker: picker.clone(),
     style: StyleRefinement::default(),
     show_back_button: false,
+    is_loading: false,
     text_size: None,
   }
 }
@@ -354,12 +355,18 @@ pub struct PickerInput<D: PickerDelegate> {
   picker: Entity<Picker<D>>,
   style: StyleRefinement,
   show_back_button: bool,
+  is_loading: bool,
   text_size: Option<Pixels>,
 }
 
 impl<D: PickerDelegate> PickerInput<D> {
   pub fn show_back_button(mut self, show: bool) -> Self {
     self.show_back_button = show;
+    self
+  }
+
+  pub fn is_loading(mut self, loading: bool) -> Self {
+    self.is_loading = loading;
     self
   }
 
@@ -412,7 +419,10 @@ impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
                 .child(Icon::new(IconName::ArrowLeft).color(rgb(0xCCCCCC).into())),
             )
           })
-          .child(input(&search_input).flex_grow()),
+          .child(input(&search_input).flex_grow())
+          .when(self.is_loading, |this| {
+            this.child(Spinner::new().color(rgb(0x888888).into()))
+          }),
       )
   }
 }

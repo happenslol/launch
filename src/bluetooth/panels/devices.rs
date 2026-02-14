@@ -3,7 +3,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use futures::StreamExt;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled,
-  Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
+  Subscription, Task, Window, div, prelude::*, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -150,6 +150,7 @@ pub struct BluetoothDevicesPanel {
   bluez: Option<BlueZ>,
   adapter: Option<Adapter>,
   devices: Vec<BluetoothEntry>,
+  is_discovering: bool,
   _device_updates_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
@@ -187,6 +188,7 @@ impl BluetoothDevicesPanel {
       bluez: None,
       adapter: None,
       devices: Vec::new(),
+      is_discovering: false,
       _device_updates_task: None,
       _subscriptions: subscriptions,
     };
@@ -202,6 +204,9 @@ impl BluetoothDevicesPanel {
     let conn = conn.clone();
     let picker = self.picker.clone();
 
+    self.is_discovering = true;
+    cx.notify();
+
     cx.spawn_in(window, async move |this, cx| {
       let bluez = cx
         .background_spawn(async move { BlueZ::new(&conn).await })
@@ -209,7 +214,13 @@ impl BluetoothDevicesPanel {
 
       let bluez = match bluez {
         Ok(bluez) => bluez,
-        Err(_) => return Some(()),
+        Err(_) => {
+          let _ = this.update(cx, |this, cx| {
+            this.is_discovering = false;
+            cx.notify();
+          });
+          return Some(());
+        }
       };
 
       let adapter = match cx
@@ -222,6 +233,10 @@ impl BluetoothDevicesPanel {
         Ok(Some(adapter)) => adapter,
         _ => {
           error!("No Bluetooth adapter found");
+          let _ = this.update(cx, |this, cx| {
+            this.is_discovering = false;
+            cx.notify();
+          });
           return Some(());
         }
       };
@@ -245,6 +260,7 @@ impl BluetoothDevicesPanel {
         .update_in(cx, |this, window, cx| {
           this.bluez = Some(bluez.clone());
           this.adapter = Some(adapter.clone());
+          this.is_discovering = false;
 
           this.devices = devices
             .into_iter()
@@ -355,7 +371,11 @@ impl Render for BluetoothDevicesPanel {
     v_flex()
       .key_context(CONTEXT)
       .size_full()
-      .child(picker_input(&self.picker).show_back_button(true))
+      .child(
+        picker_input(&self.picker)
+          .show_back_button(true)
+          .is_loading(self.is_discovering),
+      )
       .child(picker_results(&self.picker))
   }
 }
