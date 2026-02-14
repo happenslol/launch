@@ -3,8 +3,9 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use futures::StreamExt;
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, SharedString, Styled,
-  Subscription, Task, Window, actions, div, prelude::*, rgb, rgba,
+  App, Context, Entity, FocusHandle, Focusable, IntoElement, InteractiveElement, KeyBinding,
+  ParentElement, SharedString, Styled, Subscription, Task, Window, actions, anchored, deferred,
+  div, prelude::*, px, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -17,14 +18,87 @@ use crate::{
     GlobalDbusConnection,
     networkmanager::{AccessPoint, NetworkManager, WirelessDevice},
   },
+  input::{input, state::InputState},
   matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, v_flex},
 };
 
-actions!(wifi, [Refresh]);
+actions!(wifi, [Refresh, DismissPasswordPopup]);
 
 const CONTEXT: &str = "wifi";
+const PASSWORD_POPUP_CONTEXT: &str = "wifi_password_popup";
+
+struct PasswordPopup {
+  input: Entity<InputState>,
+  focus_handle: FocusHandle,
+  _subscriptions: Vec<Subscription>,
+}
+
+impl PasswordPopup {
+  fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    cx.bind_keys([KeyBinding::new(
+      "escape",
+      DismissPasswordPopup,
+      Some(PASSWORD_POPUP_CONTEXT),
+    )]);
+
+    let input = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Password"));
+
+    let focus_handle = cx.focus_handle();
+
+    Self {
+      input,
+      focus_handle,
+      _subscriptions: Vec::new(),
+    }
+  }
+}
+
+impl Focusable for PasswordPopup {
+  fn focus_handle(&self, _cx: &App) -> FocusHandle {
+    self.focus_handle.clone()
+  }
+}
+
+impl Render for PasswordPopup {
+  fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    div()
+      .track_focus(&self.focus_handle)
+      .key_context(PASSWORD_POPUP_CONTEXT)
+      .on_action(cx.listener(|_, _: &DismissPasswordPopup, _, cx| {
+        cx.emit(DismissEvent);
+      }))
+      .on_mouse_down_out(cx.listener(|_, _, _, cx| {
+        cx.emit(DismissEvent);
+      }))
+      .w(px(300.))
+      .p_3()
+      .bg(rgb(0x1E1E2E))
+      .border_1()
+      .border_color(rgba(0xFFFFFF22))
+      .rounded_md()
+      .shadow_lg()
+      .child(
+        v_flex()
+          .gap_2()
+          .child(div().text_sm().child("Enter password"))
+          .child(
+            input(&self.input)
+              .w_full()
+              .px_2()
+              .py_1()
+              .bg(rgb(0x111122))
+              .rounded_sm()
+              .border_1()
+              .border_color(rgba(0xFFFFFF22)),
+          ),
+      )
+  }
+}
+
+struct DismissEvent;
+impl gpui::EventEmitter<DismissEvent> for PasswordPopup {}
 
 #[derive(Clone)]
 pub struct WifiEntry {
@@ -40,6 +114,7 @@ pub struct WifiEntryInner {
   pub is_connected: bool,
   pub is_known: bool,
   pub connection_path: Option<OwnedObjectPath>,
+  pub password_popup: Option<Entity<PasswordPopup>>,
   _listeners: Vec<Task<()>>,
 }
 
@@ -82,6 +157,7 @@ impl WifiEntryInner {
       is_connected,
       is_known,
       connection_path,
+      password_popup: None,
       _listeners: listeners,
     }
   }
@@ -177,19 +253,7 @@ impl WifiPanel {
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
         if let PickerEvent::Picked(wifi_entry) = ev {
-          let entry = wifi_entry.entry.read(cx);
-          let access_point = entry.access_point.clone();
-          let is_connected = entry.is_connected;
-          let is_known = entry.is_known;
-          let connection_path = entry.connection_path.clone();
-          this.handle_entry_picked(
-            access_point,
-            is_connected,
-            is_known,
-            connection_path,
-            window,
-            cx,
-          );
+          this.show_password_popup(&wifi_entry.entry, window, cx);
         }
       }),
       cx.observe_global_in::<GlobalDbusConnection>(window, |this, window, cx| {
@@ -494,6 +558,35 @@ impl WifiPanel {
     .detach();
   }
 
+  fn show_password_popup(
+    &mut self,
+    entry: &Entity<WifiEntryInner>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let popup = cx.new(|cx| PasswordPopup::new(window, cx));
+
+    let search_input = self.picker.read(cx).search_input.clone();
+    let entry_handle = entry.clone();
+    cx.subscribe_in(&popup, window, move |_this, _, _: &DismissEvent, window, cx| {
+      entry_handle.update(cx, |entry, cx| {
+        entry.password_popup = None;
+        cx.notify();
+      });
+      cx.focus_view(&search_input, window);
+    })
+    .detach();
+
+    let input_focus = popup.read(cx).input.read(cx).focus_handle.clone();
+
+    entry.update(cx, |entry, cx| {
+      entry.password_popup = Some(popup);
+      cx.notify();
+    });
+
+    window.focus(&input_focus);
+  }
+
   fn handle_entry_picked(
     &mut self,
     access_point: AccessPoint,
@@ -582,6 +675,7 @@ impl PickerDelegate for WifiDelegate {
   ) -> impl IntoElement {
     let entry = &item.entry.read(cx);
     let ap = &entry.access_point;
+    let password_popup = entry.password_popup.clone();
 
     let mut status_text = String::new();
     if entry.is_connected {
@@ -612,6 +706,16 @@ impl PickerDelegate for WifiDelegate {
           .text_color(rgb(0x888888))
           .child(info_text),
       )
+      .when_some(password_popup, |this, popup| {
+        this.child(
+          deferred(
+            anchored()
+              .snap_to_window_with_margin(px(8.))
+              .child(div().occlude().child(popup)),
+          )
+          .with_priority(1),
+        )
+      })
   }
 
   fn update_matches(
