@@ -9,13 +9,12 @@ use std::{
 
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
-  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, Resource,
-  SharedString, Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions,
-  div, img,
+  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString,
+  Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
-  px, rgb, rgba,
+  px, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -26,6 +25,7 @@ use tracing::error;
 use crate::{
   audio, bluetooth,
   db::DB,
+  icon::{Icon, IconName},
   matcher::MatcherPool,
   network,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
@@ -255,7 +255,7 @@ pub enum RootItem {
   },
   Panel {
     id: String,
-    icon: Option<Resource>,
+    icon: IconName,
     name: SharedString,
     terms: Vec<String>,
     view: Arc<PanelView>,
@@ -290,6 +290,8 @@ impl PickerDelegate for RootDelegate {
   ) -> impl IntoElement {
     let icon_cache = self.icon_cache.read(cx);
 
+    let icon_size = rems(1.125);
+
     h_flex()
       .w_full()
       .px_2()
@@ -297,23 +299,22 @@ impl PickerDelegate for RootDelegate {
       .rounded_md()
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .justify_between()
-      .child(h_flex().gap_2().map(|this| {
+      .child(h_flex().gap_3().items_center().map(|this| {
         match item {
           RootItem::App { entry, name } => {
             let icon = entry.icon().and_then(|icon| icon_cache.get(icon));
 
             this
               .when_some(icon, |this, icon| {
-                this.child(img(ImageSource::Resource(icon.clone())).size_8())
+                this.child(img(ImageSource::Resource(icon.clone())).size(icon_size))
               })
-              .when_none(&icon, |this| this.child(div().size_8()))
+              .when_none(&icon, |this| {
+                this.child(Icon::new(IconName::AppWindow).custom_size(icon_size))
+              })
               .child(name.clone())
           }
           RootItem::Panel { name, icon, .. } => this
-            .when_some(icon.as_ref(), |this, icon| {
-              this.child(img(ImageSource::Resource(icon.clone())).size_8())
-            })
-            .when_none(icon, |this| this.child(div().size_8()))
+            .child(Icon::new(*icon).custom_size(icon_size))
             .child(name.clone()),
         }
       }))

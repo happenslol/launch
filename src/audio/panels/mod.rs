@@ -11,20 +11,20 @@ pub use sinks::VolumeBar;
 use sources::AudioSourcesPanel;
 use streams::AudioStreamsPanel;
 
-use crate::launcher::RootItem;
+use crate::{icon::IconName, launcher::RootItem};
 
 pub fn get_items() -> Vec<RootItem> {
   vec![
     RootItem::Panel {
       id: "sinks".into(),
-      icon: None,
+      icon: IconName::Volume,
       name: "Volume".into(),
       terms: vec!["sinks".into(), "audio".into(), "volume".into()],
       view: Arc::new(|window, cx| cx.new(|cx| AudioSinksPanel::new(window, cx)).into()),
     },
     RootItem::Panel {
       id: "sources".into(),
-      icon: None,
+      icon: IconName::Microphone,
       name: "Microphone".into(),
       terms: vec![
         "sources".into(),
@@ -36,7 +36,7 @@ pub fn get_items() -> Vec<RootItem> {
     },
     RootItem::Panel {
       id: "streams".into(),
-      icon: None,
+      icon: IconName::Headphones,
       name: "Playback Streams".into(),
       terms: vec!["streams".into(), "playback".into(), "applications".into()],
       view: Arc::new(|window, cx| cx.new(|cx| AudioStreamsPanel::new(window, cx)).into()),

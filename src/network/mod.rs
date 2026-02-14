@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::{
+  icon::IconName,
   launcher::RootItem,
   picker::{Picker, PickerDelegate, picker_input, picker_results},
   util::{h_flex, v_flex},
@@ -19,13 +20,13 @@ pub fn get_items() -> Vec<RootItem> {
     RootItem::Panel {
       id: "networks".into(),
       name: "Networks".into(),
-      icon: None,
+      icon: IconName::Network,
       terms: vec!["net".into(), "network".into(), "ethernet".into()],
       view: Arc::new(|window, cx| cx.new(|cx| NetworkPanel::new(window, cx)).into()),
     },
     RootItem::Panel {
       id: "wifi".into(),
-      icon: None,
+      icon: IconName::Wifi,
       name: "Wifi".into(),
       terms: vec!["wifi".into()],
       view: Arc::new(|window, cx| cx.new(|cx| wifi::WifiPanel::new(window, cx)).into()),

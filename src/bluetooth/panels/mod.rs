@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 
-use crate::launcher::RootItem;
+use crate::{icon::IconName, launcher::RootItem};
 
 pub fn get_items() -> Vec<RootItem> {
   vec![RootItem::Panel {
     id: "bluetooth".into(),
-    icon: None,
+    icon: IconName::Bluetooth,
     name: "Bluetooth".into(),
     terms: vec!["bluetooth".into(), "bt".into(), "devices".into()],
     view: Arc::new(|window, cx| cx.new(|cx| BluetoothDevicesPanel::new(window, cx)).into()),
