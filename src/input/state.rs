@@ -12,6 +12,9 @@ use std::ops::Range;
 use std::rc::Rc;
 use unicode_segmentation::*;
 
+pub const MASK_CHAR: &str = "•";
+pub const MASK_CHAR_LEN: usize = MASK_CHAR.len();
+
 use crate::input::{
   blink_cursor::BlinkCursor,
   change::Change,
@@ -1160,15 +1163,14 @@ impl InputState {
       index += line_layout.len() + 1;
     }
 
-    let index = if index > self.text.len() {
-      self.text.len()
-    } else {
-      index
-    };
-
     if self.masked {
-      // When is masked, the index is char index, need convert to byte index.
-      self.text.char_index_to_offset(index)
+      // index is a byte offset into the masked display text (MASK_CHAR per char).
+      // Convert to a char index, then to a byte offset in the original text.
+      let char_count = self.text.offset_to_char_index(self.text.len());
+      let char_index = (index / MASK_CHAR_LEN).min(char_count);
+      self.text.char_index_to_offset(char_index)
+    } else if index > self.text.len() {
+      self.text.len()
     } else {
       index
     }

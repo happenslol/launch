@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 use crate::input::{
   blink_cursor::CURSOR_WIDTH,
   rope_ext::RopeExt as _,
-  state::{InputState, LastLayout},
+  state::{InputState, LastLayout, MASK_CHAR, MASK_CHAR_LEN},
   text_wrapper::LineLayout,
 };
 
@@ -81,10 +81,9 @@ impl TextElement {
 
     let mut cursor = state.cursor();
     if state.masked {
-      // Because masked use `*`, 1 char with 1 byte.
-      selected_range.start = state.text.offset_to_char_index(selected_range.start);
-      selected_range.end = state.text.offset_to_char_index(selected_range.end);
-      cursor = state.text.offset_to_char_index(cursor);
+      selected_range.start = state.text.offset_to_char_index(selected_range.start) * MASK_CHAR_LEN;
+      selected_range.end = state.text.offset_to_char_index(selected_range.end) * MASK_CHAR_LEN;
+      cursor = state.text.offset_to_char_index(cursor) * MASK_CHAR_LEN;
     }
 
     let mut current_row = None;
@@ -401,9 +400,8 @@ impl TextElement {
     }
 
     if state.masked {
-      // Because masked use `*`, 1 char with 1 byte.
-      selected_range.start = state.text.offset_to_char_index(selected_range.start);
-      selected_range.end = state.text.offset_to_char_index(selected_range.end);
+      selected_range.start = state.text.offset_to_char_index(selected_range.start) * MASK_CHAR_LEN;
+      selected_range.end = state.text.offset_to_char_index(selected_range.end) * MASK_CHAR_LEN;
     }
 
     let (start_ix, end_ix) = if selected_range.start < selected_range.end {
@@ -633,8 +631,13 @@ impl Element for TextElement {
     let placeholder_color = rgb(0x555555);
     let foreground = rgb(0xFFFFFF);
 
+    let masked_text;
     let (display_text, text_color) = if is_empty {
       (&Rope::from(placeholder.as_str()), placeholder_color)
+    } else if state.masked {
+      let char_count = text.offset_to_char_index(text.len());
+      masked_text = Rope::from(MASK_CHAR.repeat(char_count).as_str());
+      (&masked_text, foreground)
     } else {
       (&text, foreground)
     };
@@ -645,6 +648,14 @@ impl Element for TextElement {
       Some(bounds.size.width - RIGHT_MARGIN)
     } else {
       None
+    };
+
+    let (visible_start_offset, visible_end_offset) = if state.masked {
+      let start = text.offset_to_char_index(visible_start_offset) * MASK_CHAR_LEN;
+      let end = text.offset_to_char_index(visible_end_offset) * MASK_CHAR_LEN;
+      (start, end)
+    } else {
+      (visible_start_offset, visible_end_offset)
     };
 
     let mut last_layout = LastLayout {
@@ -822,15 +833,7 @@ impl Element for TextElement {
 
     let invisible_top_padding = prepaint.last_layout.visible_top;
 
-    let mut mask_offset_y = px(0.);
-    if self.state.read(cx).masked {
-      // Move down offset for vertical centering the *****
-      if cfg!(target_os = "macos") {
-        mask_offset_y = px(3.);
-      } else {
-        mask_offset_y = px(2.5);
-      }
-    }
+    let mask_offset_y = px(0.);
 
     let selection_color = rgb(0x007ACC);
     let caret_color = rgb(0xFFFFFF);

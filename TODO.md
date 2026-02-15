@@ -3,6 +3,6 @@
 - [x] icons
 - [x] back button
 - [x] spinner in bluetooth and wifi
-- [ ] fend calculations
+- [x] fend calculations
 - [ ] clipboard stuff
 - [ ] dropdown menu
