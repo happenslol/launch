@@ -24,7 +24,7 @@ use crate::{
   },
   icon::{Icon, IconName},
   matcher::MatcherPool,
-  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
+  picker::{Category, Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, v_flex},
 };
 
@@ -1023,6 +1023,13 @@ impl PickerDelegate for WifiDelegate {
         std::cmp::Reverse(entry.access_point.strength),
       )
     });
+  }
+
+  fn categories(&self) -> Option<Vec<Category<Self::ListItem>>> {
+    Some(vec![
+      Category::new("Known Networks", |entry: &WifiEntry| entry.is_known),
+      Category::new("Available Networks", |entry: &WifiEntry| !entry.is_known),
+    ])
   }
 
   fn render_list_item(

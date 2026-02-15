@@ -7,9 +7,10 @@ use std::{
 };
 
 use gpui::{
-  Action, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-  KeyBinding, Pixels, ScrollStrategy, SharedString, StyleRefinement, Subscription, Task,
-  UniformListScrollHandle, Window, actions, div, prelude::*, rems, rgb, rgba, uniform_list,
+  Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
+  IntoElement, KeyBinding, ListAlignment, ListState, Pixels, ScrollStrategy, SharedString,
+  StyleRefinement, Subscription, Task, UniformListScrollHandle, Window, actions, div, list,
+  prelude::*, px, rems, rgb, rgba, uniform_list,
 };
 
 use crate::icon::{Icon, IconName, Spinner};
@@ -20,6 +21,30 @@ use crate::input::{
 use crate::launcher::GoBack;
 
 actions!(picker, [SelectNext, SelectPrev]);
+
+pub struct Category<T> {
+  pub name: SharedString,
+  pub filter: Box<dyn Fn(&T) -> bool>,
+}
+
+impl<T> Category<T> {
+  pub fn new(name: impl Into<SharedString>, filter: impl Fn(&T) -> bool + 'static) -> Self {
+    Self {
+      name: name.into(),
+      filter: Box::new(filter),
+    }
+  }
+}
+
+enum VisualEntry {
+  Header(SharedString),
+  Item(usize), // index into matches
+}
+
+struct SelectableItem {
+  match_index: usize,
+  list_index: usize, // index in the flat visual_entries list (for scroll_to_reveal_item)
+}
 
 pub trait PickerDelegate: Sized + 'static {
   type ListItem: Clone;
@@ -46,6 +71,10 @@ pub trait PickerDelegate: Sized + 'static {
     // Default implementation: sort by score descending
     matches.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
   }
+
+  fn categories(&self) -> Option<Vec<Category<Self::ListItem>>> {
+    None
+  }
 }
 
 pub struct Picker<D: PickerDelegate> {
@@ -65,6 +94,10 @@ pub struct Picker<D: PickerDelegate> {
   next_search_id: usize,
   search_task: Option<Task<()>>,
   cancel_flag: Arc<AtomicBool>,
+
+  visual_entries: Option<Vec<VisualEntry>>,
+  selectable_items: Option<Vec<SelectableItem>>,
+  category_list_state: ListState,
 }
 
 pub enum PickerEvent<D: PickerDelegate> {
@@ -106,6 +139,10 @@ impl<D: PickerDelegate> Picker<D> {
       next_search_id: 0,
       search_task: None,
       cancel_flag: Arc::new(AtomicBool::new(false)),
+
+      visual_entries: None,
+      selectable_items: None,
+      category_list_state: ListState::new(0, ListAlignment::Top, px(1000.)),
     };
 
     this.subscriptions.push(cx.subscribe_in(
@@ -156,14 +193,34 @@ impl<D: PickerDelegate> Picker<D> {
     });
   }
 
+  fn resolve_item_index(&self, selected_index: usize) -> Option<usize> {
+    if let Some(selectable_items) = &self.selectable_items {
+      let match_index = selectable_items.get(selected_index)?.match_index;
+      self.matches.as_ref().map(|matches| matches[match_index].0)
+    } else {
+      self
+        .matches
+        .as_ref()
+        .map_or(Some(selected_index), |matches| {
+          matches.get(selected_index).map(|(ix, _)| *ix)
+        })
+    }
+  }
+
+  fn visible_item_count(&self) -> usize {
+    if let Some(selectable_items) = &self.selectable_items {
+      selectable_items.len()
+    } else {
+      self
+        .matches
+        .as_ref()
+        .map_or(self.items.len(), |matches| matches.len())
+    }
+  }
+
   pub fn get_selected_item(&self) -> Option<&D::ListItem> {
     let selected_index = self.selected_index?;
-
-    let resolved_ix = self
-      .matches
-      .as_ref()
-      .map_or(selected_index, |matches| matches[selected_index].0);
-
+    let resolved_ix = self.resolve_item_index(selected_index)?;
     self.items.get(resolved_ix)
   }
 
@@ -172,7 +229,9 @@ impl<D: PickerDelegate> Picker<D> {
       return;
     };
 
-    let resolved_ix = self.matches.as_ref().map_or(ix, |matches| matches[ix].0);
+    let Some(resolved_ix) = self.resolve_item_index(ix) else {
+      return;
+    };
     let Some(item) = self.items.get(resolved_ix) else {
       return;
     };
@@ -220,49 +279,104 @@ impl<D: PickerDelegate> Picker<D> {
     // Sort items using the delegate's sorting logic
     self.delegate.sort_items(cx, &self.items, &mut matches);
 
-    self.selected_index = if !matches.is_empty() {
-      Some(
-        self
-          .selected_index
-          .map(|ix| ix.min(matches.len() - 1))
-          .unwrap_or(0),
-      )
-    } else {
-      None
-    };
-
     self.search_id = Some(search_id);
     self.matches = Some(matches);
+
+    // Build visual entries if categories are defined
+    if let Some(categories) = self.delegate.categories() {
+      let matches = self.matches.as_ref().expect("matches just set above");
+      let mut visual_entries = Vec::new();
+      let mut selectable_items = Vec::new();
+
+      for category in &categories {
+        let mut category_items = Vec::new();
+
+        for (match_index, &(item_index, _score)) in matches.iter().enumerate() {
+          if let Some(item) = self.items.get(item_index) {
+            if (category.filter)(item) {
+              category_items.push(match_index);
+            }
+          }
+        }
+
+        if !category_items.is_empty() {
+          visual_entries.push(VisualEntry::Header(category.name.clone()));
+
+          for match_index in category_items {
+            let list_index = visual_entries.len();
+            visual_entries.push(VisualEntry::Item(match_index));
+            selectable_items.push(SelectableItem {
+              match_index,
+              list_index,
+            });
+          }
+        }
+      }
+
+      let selectable_count = selectable_items.len();
+      self.category_list_state.reset(visual_entries.len());
+      self.visual_entries = Some(visual_entries);
+      self.selectable_items = Some(selectable_items);
+
+      self.selected_index = if selectable_count > 0 {
+        Some(
+          self
+            .selected_index
+            .map(|ix| ix.min(selectable_count - 1))
+            .unwrap_or(0),
+        )
+      } else {
+        None
+      };
+    } else {
+      self.visual_entries = None;
+      self.selectable_items = None;
+
+      let match_count = self.matches.as_ref().map_or(self.items.len(), |m| m.len());
+      self.selected_index = if match_count > 0 {
+        Some(
+          self
+            .selected_index
+            .map(|ix| ix.min(match_count - 1))
+            .unwrap_or(0),
+        )
+      } else {
+        None
+      };
+    }
+
     cx.notify();
   }
 
   fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
-    let item_count = self
-      .matches
-      .as_ref()
-      .map_or(self.items.len(), |matches| matches.len());
+    let item_count = self.visible_item_count();
     if item_count == 0 {
       return;
     }
 
-    // Wrap around to first item
     match self.selected_index {
       Some(i) => self.selected_index = Some((i + 1) % item_count),
       None => self.selected_index = Some(0),
     }
 
-    self
-      .list_scroll_handle
-      .scroll_to_item(self.selected_index.unwrap(), ScrollStrategy::Bottom);
+    let ix = self.selected_index.expect("just set above");
+    if let Some(selectable_items) = &self.selectable_items {
+      if let Some(item) = selectable_items.get(ix) {
+        self
+          .category_list_state
+          .scroll_to_reveal_item(item.list_index);
+      }
+    } else {
+      self
+        .list_scroll_handle
+        .scroll_to_item(ix, ScrollStrategy::Bottom);
+    }
 
     cx.notify();
   }
 
   fn select_prev(&mut self, _: &SelectPrev, _window: &mut Window, cx: &mut Context<Self>) {
-    let item_count = self
-      .matches
-      .as_ref()
-      .map_or(self.items.len(), |matches| matches.len());
+    let item_count = self.visible_item_count();
     if item_count == 0 {
       return;
     }
@@ -272,9 +386,18 @@ impl<D: PickerDelegate> Picker<D> {
       Some(i) => self.selected_index = Some(i - 1),
     }
 
-    self
-      .list_scroll_handle
-      .scroll_to_item(self.selected_index.unwrap(), ScrollStrategy::Top);
+    let ix = self.selected_index.expect("just set above");
+    if let Some(selectable_items) = &self.selectable_items {
+      if let Some(item) = selectable_items.get(ix) {
+        self
+          .category_list_state
+          .scroll_to_reveal_item(item.list_index);
+      }
+    } else {
+      self
+        .list_scroll_handle
+        .scroll_to_item(ix, ScrollStrategy::Top);
+    }
 
     cx.notify();
   }
@@ -310,8 +433,8 @@ impl<D: PickerDelegate> Focusable for Picker<D> {
   }
 }
 
-impl<D: PickerDelegate> Render for Picker<D> {
-  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl<D: PickerDelegate> Picker<D> {
+  fn render_flat(&mut self, cx: &mut Context<Self>) -> AnyElement {
     let count = self
       .matches
       .as_ref()
@@ -337,6 +460,57 @@ impl<D: PickerDelegate> Render for Picker<D> {
     .track_scroll(&self.list_scroll_handle)
     .flex_grow()
     .p_2()
+    .into_any_element()
+  }
+
+  fn render_categorized(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    list(
+      self.category_list_state.clone(),
+      cx.processor(|this, ix, window, cx| {
+        let visual_entries = this.visual_entries.as_ref().expect("categories are active");
+        match &visual_entries[ix] {
+          VisualEntry::Header(name) => div()
+            .px_4()
+            .when(ix == 0, |this| this.pt_2())
+            .when(ix > 0, |this| this.pt_4())
+            .pb_1()
+            .child(
+              div()
+                .text_xs()
+                .text_color(rgb(0x888888))
+                .child(name.clone()),
+            )
+            .into_any_element(),
+          VisualEntry::Item(match_index) => {
+            let item_index = this
+              .matches
+              .as_ref()
+              .map_or(*match_index, |m| m[*match_index].0);
+            let selected_list_ix = this
+              .selected_index
+              .and_then(|si| this.selectable_items.as_ref()?.get(si))
+              .map(|item| item.list_index);
+            let is_selected = selected_list_ix == Some(ix);
+            div()
+              .px_2()
+              .child(this.render_list_item(window, cx, item_index, is_selected))
+              .into_any_element()
+          }
+        }
+      }),
+    )
+    .flex_grow()
+    .into_any_element()
+  }
+}
+
+impl<D: PickerDelegate> Render for Picker<D> {
+  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    if self.visual_entries.is_some() {
+      self.render_categorized(cx)
+    } else {
+      self.render_flat(cx)
+    }
   }
 }
 
