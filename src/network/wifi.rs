@@ -301,7 +301,7 @@ impl WifiPanel {
           } else if access_point.security.is_secured() {
             this.show_password_popup(&wifi_entry.entry, &access_point, window, cx);
           } else {
-            this.connect_open(&wifi_entry.entry, access_point, cx);
+            this.connect_open(&wifi_entry.entry, access_point, window, cx);
           }
         }
       }),
@@ -677,7 +677,7 @@ impl WifiPanel {
             dismiss(window, cx);
           }
           PasswordPopupEvent::Submit(password) => {
-            this.connect_with_password(&entry_handle, &access_point, password, cx);
+            this.connect_with_password(&entry_handle, &access_point, password, window, cx);
             dismiss(window, cx);
           }
         }
@@ -875,6 +875,7 @@ impl WifiPanel {
     &mut self,
     entry: &Entity<WifiEntryInner>,
     access_point: AccessPoint,
+    window: &mut Window,
     cx: &mut Context<Self>,
   ) {
     let Some(nm) = self.network_manager.clone() else {
@@ -891,10 +892,12 @@ impl WifiPanel {
       cx.notify();
     });
 
-    cx.spawn({
+    let picker = self.picker.clone();
+
+    cx.spawn_in(window, {
       let entry = entry.clone();
       let ssid = access_point.ssid.clone();
-      async move |_this, cx| {
+      async move |this, cx| {
         let ap_path = access_point.path.clone();
         let device_path = device.device_path().clone();
         let result = cx
@@ -908,10 +911,22 @@ impl WifiPanel {
         match result {
           Ok(()) => {
             tracing::info!(%ssid, "Connected to open wifi network");
-            let _ = entry.update(cx, |entry, cx| {
-              entry.connection_state = ConnectionState::Idle;
-              entry.is_connected = true;
-              cx.notify();
+            let _ = this.update_in(cx, |this, window, cx| {
+              entry.update(cx, |inner, cx| {
+                inner.connection_state = ConnectionState::Idle;
+                inner.is_connected = true;
+                inner.is_known = true;
+                cx.notify();
+              });
+              let entry_id = entry.entity_id();
+              for wifi_entry in &mut this.entries {
+                if wifi_entry.entry.entity_id() == entry_id {
+                  wifi_entry.is_known = true;
+                }
+              }
+              picker.update(cx, |picker, cx| {
+                picker.set_items(this.entries.clone(), window, cx);
+              });
             });
           }
           Err(error) => {
@@ -932,6 +947,7 @@ impl WifiPanel {
     entry: &Entity<WifiEntryInner>,
     access_point: &AccessPoint,
     password: &str,
+    window: &mut Window,
     cx: &mut Context<Self>,
   ) {
     let Some(nm) = self.network_manager.clone() else {
@@ -951,10 +967,11 @@ impl WifiPanel {
     let ap_path = access_point.path.clone();
     let ssid = access_point.ssid.clone();
     let password = password.to_string();
+    let picker = self.picker.clone();
 
-    cx.spawn({
+    cx.spawn_in(window, {
       let entry = entry.clone();
-      async move |_this, cx| {
+      async move |this, cx| {
         let device_path = device.device_path().clone();
         let result = cx
           .background_spawn(async move {
@@ -967,10 +984,22 @@ impl WifiPanel {
         match result {
           Ok(()) => {
             tracing::info!(%ssid, "Connected to secured wifi network");
-            let _ = entry.update(cx, |entry, cx| {
-              entry.connection_state = ConnectionState::Idle;
-              entry.is_connected = true;
-              cx.notify();
+            let _ = this.update_in(cx, |this, window, cx| {
+              entry.update(cx, |inner, cx| {
+                inner.connection_state = ConnectionState::Idle;
+                inner.is_connected = true;
+                inner.is_known = true;
+                cx.notify();
+              });
+              let entry_id = entry.entity_id();
+              for wifi_entry in &mut this.entries {
+                if wifi_entry.entry.entity_id() == entry_id {
+                  wifi_entry.is_known = true;
+                }
+              }
+              picker.update(cx, |picker, cx| {
+                picker.set_items(this.entries.clone(), window, cx);
+              });
             });
           }
           Err(error) => {
