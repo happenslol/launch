@@ -1002,6 +1002,12 @@ impl Focusable for WifiPanel {
 impl Render for WifiPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let password_popup = self.password_popup.as_ref().map(|(popup, _)| popup.clone());
+    let dismiss_backdrop = cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+      this.password_popup = None;
+      let search_input = this.picker.read(cx).search_input.clone();
+      cx.focus_view(&search_input, window);
+      cx.notify();
+    });
 
     v_flex()
       .key_context(CONTEXT)
@@ -1027,12 +1033,15 @@ impl Render for WifiPanel {
             .justify_center()
             .child(
               div()
+                .id("password-backdrop")
+                .occlude()
                 .absolute()
                 .top_0()
                 .left_0()
                 .size_full()
                 .rounded_xl()
-                .bg(rgba(0x00000088)),
+                .bg(rgba(0x00000088))
+                .on_click(dismiss_backdrop),
             )
             .child(div().occlude().child(popup)),
         )
