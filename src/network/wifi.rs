@@ -18,7 +18,10 @@ use crate::{
     GlobalDbusConnection,
     networkmanager::{AccessPoint, NetworkManager, WirelessDevice},
   },
-  input::{input, state::InputState},
+  input::{
+    input,
+    state::{InputEvent, InputState},
+  },
   matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, v_flex},
@@ -35,6 +38,11 @@ struct PasswordPopup {
   _subscriptions: Vec<Subscription>,
 }
 
+enum PasswordPopupEvent {
+  Dismiss,
+  Submit(SharedString),
+}
+
 impl PasswordPopup {
   fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     cx.bind_keys([KeyBinding::new(
@@ -45,12 +53,23 @@ impl PasswordPopup {
 
     let input = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Password"));
 
+    let subscriptions = vec![cx.subscribe_in(
+      &input,
+      window,
+      |this, _input, event, _window, cx| {
+        if let InputEvent::PressEnter { .. } = *event {
+          let password = this.input.read(cx).value();
+          cx.emit(PasswordPopupEvent::Submit(password));
+        }
+      },
+    )];
+
     let focus_handle = cx.focus_handle();
 
     Self {
       input,
       focus_handle,
-      _subscriptions: Vec::new(),
+      _subscriptions: subscriptions,
     }
   }
 }
@@ -67,10 +86,10 @@ impl Render for PasswordPopup {
       .track_focus(&self.focus_handle)
       .key_context(PASSWORD_POPUP_CONTEXT)
       .on_action(cx.listener(|_, _: &DismissPasswordPopup, _, cx| {
-        cx.emit(DismissEvent);
+        cx.emit(PasswordPopupEvent::Dismiss);
       }))
       .on_mouse_down_out(cx.listener(|_, _, _, cx| {
-        cx.emit(DismissEvent);
+        cx.emit(PasswordPopupEvent::Dismiss);
       }))
       .w(px(300.))
       .p_3()
@@ -97,8 +116,7 @@ impl Render for PasswordPopup {
   }
 }
 
-struct DismissEvent;
-impl gpui::EventEmitter<DismissEvent> for PasswordPopup {}
+impl gpui::EventEmitter<PasswordPopupEvent> for PasswordPopup {}
 
 #[derive(Clone)]
 pub struct WifiEntry {
@@ -109,12 +127,20 @@ pub struct WifiEntry {
   alternate_paths: HashSet<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionState {
+  Idle,
+  Connecting,
+  Failed,
+}
+
 pub struct WifiEntryInner {
   access_point: AccessPoint,
   pub is_connected: bool,
   pub is_known: bool,
   pub connection_path: Option<OwnedObjectPath>,
-  pub password_popup: Option<Entity<PasswordPopup>>,
+  connection_state: ConnectionState,
+  password_popup: Option<Entity<PasswordPopup>>,
   _listeners: Vec<Task<()>>,
 }
 
@@ -157,6 +183,7 @@ impl WifiEntryInner {
       is_connected,
       is_known,
       connection_path,
+      connection_state: ConnectionState::Idle,
       password_popup: None,
       _listeners: listeners,
     }
@@ -253,7 +280,25 @@ impl WifiPanel {
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
         if let PickerEvent::Picked(wifi_entry) = ev {
-          this.show_password_popup(&wifi_entry.entry, window, cx);
+          let (access_point, is_connected, is_known, connection_path) = {
+            let entry = wifi_entry.entry.read(cx);
+            (
+              entry.access_point.clone(),
+              entry.is_connected,
+              entry.is_known,
+              entry.connection_path.clone(),
+            )
+          };
+
+          if is_connected {
+            this.disconnect(&wifi_entry.entry, window, cx);
+          } else if is_known {
+            this.connect_known(&wifi_entry.entry, access_point, connection_path, cx);
+          } else if access_point.security.is_secured() {
+            this.show_password_popup(&wifi_entry.entry, &access_point, window, cx);
+          } else {
+            this.connect_open(&wifi_entry.entry, access_point, cx);
+          }
         }
       }),
       cx.observe_global_in::<GlobalDbusConnection>(window, |this, window, cx| {
@@ -285,6 +330,7 @@ impl WifiPanel {
   }
 
   fn initialize(&mut self, window: &mut Window, cx: &mut Context<Self>, conn: &zbus::Connection) {
+    tracing::info!("Initializing wifi panel");
     let conn = conn.clone();
     let picker = self.picker.clone();
 
@@ -298,7 +344,10 @@ impl WifiPanel {
 
       let nm = match nm {
         Ok(nm) => nm,
-        Err(_) => return Some(()),
+        Err(error) => {
+          tracing::error!(%error, "Failed to connect to NetworkManager");
+          return Some(());
+        }
       };
 
       let devices = cx
@@ -380,6 +429,8 @@ impl WifiPanel {
         })
         .ok()?;
 
+      tracing::info!("Starting wifi scan");
+
       this
         .update_in(cx, |this, _window, cx| {
           this.is_scanning = true;
@@ -412,6 +463,11 @@ impl WifiPanel {
         .flatten();
 
       let active_hw_address = active_ap.as_ref().map(|ap| ap.hw_address.clone());
+
+      tracing::info!(
+        count = access_points.len(),
+        "Wifi scan complete"
+      );
 
       this
         .update_in(cx, |this, window, cx| {
@@ -561,6 +617,7 @@ impl WifiPanel {
   fn show_password_popup(
     &mut self,
     entry: &Entity<WifiEntryInner>,
+    access_point: &AccessPoint,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
@@ -568,13 +625,32 @@ impl WifiPanel {
 
     let search_input = self.picker.read(cx).search_input.clone();
     let entry_handle = entry.clone();
-    cx.subscribe_in(&popup, window, move |_this, _, _: &DismissEvent, window, cx| {
-      entry_handle.update(cx, |entry, cx| {
-        entry.password_popup = None;
-        cx.notify();
-      });
-      cx.focus_view(&search_input, window);
-    })
+    let access_point = access_point.clone();
+
+    cx.subscribe_in(
+      &popup,
+      window,
+      move |this, _, event: &PasswordPopupEvent, window, cx| {
+        let dismiss = |window: &mut Window, cx: &mut Context<WifiPanel>| {
+          entry_handle.update(cx, |entry, cx| {
+            entry.password_popup = None;
+            cx.notify();
+          });
+          cx.focus_view(&search_input, window);
+        };
+
+        match event {
+          PasswordPopupEvent::Dismiss => {
+            tracing::debug!(ssid = %access_point.ssid, "Password popup dismissed");
+            dismiss(window, cx);
+          }
+          PasswordPopupEvent::Submit(password) => {
+            this.connect_with_password(&entry_handle, &access_point, password, cx);
+            dismiss(window, cx);
+          }
+        }
+      },
+    )
     .detach();
 
     let input_focus = popup.read(cx).input.read(cx).focus_handle.clone();
@@ -587,13 +663,10 @@ impl WifiPanel {
     window.focus(&input_focus);
   }
 
-  fn handle_entry_picked(
+  fn disconnect(
     &mut self,
-    access_point: AccessPoint,
-    is_connected: bool,
-    is_known: bool,
-    connection_path: Option<OwnedObjectPath>,
-    _window: &mut Window,
+    entry: &Entity<WifiEntryInner>,
+    window: &mut Window,
     cx: &mut Context<Self>,
   ) {
     let Some(nm) = self.network_manager.clone() else {
@@ -603,36 +676,216 @@ impl WifiPanel {
       return;
     };
 
-    if is_connected {
-      cx.background_spawn(async move {
-        let active_conn = device.get_active_connection_path().await?;
-        if let Some(active_conn) = active_conn {
-          nm.deactivate_connection(&active_conn).await?;
+    let ssid = entry.read(cx).access_point.ssid.clone();
+    tracing::info!(%ssid, "Disconnecting from wifi network");
+
+    cx.spawn_in(window, {
+      let entry = entry.clone();
+      async move |_this, cx| {
+        let result = cx
+          .background_spawn(async move {
+            let active_conn = device.get_active_connection_path().await?;
+            if let Some(active_conn) = active_conn {
+              nm.deactivate_connection(&active_conn).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+          })
+          .await;
+
+        match result {
+          Ok(()) => {
+            tracing::info!(%ssid, "Disconnected from wifi network");
+            let _ = entry.update(cx, |entry, cx| {
+              entry.is_connected = false;
+              cx.notify();
+            });
+          }
+          Err(error) => {
+            tracing::error!(%ssid, %error, "Failed to disconnect from wifi network");
+            let _ = entry.update(cx, |entry, cx| {
+              entry.connection_state = ConnectionState::Failed;
+              cx.notify();
+            });
+          }
         }
-        Ok::<(), anyhow::Error>(())
-      })
-      .detach_and_log_err(cx);
-    } else if is_known {
-      if let Some(conn_path) = connection_path {
+      }
+    })
+    .detach();
+  }
+
+  fn connect_known(
+    &mut self,
+    entry: &Entity<WifiEntryInner>,
+    access_point: AccessPoint,
+    connection_path: Option<OwnedObjectPath>,
+    cx: &mut Context<Self>,
+  ) {
+    let Some(nm) = self.network_manager.clone() else {
+      return;
+    };
+    let Some(device) = self.device.clone() else {
+      return;
+    };
+    let Some(conn_path) = connection_path else {
+      return;
+    };
+
+    tracing::info!(ssid = %access_point.ssid, "Connecting to known wifi network");
+
+    entry.update(cx, |entry, cx| {
+      entry.connection_state = ConnectionState::Connecting;
+      cx.notify();
+    });
+
+    cx.spawn({
+      let entry = entry.clone();
+      let ssid = access_point.ssid.clone();
+      async move |_this, cx| {
         let ap_path = access_point.path.clone();
         let device_path = device.device_path().clone();
-        cx.background_spawn(async move {
-          nm.activate_connection(&conn_path, &device_path, &ap_path)
-            .await?;
-          Ok::<(), anyhow::Error>(())
-        })
-        .detach_and_log_err(cx);
+        let result = cx
+          .background_spawn(async move {
+            nm.activate_connection(&conn_path, &device_path, &ap_path)
+              .await?;
+            Ok::<(), anyhow::Error>(())
+          })
+          .await;
+
+        match result {
+          Ok(()) => {
+            tracing::info!(%ssid, "Connected to known wifi network");
+            let _ = entry.update(cx, |entry, cx| {
+              entry.connection_state = ConnectionState::Idle;
+              entry.is_connected = true;
+              cx.notify();
+            });
+          }
+          Err(error) => {
+            tracing::error!(%ssid, %error, "Failed to connect to known wifi network");
+            let _ = entry.update(cx, |entry, cx| {
+              entry.connection_state = ConnectionState::Failed;
+              cx.notify();
+            });
+          }
+        }
       }
-    } else if !access_point.security.is_secured() {
-      let ap_path = access_point.path.clone();
-      let device_path = device.device_path().clone();
-      cx.background_spawn(async move {
-        nm.add_and_activate_connection(&device_path, &ap_path)
-          .await?;
-        Ok::<(), anyhow::Error>(())
-      })
-      .detach_and_log_err(cx);
-    }
+    })
+    .detach();
+  }
+
+  fn connect_open(
+    &mut self,
+    entry: &Entity<WifiEntryInner>,
+    access_point: AccessPoint,
+    cx: &mut Context<Self>,
+  ) {
+    let Some(nm) = self.network_manager.clone() else {
+      return;
+    };
+    let Some(device) = self.device.clone() else {
+      return;
+    };
+
+    tracing::info!(ssid = %access_point.ssid, "Connecting to open wifi network");
+
+    entry.update(cx, |entry, cx| {
+      entry.connection_state = ConnectionState::Connecting;
+      cx.notify();
+    });
+
+    cx.spawn({
+      let entry = entry.clone();
+      let ssid = access_point.ssid.clone();
+      async move |_this, cx| {
+        let ap_path = access_point.path.clone();
+        let device_path = device.device_path().clone();
+        let result = cx
+          .background_spawn(async move {
+            nm.add_and_activate_connection(&device_path, &ap_path)
+              .await?;
+            Ok::<(), anyhow::Error>(())
+          })
+          .await;
+
+        match result {
+          Ok(()) => {
+            tracing::info!(%ssid, "Connected to open wifi network");
+            let _ = entry.update(cx, |entry, cx| {
+              entry.connection_state = ConnectionState::Idle;
+              entry.is_connected = true;
+              cx.notify();
+            });
+          }
+          Err(error) => {
+            tracing::error!(%ssid, %error, "Failed to connect to open wifi network");
+            let _ = entry.update(cx, |entry, cx| {
+              entry.connection_state = ConnectionState::Failed;
+              cx.notify();
+            });
+          }
+        }
+      }
+    })
+    .detach();
+  }
+
+  fn connect_with_password(
+    &mut self,
+    entry: &Entity<WifiEntryInner>,
+    access_point: &AccessPoint,
+    password: &str,
+    cx: &mut Context<Self>,
+  ) {
+    let Some(nm) = self.network_manager.clone() else {
+      return;
+    };
+    let Some(device) = self.device.clone() else {
+      return;
+    };
+
+    tracing::info!(ssid = %access_point.ssid, "Connecting to secured wifi network with password");
+
+    entry.update(cx, |entry, cx| {
+      entry.connection_state = ConnectionState::Connecting;
+      cx.notify();
+    });
+
+    let ap_path = access_point.path.clone();
+    let ssid = access_point.ssid.clone();
+    let password = password.to_string();
+
+    cx.spawn({
+      let entry = entry.clone();
+      async move |_this, cx| {
+        let device_path = device.device_path().clone();
+        let result = cx
+          .background_spawn(async move {
+            nm.add_and_activate_connection_with_password(&device_path, &ap_path, &password)
+              .await?;
+            Ok::<(), anyhow::Error>(())
+          })
+          .await;
+
+        match result {
+          Ok(()) => {
+            tracing::info!(%ssid, "Connected to secured wifi network");
+            let _ = entry.update(cx, |entry, cx| {
+              entry.connection_state = ConnectionState::Idle;
+              entry.is_connected = true;
+              cx.notify();
+            });
+          }
+          Err(error) => {
+            tracing::error!(%ssid, %error, "Failed to connect to secured wifi network");
+            let _ = entry.update(cx, |entry, cx| {
+              entry.connection_state = ConnectionState::Failed;
+              cx.notify();
+            });
+          }
+        }
+      }
+    })
+    .detach();
   }
 }
 
@@ -676,16 +929,24 @@ impl PickerDelegate for WifiDelegate {
     let entry = &item.entry.read(cx);
     let ap = &entry.access_point;
     let password_popup = entry.password_popup.clone();
+    let connection_state = entry.connection_state;
 
-    let mut status_text = String::new();
-    if entry.is_connected {
-      status_text.push_str("CONNECTED ");
-    } else if entry.is_known {
-      status_text.push_str("KNOWN ");
-    }
-    status_text.push_str(&ap.ssid);
+    let status = match connection_state {
+      ConnectionState::Connecting => Some("Connecting..."),
+      ConnectionState::Failed => Some("Connection failed"),
+      _ if entry.is_connected => Some("Connected"),
+      _ if entry.is_known => Some("Saved"),
+      _ => None,
+    };
 
     let info_text = format!("Signal: {} - {}", ap.strength, ap.security);
+    let ssid: SharedString = ap.ssid.clone();
+
+    let status_color = match connection_state {
+      ConnectionState::Connecting => rgb(0xCCAA33),
+      ConnectionState::Failed => rgb(0xCC4444),
+      _ => rgb(0x888888),
+    };
 
     v_flex()
       .w_full()
@@ -695,10 +956,21 @@ impl PickerDelegate for WifiDelegate {
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .child(
         div()
+          .flex()
+          .flex_row()
+          .items_center()
+          .gap_2()
           .w_full()
-          .text_ellipsis()
-          .overflow_x_hidden()
-          .child(status_text),
+          .child(div().text_ellipsis().overflow_x_hidden().child(ssid))
+          .when_some(status, |this, status| {
+            this.child(
+              div()
+                .text_sm()
+                .text_color(status_color)
+                .flex_shrink_0()
+                .child(status),
+            )
+          }),
       )
       .child(
         div()

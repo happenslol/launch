@@ -99,6 +99,32 @@ impl NetworkManager {
       .await
   }
 
+  pub async fn add_and_activate_connection_with_password(
+    &self,
+    device_path: &OwnedObjectPath,
+    ap_path: &OwnedObjectPath,
+    password: &str,
+  ) -> Result<(OwnedObjectPath, OwnedObjectPath)> {
+    let psk_value = zvariant::Value::from(password);
+    let key_mgmt_value = zvariant::Value::from("wpa-psk");
+
+    let mut security_settings: HashMap<&str, &zvariant::Value<'_>> = HashMap::new();
+    security_settings.insert("key-mgmt", &key_mgmt_value);
+    security_settings.insert("psk", &psk_value);
+
+    let mut connection: HashMap<&str, HashMap<&str, &zvariant::Value<'_>>> = HashMap::new();
+    connection.insert("802-11-wireless-security", security_settings);
+
+    self
+      .proxy
+      .add_and_activate_connection(
+        connection,
+        &ObjectPath::try_from(device_path.as_str())?,
+        &ObjectPath::try_from(ap_path.as_str())?,
+      )
+      .await
+  }
+
   pub async fn deactivate_connection(
     &self,
     active_connection_path: &OwnedObjectPath,
