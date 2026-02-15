@@ -20,6 +20,8 @@ pub fn init() {
       // about it
       .add_directive("usvg=error".parse().unwrap())
       .add_directive("resvg=error".parse().unwrap())
+      // Hide irrelevant warnings from vulkan
+      .add_directive("wgpu_hal::vulkan::instance=error".parse().unwrap())
       .add_directive(LevelFilter::WARN.into())
   });
 

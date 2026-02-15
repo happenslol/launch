@@ -220,7 +220,7 @@ impl Launcher {
       // Defer focusing the root picker so it happens after the panel is removed from the render tree
       let picker = self.picker.clone();
       window.defer(cx, move |window, cx| {
-        window.focus(&picker.read(cx).search_input.focus_handle(cx));
+        window.focus(&picker.read(cx).search_input.focus_handle(cx), cx);
       });
     }
   }

@@ -3,7 +3,7 @@ use std::{ops::Range, rc::Rc};
 use gpui::{
   App, Bounds, Corners, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, Hsla,
   IntoElement, LayoutId, MouseButton, MouseMoveEvent, Path, Pixels, Point, SharedString, Size,
-  Style, TextRun, UnderlineStyle, Window, fill, point, px, relative, rgb, size,
+  Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point, px, relative, rgb, size,
 };
 use ropey::Rope;
 use smallvec::SmallVec;
@@ -849,7 +849,7 @@ impl Element for TextElement {
     let mut offset_y = mask_offset_y + invisible_top_padding;
     for line in prepaint.last_layout.lines.iter() {
       let p = point(origin.x, origin.y + offset_y);
-      line.paint(p, line_height, window, cx);
+      line.paint(p, line_height, TextAlign::Left, None, window, cx);
       offset_y += line.size(line_height).height;
     }
 

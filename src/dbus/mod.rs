@@ -34,7 +34,7 @@ impl GlobalDbusConnection {
 
       cx.spawn(async move |cx| {
         let conn = open(cx, zbus::connection::Builder::system().unwrap()).await?;
-        cx.update_global::<Self, _>(move |this, _cx| this.system = Some(conn))?;
+        cx.update_global::<Self, _>(move |this, _cx| this.system = Some(conn));
         Ok::<(), Error>(())
       })
       .detach_and_log_err(cx);
@@ -55,7 +55,7 @@ impl GlobalDbusConnection {
 
       cx.spawn(async move |cx| {
         let conn = open(cx, zbus::connection::Builder::session().unwrap()).await?;
-        cx.update_global::<Self, _>(move |this, _cx| this.session = Some(conn))?;
+        cx.update_global::<Self, _>(move |this, _cx| this.session = Some(conn));
         Ok::<(), Error>(())
       })
       .detach_and_log_err(cx);

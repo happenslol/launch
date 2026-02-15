@@ -6,7 +6,6 @@
 mod assets;
 mod audio;
 mod bluetooth;
-mod clipboard;
 mod db;
 mod dbus;
 mod icon;
@@ -18,6 +17,7 @@ mod matcher;
 mod network;
 mod picker;
 mod util;
+mod wayland;
 mod xdg;
 
 use std::process;
@@ -35,7 +35,6 @@ use crate::{
   input::state::InputState,
   instance::{Message, Role},
   launcher::Launcher,
-  util::ResultExt,
 };
 
 #[derive(Debug, Parser)]
@@ -99,6 +98,7 @@ fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Re
     .with_assets(Assets)
     .with_quit_mode(mode)
     .run(move |cx| {
+      wayland::init(cx).unwrap();
       matcher::init(cx);
       dbus::init(cx);
       audio::init(cx);
@@ -117,8 +117,7 @@ fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Re
                   if cx.windows().is_empty() {
                     open_launcher_window(cx, panel, no_keyboard_capture);
                   }
-                })
-                .log_err();
+                });
               }
             }
           }

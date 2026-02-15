@@ -51,6 +51,10 @@ serde_repr = "0.1.20"
 zvariant = "5.8.0"
 deadpool = "0.12.3"
 rmp-serde = "1"
+wayland-client = "0.31.12"
+wayland-protocols-wlr = { version = "0.3.10", features = ["client"] }
+calloop = "0.14.4"
+calloop-wayland-source = "0.4.1"
 
 [dependencies.gpui]
 git = "https://github.com/zed-industries/zed"

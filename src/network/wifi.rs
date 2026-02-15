@@ -669,7 +669,7 @@ impl WifiPanel {
     self.password_popup = Some((popup, entry.clone()));
     cx.notify();
 
-    window.focus(&input_focus);
+    window.focus(&input_focus, cx);
   }
 
   fn disconnect(
