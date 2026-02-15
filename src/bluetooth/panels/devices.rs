@@ -374,7 +374,7 @@ impl Render for BluetoothDevicesPanel {
       .child(
         picker_input(&self.picker)
           .show_back_button(true)
-          .is_loading(self.is_discovering),
+          .loading(self.is_discovering),
       )
       .child(picker_results(&self.picker))
   }

@@ -292,10 +292,10 @@ impl<D: PickerDelegate> Picker<D> {
         let mut category_items = Vec::new();
 
         for (match_index, &(item_index, _score)) in matches.iter().enumerate() {
-          if let Some(item) = self.items.get(item_index) {
-            if (category.filter)(item) {
-              category_items.push(match_index);
-            }
+          if let Some(item) = self.items.get(item_index)
+            && (category.filter)(item)
+          {
+            category_items.push(match_index);
           }
         }
 
@@ -539,7 +539,7 @@ impl<D: PickerDelegate> PickerInput<D> {
     self
   }
 
-  pub fn is_loading(mut self, loading: bool) -> Self {
+  pub fn loading(mut self, loading: bool) -> Self {
     self.is_loading = loading;
     self
   }

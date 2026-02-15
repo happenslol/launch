@@ -3,7 +3,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use futures::StreamExt;
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, IntoElement, InteractiveElement, KeyBinding,
+  App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
   ParentElement, SharedString, Styled, Subscription, Task, Window, actions, div, hsla, prelude::*,
   px, relative, rems, rgb, rgba,
 };
@@ -18,11 +18,11 @@ use crate::{
     GlobalDbusConnection,
     networkmanager::{AccessPoint, NetworkManager, WirelessDevice},
   },
+  icon::{Icon, IconName},
   input::{
     input,
     state::{InputEvent, InputState},
   },
-  icon::{Icon, IconName},
   matcher::MatcherPool,
   picker::{Category, Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, v_flex},
@@ -52,18 +52,21 @@ impl PasswordPopup {
       Some(PASSWORD_POPUP_CONTEXT),
     )]);
 
-    let input = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Password"));
+    let input = cx.new(|cx| {
+      InputState::new(window, cx)
+        .masked(true)
+        .placeholder("Password")
+    });
 
-    let subscriptions = vec![cx.subscribe_in(
-      &input,
-      window,
-      |this, _input, event, _window, cx| {
-        if let InputEvent::PressEnter { .. } = *event {
-          let password = this.input.read(cx).value();
-          cx.emit(PasswordPopupEvent::Submit(password));
-        }
-      },
-    )];
+    let subscriptions =
+      vec![
+        cx.subscribe_in(&input, window, |this, _input, event, _window, cx| {
+          if let InputEvent::PressEnter { .. } = *event {
+            let password = this.input.read(cx).value();
+            cx.emit(PasswordPopupEvent::Submit(password));
+          }
+        }),
+      ];
 
     let focus_handle = cx.focus_handle();
 
@@ -402,8 +405,7 @@ impl WifiPanel {
                 .map(|(_, path)| path.clone());
               let is_known = known_conn.is_some();
 
-              let mut entry =
-                WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
+              let mut entry = WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
               entry.alternate_paths = alternate_paths;
               entry
             })
@@ -454,10 +456,7 @@ impl WifiPanel {
 
       let active_hw_address = active_ap.as_ref().map(|ap| ap.hw_address.clone());
 
-      tracing::info!(
-        count = access_points.len(),
-        "Wifi scan complete"
-      );
+      tracing::info!(count = access_points.len(), "Wifi scan complete");
 
       this
         .update_in(cx, |this, window, cx| {
@@ -482,8 +481,7 @@ impl WifiPanel {
 
           for (ap, alternate_paths) in deduplicated {
             let existing = this.entries.iter_mut().find(|entry| {
-              entry.id == ap.path.as_str()
-                || entry.alternate_paths.contains(ap.path.as_str())
+              entry.id == ap.path.as_str() || entry.alternate_paths.contains(ap.path.as_str())
             });
 
             if let Some(existing) = existing {
@@ -504,8 +502,7 @@ impl WifiPanel {
               .map(|(_, path)| path.clone());
             let is_known = known_conn.is_some();
 
-            let mut entry =
-              WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
+            let mut entry = WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
             entry.alternate_paths = alternate_paths;
             this.entries.push(entry);
           }
@@ -594,8 +591,7 @@ impl WifiPanel {
 
         for (ap, alternate_paths) in deduplicated {
           let existing = this.entries.iter_mut().find(|entry| {
-            entry.id == ap.path.as_str()
-              || entry.alternate_paths.contains(ap.path.as_str())
+            entry.id == ap.path.as_str() || entry.alternate_paths.contains(ap.path.as_str())
           });
 
           if let Some(existing) = existing {
@@ -616,8 +612,7 @@ impl WifiPanel {
             .map(|(_, path)| path.clone());
           let is_known = known_conn.is_some();
 
-          let mut entry =
-            WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
+          let mut entry = WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
           entry.alternate_paths = alternate_paths;
           this.entries.push(entry);
         }
@@ -1017,7 +1012,7 @@ impl Render for WifiPanel {
       .child(
         picker_input(&self.picker)
           .show_back_button(true)
-          .is_loading(self.is_scanning),
+          .loading(self.is_scanning),
       )
       .child(picker_results(&self.picker))
       .when_some(password_popup, |this, popup| {
