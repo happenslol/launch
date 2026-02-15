@@ -27,7 +27,7 @@ use crate::{
   util::{ResultExt, v_flex},
 };
 
-actions!(wifi, [Refresh, DismissPasswordPopup]);
+actions!(wifi, [Refresh, DismissPasswordPopup, ForgetNetwork]);
 
 const CONTEXT: &str = "wifi";
 const PASSWORD_POPUP_CONTEXT: &str = "wifi_password_popup";
@@ -268,7 +268,10 @@ pub struct WifiPanel {
 
 impl WifiPanel {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-    cx.bind_keys([KeyBinding::new("ctrl-r", Refresh, Some(CONTEXT))]);
+    cx.bind_keys([
+      KeyBinding::new("ctrl-r", Refresh, Some(CONTEXT)),
+      KeyBinding::new("ctrl-d", ForgetNetwork, Some(CONTEXT)),
+    ]);
 
     let delegate = WifiDelegate {};
     let picker = cx.new(|cx| {
@@ -475,26 +478,50 @@ impl WifiPanel {
 
           let deduplicated = deduplicate_access_points(access_points);
 
-          let entries: Vec<WifiEntry> = deduplicated
-            .into_iter()
-            .map(|(ap, alternate_paths)| {
-              let is_connected = active_hw_address
-                .as_ref()
-                .is_some_and(|addr| addr == &ap.hw_address);
-              let known_conn = known_connections
-                .iter()
-                .find(|(ssid, _)| ssid == &ap.ssid)
-                .map(|(_, path)| path.clone());
-              let is_known = known_conn.is_some();
-
-              let mut entry =
-                WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
-              entry.alternate_paths = alternate_paths;
-              entry
+          let all_new_paths: HashSet<String> = deduplicated
+            .iter()
+            .flat_map(|(ap, alternates)| {
+              std::iter::once(ap.path.to_string()).chain(alternates.iter().cloned())
             })
             .collect();
 
-          this.entries = entries;
+          this.entries.retain(|entry| {
+            all_new_paths.contains(&entry.id)
+              || entry
+                .alternate_paths
+                .iter()
+                .any(|path| all_new_paths.contains(path))
+          });
+
+          for (ap, alternate_paths) in deduplicated {
+            let existing = this.entries.iter_mut().find(|entry| {
+              entry.id == ap.path.as_str()
+                || entry.alternate_paths.contains(ap.path.as_str())
+            });
+
+            if let Some(existing) = existing {
+              existing.entry.update(cx, |inner, cx| {
+                inner.access_point = ap;
+                cx.notify();
+              });
+              existing.alternate_paths = alternate_paths;
+              continue;
+            }
+
+            let is_connected = active_hw_address
+              .as_ref()
+              .is_some_and(|addr| addr == &ap.hw_address);
+            let known_conn = known_connections
+              .iter()
+              .find(|(ssid, _)| ssid == &ap.ssid)
+              .map(|(_, path)| path.clone());
+            let is_known = known_conn.is_some();
+
+            let mut entry =
+              WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
+            entry.alternate_paths = alternate_paths;
+            this.entries.push(entry);
+          }
 
           picker.update(cx, |picker, cx| {
             picker.set_items(this.entries.clone(), window, cx);
@@ -579,12 +606,17 @@ impl WifiPanel {
         });
 
         for (ap, alternate_paths) in deduplicated {
-          let already_exists = this.entries.iter().any(|entry| {
+          let existing = this.entries.iter_mut().find(|entry| {
             entry.id == ap.path.as_str()
               || entry.alternate_paths.contains(ap.path.as_str())
           });
 
-          if already_exists {
+          if let Some(existing) = existing {
+            existing.entry.update(cx, |inner, cx| {
+              inner.access_point = ap;
+              cx.notify();
+            });
+            existing.alternate_paths = alternate_paths;
             continue;
           }
 
@@ -603,7 +635,6 @@ impl WifiPanel {
           this.entries.push(entry);
         }
 
-        // TODO: Can we somehow not clone the items here?
         picker.update(cx, |picker, cx| {
           picker.set_items(this.entries.clone(), window, cx);
         });
@@ -706,6 +737,72 @@ impl WifiPanel {
               entry.connection_state = ConnectionState::Failed;
               cx.notify();
             });
+          }
+        }
+      }
+    })
+    .detach();
+  }
+
+  fn forget_network(&mut self, _: &ForgetNetwork, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(selected) = self.picker.read(cx).get_selected_item().cloned() else {
+      return;
+    };
+
+    if !selected.is_known {
+      return;
+    }
+
+    let connection_path = {
+      let entry = selected.entry.read(cx);
+      let Some(path) = entry.connection_path.clone() else {
+        return;
+      };
+      path
+    };
+
+    let Some(nm) = self.network_manager.clone() else {
+      return;
+    };
+
+    let ssid = selected.entry.read(cx).access_point.ssid.clone();
+    tracing::info!(%ssid, "Forgetting wifi network");
+
+    let entry = selected.entry.clone();
+    let picker = self.picker.clone();
+
+    cx.spawn_in(window, {
+      async move |this, cx| {
+        let result = cx
+          .background_spawn({
+            let nm = nm.clone();
+            let connection_path = connection_path.clone();
+            async move { nm.delete_connection(&connection_path).await }
+          })
+          .await;
+
+        match result {
+          Ok(()) => {
+            tracing::info!(%ssid, "Forgot wifi network");
+            let _ = this.update_in(cx, |this, window, cx| {
+              entry.update(cx, |inner, cx| {
+                inner.is_known = false;
+                inner.connection_path = None;
+                inner.is_connected = false;
+                cx.notify();
+              });
+              for wifi_entry in &mut this.entries {
+                if wifi_entry.id == selected.id {
+                  wifi_entry.is_known = false;
+                }
+              }
+              picker.update(cx, |picker, cx| {
+                picker.set_items(this.entries.clone(), window, cx);
+              });
+            });
+          }
+          Err(error) => {
+            tracing::error!(%ssid, %error, "Failed to forget wifi network");
           }
         }
       }
@@ -900,6 +997,7 @@ impl Render for WifiPanel {
     v_flex()
       .key_context(CONTEXT)
       .on_action(cx.listener(Self::refresh))
+      .on_action(cx.listener(Self::forget_network))
       .size_full()
       .child(
         picker_input(&self.picker)
@@ -915,8 +1013,15 @@ struct WifiDelegate {}
 impl PickerDelegate for WifiDelegate {
   type ListItem = WifiEntry;
 
-  fn sort_items(&self, _cx: &App, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
-    matches.sort_by_key(|(index, score)| (std::cmp::Reverse(items[*index].is_known), std::cmp::Reverse(*score)));
+  fn sort_items(&self, cx: &App, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
+    matches.sort_by_key(|(index, score)| {
+      let entry = items[*index].entry.read(cx);
+      (
+        std::cmp::Reverse(*score),
+        std::cmp::Reverse(entry.is_known),
+        std::cmp::Reverse(entry.access_point.strength),
+      )
+    });
   }
 
   fn render_list_item(

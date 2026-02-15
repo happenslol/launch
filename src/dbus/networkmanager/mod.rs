@@ -125,6 +125,15 @@ impl NetworkManager {
       .await
   }
 
+  pub async fn delete_connection(&self, connection_path: &OwnedObjectPath) -> Result<()> {
+    let connection = api::settings_connection::ConnectionProxy::builder(&self.conn)
+      .path(connection_path.as_str())?
+      .build()
+      .await?;
+
+    connection.delete().await
+  }
+
   pub async fn deactivate_connection(
     &self,
     active_connection_path: &OwnedObjectPath,
