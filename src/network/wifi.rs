@@ -5,7 +5,7 @@ use futures::StreamExt;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, IntoElement, InteractiveElement, KeyBinding,
   ParentElement, SharedString, Styled, Subscription, Task, Window, actions, anchored, deferred,
-  div, prelude::*, px, rgb, rgba,
+  div, hsla, prelude::*, px, relative, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -22,6 +22,7 @@ use crate::{
     input,
     state::{InputEvent, InputState},
   },
+  icon::{Icon, IconName},
   matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, v_flex},
@@ -1044,14 +1045,18 @@ impl PickerDelegate for WifiDelegate {
       _ => None,
     };
 
-    let info_text = format!("Signal: {} - {}", ap.strength, ap.security);
+    let security = ap.security;
     let ssid: SharedString = ap.ssid.clone();
+    let strength = ap.strength.min(100) as f32 / 100.0;
 
     let status_color = match connection_state {
       ConnectionState::Connecting => rgb(0xCCAA33),
       ConnectionState::Failed => rgb(0xCC4444),
       _ => rgb(0x888888),
     };
+
+    // Hue from 0.0 (red) to 0.33 (green) based on signal strength.
+    let signal_color = hsla(strength * 0.33, 0.8, 0.5, 1.0);
 
     v_flex()
       .w_full()
@@ -1063,25 +1068,65 @@ impl PickerDelegate for WifiDelegate {
         div()
           .flex()
           .flex_row()
+          .gap_3()
           .items_center()
-          .gap_2()
           .w_full()
-          .child(div().text_ellipsis().overflow_x_hidden().child(ssid))
-          .when_some(status, |this, status| {
-            this.child(
-              div()
-                .text_sm()
-                .text_color(status_color)
-                .flex_shrink_0()
-                .child(status),
-            )
-          }),
-      )
-      .child(
-        div()
-          .text_sm()
-          .text_color(rgb(0x888888))
-          .child(info_text),
+          .child(
+            v_flex()
+              .w(px(5.))
+              .h(px(24.))
+              .flex_shrink_0()
+              .rounded_sm()
+              .bg(rgba(0xFFFFFF11))
+              .justify_end()
+              .child(
+                div()
+                  .w_full()
+                  .h(relative(strength))
+                  .rounded_sm()
+                  .bg(signal_color),
+              ),
+          )
+          .child(
+            v_flex()
+              .flex_grow()
+              .overflow_x_hidden()
+              .child(
+                div()
+                  .flex()
+                  .flex_row()
+                  .items_center()
+                  .gap_2()
+                  .w_full()
+                  .child(div().text_ellipsis().overflow_x_hidden().child(ssid))
+                  .when_some(status, |this, status| {
+                    this.child(
+                      div()
+                        .text_sm()
+                        .text_color(status_color)
+                        .flex_shrink_0()
+                        .child(status),
+                    )
+                  }),
+              )
+              .child(
+                div()
+                  .flex()
+                  .flex_row()
+                  .items_center()
+                  .gap_1()
+                  .text_sm()
+                  .text_color(rgb(0x888888))
+                  .when(security.is_secured(), |this| {
+                    this.child(
+                      Icon::new(IconName::Lock)
+                        .custom_size(rems(0.85))
+                        .color(rgb(0x888888).into()),
+                    )
+                  })
+                  .child(security.to_string()),
+              ),
+          ),
       )
       .when_some(password_popup, |this, popup| {
         this.child(
