@@ -8,9 +8,9 @@ use std::{
 
 use gpui::{
   Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
-  IntoElement, KeyBinding, ListAlignment, ListState, Pixels, ScrollStrategy, SharedString,
-  StyleRefinement, Subscription, Task, UniformListScrollHandle, Window, actions, div, list,
-  prelude::*, px, rems, rgb, rgba, uniform_list,
+  IntoElement, KeyBinding, ListAlignment, ListOffset, ListState, Pixels, ScrollStrategy,
+  SharedString, StyleRefinement, Subscription, Task, UniformListScrollHandle, Window, actions, div,
+  list, prelude::*, px, rems, rgb, rgba, uniform_list,
 };
 
 use crate::icon::{Icon, IconName, Spinner};
@@ -354,13 +354,17 @@ impl<D: PickerDelegate> Picker<D> {
       return;
     }
 
+    let wrapped = matches!(self.selected_index, Some(i) if i + 1 >= item_count);
+
     match self.selected_index {
       Some(i) => self.selected_index = Some((i + 1) % item_count),
       None => self.selected_index = Some(0),
     }
 
     let ix = self.selected_index.expect("just set above");
-    if let Some(selectable_items) = &self.selectable_items {
+    if wrapped {
+      self.scroll_to_top();
+    } else if let Some(selectable_items) = &self.selectable_items {
       if let Some(item) = selectable_items.get(ix) {
         self
           .category_list_state
@@ -381,13 +385,17 @@ impl<D: PickerDelegate> Picker<D> {
       return;
     }
 
+    let wrapped = matches!(self.selected_index, Some(0) | None);
+
     match self.selected_index {
       Some(0) | None => self.selected_index = Some(item_count - 1),
       Some(i) => self.selected_index = Some(i - 1),
     }
 
     let ix = self.selected_index.expect("just set above");
-    if let Some(selectable_items) = &self.selectable_items {
+    if wrapped {
+      self.scroll_to_bottom();
+    } else if let Some(selectable_items) = &self.selectable_items {
       if let Some(item) = selectable_items.get(ix) {
         self
           .category_list_state
@@ -400,6 +408,32 @@ impl<D: PickerDelegate> Picker<D> {
     }
 
     cx.notify();
+  }
+
+  fn scroll_to_top(&self) {
+    if self.selectable_items.is_some() {
+      self
+        .category_list_state
+        .scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) });
+    } else {
+      self
+        .list_scroll_handle
+        .scroll_to_item(0, ScrollStrategy::Top);
+    }
+  }
+
+  fn scroll_to_bottom(&self) {
+    if let Some(visual_entries) = &self.visual_entries {
+      let last_ix = visual_entries.len().saturating_sub(1);
+      self.category_list_state.scroll_to_reveal_item(last_ix);
+    } else {
+      let item_count = self.visible_item_count();
+      if item_count > 0 {
+        self
+          .list_scroll_handle
+          .scroll_to_item(item_count - 1, ScrollStrategy::Bottom);
+      }
+    }
   }
 
   fn render_list_item(
@@ -500,6 +534,7 @@ impl<D: PickerDelegate> Picker<D> {
       }),
     )
     .flex_grow()
+    .pb_2()
     .into_any_element()
   }
 }

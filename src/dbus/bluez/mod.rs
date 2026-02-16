@@ -243,9 +243,27 @@ impl Device {
     Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
   }
 
-  pub async fn listen_rssi_changed(&self) -> Result<impl Stream<Item = Option<i16>> + use<>> {
-    let stream = self.device_proxy.receive_rssi_changed().await;
-    Ok(stream.filter_map(|signal| async move { signal.get().await.ok().map(Some) }))
+  pub async fn listen_rssi_changed(
+    &self,
+  ) -> Result<impl Stream<Item = Option<i16>> + use<>> {
+    use zbus::fdo;
+
+    let properties_proxy = fdo::PropertiesProxy::builder(&self.conn)
+      .destination("org.bluez")?
+      .path(self.path.clone())?
+      .build()
+      .await?;
+
+    let stream = properties_proxy.receive_properties_changed().await?;
+    Ok(stream.filter_map(|signal| async move {
+      let args = signal.args().ok()?;
+      if args.interface_name.as_str() != "org.bluez.Device1" {
+        return None;
+      }
+      let rssi = args.changed_properties.get("RSSI")?;
+      let value: i16 = rssi.downcast_ref().ok()?;
+      Some(Some(value))
+    }))
   }
 
   pub async fn listen_battery_changed(&self) -> Result<impl Stream<Item = Option<u8>> + use<>> {

@@ -4,10 +4,12 @@ use std::sync::{
 };
 
 use futures::StreamExt;
+use std::time::Duration;
+
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render, SharedString,
-  Styled, Subscription, Task, Window, actions, div, hsla, prelude::*, px, relative, rems, rgb,
-  rgba,
+  Animation, AnimationExt, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
+  Render, SharedString, Styled, Subscription, Task, Window, actions, div, hsla, prelude::*, px,
+  relative, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -544,42 +546,44 @@ impl Render for BluetoothDevicesPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let mut input = picker_input(&self.picker).show_back_button(true);
 
-    let mut suffix = div()
-      .flex()
-      .flex_row()
-      .items_center()
-      .gap_3()
-      .flex_shrink_0();
-
-    if self.is_discovering {
-      suffix = suffix.child(
-        div()
-          .text_sm()
-          .text_color(rgb(0x888888))
-          .child("Scanning"),
-      );
-    }
-
     if let Some(powered) = self.adapter_powered {
-      let (color, label) = if powered {
+      let (color, label) = if self.is_discovering {
+        (rgb(0x4488CC), "Scanning")
+      } else if powered {
         (rgb(0x44AA44), "On")
       } else {
         (rgb(0xCC4444), "Off")
       };
 
-      suffix = suffix.child(
+      let circle = div()
+        .w(px(8.))
+        .h(px(8.))
+        .rounded_full()
+        .bg(color);
+
+      let circle_element = if self.is_discovering {
+        circle
+          .with_animation(
+            "pulse",
+            Animation::new(Duration::from_millis(1500)).repeat(),
+            |this, delta| {
+              let opacity = 0.3 + 0.7 * (1.0 - (delta * 2.0 - 1.0).abs());
+              this.opacity(opacity)
+            },
+          )
+          .into_any_element()
+      } else {
+        circle.into_any_element()
+      };
+
+      input = input.suffix(
         div()
           .flex()
           .flex_row()
           .items_center()
           .gap_1p5()
-          .child(
-            div()
-              .w(px(8.))
-              .h(px(8.))
-              .rounded_full()
-              .bg(color),
-          )
+          .flex_shrink_0()
+          .child(circle_element)
           .child(
             div()
               .text_sm()
@@ -588,8 +592,6 @@ impl Render for BluetoothDevicesPanel {
           ),
       );
     }
-
-    input = input.suffix(suffix);
 
     v_flex()
       .key_context(CONTEXT)
