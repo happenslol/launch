@@ -22,6 +22,7 @@ use wayland_protocols_wlr::data_control::v1::client::{
   zwlr_data_control_device_v1, zwlr_data_control_manager_v1,
 };
 
+pub use clipboard::{ClipboardDbReader, ClipboardEntry};
 use clipboard::ClipboardState;
 
 #[derive(Debug)]
@@ -35,6 +36,17 @@ pub enum WaylandEvent {
 struct GlobalWaylandConnection(Entity<WaylandConnection>);
 
 impl Global for GlobalWaylandConnection {}
+
+struct GlobalClipboardDbReader(ClipboardDbReader);
+
+impl Global for GlobalClipboardDbReader {}
+
+impl ClipboardDbReader {
+  pub fn global(cx: &App) -> Option<ClipboardDbReader> {
+    cx.try_global::<GlobalClipboardDbReader>()
+      .map(|g| g.0.clone())
+  }
+}
 
 pub struct WaylandConnection {
   cmd_tx: calloop::channel::Sender<Command>,
@@ -80,9 +92,14 @@ impl State {
   }
 }
 
+struct InitResult {
+  signal: LoopSignal,
+  clipboard_reader: Option<ClipboardDbReader>,
+}
+
 pub fn init(cx: &mut App) -> Result<()> {
   let (cmd_tx, cmd_rx) = calloop::channel::channel::<Command>();
-  let (init_tx, init_rx) = flume::bounded::<LoopSignal>(1);
+  let (init_tx, init_rx) = flume::bounded::<InitResult>(1);
   let (event_tx, event_rx) = flume::unbounded::<WaylandEvent>();
 
   // Bit awkward since we can't move the event loop into the background thread, so we have to send
@@ -94,9 +111,16 @@ pub fn init(cx: &mut App) -> Result<()> {
   });
 
   // If an error occurs during startup, this fails and the main thread exits as well.
-  let signal = init_rx.recv()?;
+  let init_result = init_rx.recv()?;
 
-  let connection = cx.new(|_| WaylandConnection { cmd_tx, signal });
+  if let Some(reader) = init_result.clipboard_reader {
+    cx.set_global(GlobalClipboardDbReader(reader));
+  }
+
+  let connection = cx.new(|_| WaylandConnection {
+    cmd_tx,
+    signal: init_result.signal,
+  });
   cx.set_global(GlobalWaylandConnection(connection.clone()));
 
   cx.on_app_quit({
@@ -125,7 +149,7 @@ pub fn init(cx: &mut App) -> Result<()> {
 
 fn run(
   cmd_rx: Channel<Command>,
-  init_tx: flume::Sender<LoopSignal>,
+  init_tx: flume::Sender<InitResult>,
   event_tx: flume::Sender<WaylandEvent>,
 ) -> Result<()> {
   let conn = Connection::connect_to_env()?;
@@ -134,25 +158,6 @@ fn run(
   let qh = event_queue.handle();
   let _registry = display.get_registry(&qh, ());
   let mut state = State::new(event_tx);
-
-  if let Some(reader) = &state.clipboard.db_reader {
-    match reader.recent(10) {
-      Ok(entries) => {
-        for entry in &entries {
-          let text = String::from_utf8_lossy(&entry.data);
-          debug!(
-            id = entry.id,
-            timestamp = entry.timestamp,
-            mime_types = ?entry.mime_types,
-            text = %text,
-            "Clipboard history entry"
-          );
-        }
-        debug!(count = entries.len(), "Loaded recent clipboard history");
-      }
-      Err(err) => error!(?err, "Failed to load clipboard history"),
-    }
-  }
 
   event_queue.roundtrip(&mut state)?;
 
@@ -176,7 +181,11 @@ fn run(
     .insert(handle)
     .map_err(|err| anyhow::anyhow!("Failed to insert wayland source: {err}"))?;
 
-  init_tx.send(event_loop.get_signal())?;
+  init_tx.send(InitResult {
+    signal: event_loop.get_signal(),
+    clipboard_reader: state.clipboard.db_reader.clone(),
+  })?;
+
   event_loop.run(None, &mut state, |_| {})?;
 
   Ok(())

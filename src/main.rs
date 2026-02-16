@@ -7,6 +7,7 @@
 mod assets;
 mod audio;
 mod bluetooth;
+mod clipboard;
 mod db;
 mod dbus;
 mod icon;

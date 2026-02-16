@@ -1,0 +1,255 @@
+use std::sync::{
+  Arc,
+  atomic::AtomicBool,
+};
+
+use gpui::{
+  App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled, Task,
+  Window, prelude::*, rgb, rgba,
+};
+use nucleo_matcher::{
+  Utf32Str,
+  pattern::{CaseMatching, Normalization, Pattern},
+};
+
+use crate::{
+  icon::{Icon, IconName},
+  launcher::RootItem,
+  matcher::MatcherPool,
+  picker::{Picker, PickerDelegate, picker_input, picker_results},
+  util::{ResultExt, h_flex, v_flex},
+  wayland::{ClipboardDbReader, ClipboardEntry},
+};
+
+pub fn get_items() -> Vec<RootItem> {
+  vec![RootItem::Panel {
+    id: "clipboard".into(),
+    icon: IconName::Clipboard,
+    name: "Clipboard history".into(),
+    terms: vec!["clipboard".into(), "paste".into(), "history".into()],
+    view: Arc::new(|window, cx| cx.new(|cx| ClipboardPanel::new(window, cx)).into()),
+  }]
+}
+
+#[derive(Clone)]
+struct ClipboardItem {
+  id: i64,
+  timestamp: i64,
+  preview: SharedString,
+  search_string: String,
+}
+
+impl ClipboardItem {
+  fn from_entry(entry: ClipboardEntry) -> Self {
+    let text = String::from_utf8_lossy(&entry.data);
+    let preview: SharedString = text
+      .lines()
+      .next()
+      .unwrap_or("")
+      .chars()
+      .take(200)
+      .collect::<String>()
+      .into();
+
+    Self {
+      id: entry.id,
+      timestamp: entry.timestamp,
+      preview,
+      search_string: text.into_owned(),
+    }
+  }
+}
+
+struct ClipboardPanel {
+  picker: Entity<Picker<ClipboardDelegate>>,
+  _load_task: Option<Task<()>>,
+}
+
+impl ClipboardPanel {
+  fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let picker = cx.new(|cx| {
+      let mut picker = Picker::new(ClipboardDelegate, Arc::new(vec![]), window, cx);
+      picker.placeholder("Search clipboard history...", cx);
+      picker
+    });
+
+    cx.focus_view(&picker.read(cx).search_input.clone(), window);
+
+    let load_task = Self::load_entries(&picker, window, cx);
+
+    Self {
+      picker,
+      _load_task: Some(load_task),
+    }
+  }
+
+  fn load_entries(
+    picker: &Entity<Picker<ClipboardDelegate>>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Task<()> {
+    let reader = ClipboardDbReader::global(cx);
+    let picker = picker.clone();
+
+    cx.spawn_in(window, async move |_this, cx| {
+      let Some(reader) = reader else {
+        return;
+      };
+
+      let entries = cx
+        .background_spawn(async move { reader.recent(50) })
+        .await;
+
+      let Ok(entries) = entries else {
+        return;
+      };
+
+      let items: Vec<ClipboardItem> = entries.into_iter().map(ClipboardItem::from_entry).collect();
+
+      picker
+        .update_in(cx, |picker, window, cx| {
+          picker.set_items(items, window, cx);
+        })
+        .log_err();
+    })
+  }
+}
+
+impl Focusable for ClipboardPanel {
+  fn focus_handle(&self, cx: &App) -> FocusHandle {
+    self.picker.read(cx).focus_handle(cx)
+  }
+}
+
+impl Render for ClipboardPanel {
+  fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    v_flex()
+      .size_full()
+      .child(picker_input(&self.picker).show_back_button(true))
+      .child(picker_results(&self.picker))
+  }
+}
+
+fn format_timestamp(timestamp: i64) -> SharedString {
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_secs() as i64)
+    .unwrap_or(0);
+
+  let delta = now - timestamp;
+
+  let text = if delta < 60 {
+    "just now".to_string()
+  } else if delta < 3600 {
+    let minutes = delta / 60;
+    if minutes == 1 {
+      "1 min ago".to_string()
+    } else {
+      format!("{minutes} mins ago")
+    }
+  } else if delta < 86400 {
+    let hours = delta / 3600;
+    if hours == 1 {
+      "1 hour ago".to_string()
+    } else {
+      format!("{hours} hours ago")
+    }
+  } else {
+    let days = delta / 86400;
+    if days == 1 {
+      "1 day ago".to_string()
+    } else {
+      format!("{days} days ago")
+    }
+  };
+
+  SharedString::from(text)
+}
+
+struct ClipboardDelegate;
+
+impl PickerDelegate for ClipboardDelegate {
+  type ListItem = ClipboardItem;
+
+  fn render_list_item(
+    &self,
+    _window: &mut Window,
+    _cx: &mut Context<Picker<Self>>,
+    item: &Self::ListItem,
+    is_selected: bool,
+  ) -> impl IntoElement {
+    h_flex()
+      .w_full()
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .gap_3()
+      .items_center()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
+      .child(
+        Icon::new(IconName::Clipboard)
+          .custom_size(gpui::rems(0.85))
+          .color(rgb(0x666666).into()),
+      )
+      .child(
+        h_flex()
+          .flex_grow()
+          .overflow_x_hidden()
+          .justify_between()
+          .gap_2()
+          .child(
+            gpui::div()
+              .text_ellipsis()
+              .overflow_x_hidden()
+              .child(item.preview.clone()),
+          )
+          .child(
+            gpui::div()
+              .text_sm()
+              .text_color(rgb(0x666666))
+              .flex_shrink_0()
+              .child(format_timestamp(item.timestamp)),
+          ),
+      )
+  }
+
+  fn update_matches(
+    &mut self,
+    window: &mut Window,
+    cx: &mut Context<Picker<Self>>,
+    query: String,
+    _cancel_flag: Arc<AtomicBool>,
+    search_id: usize,
+    items: Arc<Vec<Self::ListItem>>,
+  ) -> Task<()> {
+    if query.is_empty() {
+      cx.defer_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, None);
+      });
+
+      return Task::ready(());
+    }
+
+    let matchers = MatcherPool::global(cx);
+    cx.spawn_in(window, async move |picker, cx| {
+      let mut matcher = matchers.get().await.unwrap();
+      let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+      let mut matches = Vec::new();
+      let mut buf = Vec::new();
+
+      for (index, item) in items.iter().enumerate() {
+        if let Some(score) =
+          needle.score(Utf32Str::new(&item.search_string, &mut buf), &mut matcher)
+        {
+          matches.push((index, score));
+        }
+      }
+
+      picker
+        .update_in(cx, move |picker, _window, cx| {
+          picker.complete_search(cx, search_id, Some(matches));
+        })
+        .log_err();
+    })
+  }
+}

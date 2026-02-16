@@ -23,7 +23,7 @@ use nucleo_matcher::{
 use tracing::error;
 
 use crate::{
-  audio, bluetooth,
+  audio, bluetooth, clipboard,
   db::DB,
   icon::{Icon, IconName},
   matcher::MatcherPool,
@@ -105,6 +105,7 @@ impl Launcher {
     items.extend(audio::panels::get_items());
     items.extend(network::get_items());
     items.extend(bluetooth::get_items());
+    items.extend(clipboard::get_items());
 
     let items = Arc::new(items);
 
