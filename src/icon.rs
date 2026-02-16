@@ -9,7 +9,11 @@ use gpui::{
 pub enum IconName {
   AppWindow,
   ArrowLeft,
+  Asterisk,
   Bluetooth,
+  Broadcast,
+  BroadcastOff,
+  CircleCheckFilled,
   DeviceDesktop,
   DeviceGamepad,
   DeviceWatch,
@@ -32,7 +36,11 @@ impl IconName {
     let name = match self {
       IconName::AppWindow => "app-window",
       IconName::ArrowLeft => "arrow-left",
+      IconName::Asterisk => "asterisk",
       IconName::Bluetooth => "bluetooth",
+      IconName::Broadcast => "broadcast",
+      IconName::BroadcastOff => "broadcast-off",
+      IconName::CircleCheckFilled => "circle-check-filled",
       IconName::DeviceDesktop => "device-desktop",
       IconName::DeviceGamepad => "device-gamepad",
       IconName::DeviceWatch => "device-watch",

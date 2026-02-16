@@ -83,6 +83,10 @@ pub struct DeviceEntryInner {
   _property_listeners: Vec<Task<()>>,
 }
 
+pub struct DeviceStateChanged;
+
+impl gpui::EventEmitter<DeviceStateChanged> for DeviceEntryInner {}
+
 impl DeviceEntryInner {
   pub fn new(
     device: Device,
@@ -127,6 +131,7 @@ impl DeviceEntryInner {
         while let Some(new_alias) = alias_stream.next().await {
           let _ = this.update(cx, |this, cx| {
             this.device.name = SharedString::from(new_alias.clone());
+            cx.emit(DeviceStateChanged);
             cx.notify();
           });
         }
@@ -153,6 +158,7 @@ impl DeviceEntryInner {
           let _ = this.update(cx, |this, cx| {
             this.device.connected = new_connected;
             this.is_connected.store(new_connected, Ordering::Relaxed);
+            cx.emit(DeviceStateChanged);
             cx.notify();
           });
         }
@@ -281,6 +287,28 @@ impl BluetoothDevicesPanel {
     panel
   }
 
+  fn subscribe_to_device_entry(
+    &mut self,
+    entry: &BluetoothEntry,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let picker = self.picker.clone();
+    self._subscriptions.push(cx.subscribe_in(
+      &entry.entry,
+      window,
+      move |this, entry, _event: &DeviceStateChanged, window, cx| {
+        let device = entry.read(cx).device.clone();
+        if let Some(bluetooth_entry) = this.devices.iter_mut().find(|e| e.entry == *entry) {
+          bluetooth_entry.search_string = format!("{} {}", device.name, device.address);
+        }
+        picker.update(cx, |picker, cx| {
+          picker.set_items(this.devices.clone(), window, cx);
+        });
+      },
+    ));
+  }
+
   fn initialize(&mut self, window: &mut Window, cx: &mut Context<Self>, conn: &zbus::Connection) {
     let conn = conn.clone();
     let picker = self.picker.clone();
@@ -360,6 +388,11 @@ impl BluetoothDevicesPanel {
             .map(|device| BluetoothEntry::new(device, window, cx))
             .collect();
 
+          let entries: Vec<_> = this.devices.clone();
+          for entry in &entries {
+            this.subscribe_to_device_entry(entry, window, cx);
+          }
+
           picker.update(cx, |picker, cx| {
             picker.set_items(this.devices.clone(), window, cx);
           });
@@ -422,6 +455,7 @@ impl BluetoothDevicesPanel {
 
             if !already_exists {
               let new_entry = BluetoothEntry::new(device, window, cx);
+              this.subscribe_to_device_entry(&new_entry, window, cx);
               this.devices.push(new_entry);
 
               let picker = this.picker.clone();
@@ -648,14 +682,14 @@ impl PickerDelegate for DevicesDelegate {
     let category = device_category(device.icon.as_ref().map(|s| s.as_ref()));
     let battery_text = device.battery.map(|b| format!("{}%", b));
 
-    let status_color = if device.connected {
-      rgb(0x44AA44)
+    let (status_icon, status_color) = if device.connected {
+      (IconName::CircleCheckFilled, rgb(0x44AA44))
     } else if !device.paired {
-      rgb(0xDD8833)
+      (IconName::Asterisk, rgb(0xDD8833))
     } else if device.rssi.is_some() {
-      rgb(0x4488CC)
+      (IconName::Broadcast, rgb(0x4488CC))
     } else {
-      rgb(0x666666)
+      (IconName::BroadcastOff, rgb(0x666666))
     };
 
     v_flex()
@@ -672,19 +706,9 @@ impl PickerDelegate for DevicesDelegate {
           .items_center()
           .w_full()
           .child(
-            div()
-              .flex_shrink_0()
-              .flex()
-              .items_center()
-              .justify_center()
-              .w(px(8.))
-              .child(
-                div()
-                  .w(px(8.))
-                  .h(px(8.))
-                  .rounded_full()
-                  .bg(status_color),
-              ),
+            Icon::new(status_icon)
+              .custom_size(rems(0.85))
+              .color(status_color.into()),
           )
           .child(
             v_flex()
