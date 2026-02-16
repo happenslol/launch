@@ -36,6 +36,7 @@ impl<T> Category<T> {
   }
 }
 
+#[derive(PartialEq)]
 enum VisualEntry {
   Header(SharedString),
   Item(usize), // index into matches
@@ -315,11 +316,11 @@ impl<D: PickerDelegate> Picker<D> {
 
       let selectable_count = selectable_items.len();
 
-      // HACK: Preserve relative scroll position. This does work, but I'm 99% sure there's a better
-      // way to do this.
-      let scroll_top = self.category_list_state.logical_scroll_top();
-      self.category_list_state.reset(visual_entries.len());
-      self.category_list_state.scroll_to(scroll_top);
+      if let Some(old_entries) = &self.visual_entries {
+        splice_diff(&self.category_list_state, old_entries, &visual_entries);
+      } else {
+        self.category_list_state.reset(visual_entries.len());
+      }
 
       self.visual_entries = Some(visual_entries);
       self.selectable_items = Some(selectable_items);
@@ -418,9 +419,10 @@ impl<D: PickerDelegate> Picker<D> {
 
   fn scroll_to_top(&self) {
     if self.selectable_items.is_some() {
-      self
-        .category_list_state
-        .scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) });
+      self.category_list_state.scroll_to(ListOffset {
+        item_ix: 0,
+        offset_in_item: px(0.),
+      });
     } else {
       self
         .list_scroll_handle
@@ -672,5 +674,33 @@ impl<D: PickerDelegate> Styled for PickerResults<D> {
 impl<D: PickerDelegate> RenderOnce for PickerResults<D> {
   fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
     self.picker
+  }
+}
+
+/// Update `list_state` by splicing only the ranges that differ between old and new entries.
+/// This preserves the list's scroll position for unchanged regions.
+fn splice_diff(list_state: &ListState, old: &[VisualEntry], new: &[VisualEntry]) {
+  let common_len = old.len().min(new.len());
+
+  // Find the length of the matching prefix
+  let prefix_len = old[..common_len]
+    .iter()
+    .zip(&new[..common_len])
+    .take_while(|(a, b)| a == b)
+    .count();
+
+  // Find the length of the matching suffix (after the prefix)
+  let suffix_len = old[prefix_len..common_len]
+    .iter()
+    .rev()
+    .zip(new[prefix_len..common_len].iter().rev())
+    .take_while(|(a, b)| a == b)
+    .count();
+
+  let old_end = old.len() - suffix_len;
+  let new_end = new.len() - suffix_len;
+
+  if prefix_len < old_end || prefix_len < new_end {
+    list_state.splice(prefix_len..old_end, new_end - prefix_len);
   }
 }

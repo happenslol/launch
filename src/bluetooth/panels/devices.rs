@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use gpui::{
   Animation, AnimationExt, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
-  Render, SharedString, Styled, Subscription, Task, Window, actions, div, hsla, prelude::*, px,
-  relative, rems, rgb, rgba,
+  Render, SharedString, Styled, Subscription, Task, Window, actions, div, prelude::*, px, rems,
+  rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -645,27 +645,18 @@ impl PickerDelegate for DevicesDelegate {
     let name: SharedString = device.name.clone();
     let address: SharedString = device.address.clone();
 
-    let status = if device.connected {
-      Some("Connected")
-    } else if !device.paired {
-      Some("New")
-    } else {
-      None
-    };
-
-    let status_color = if device.connected {
-      rgb(0x44AA44)
-    } else {
-      rgb(0x888888)
-    };
-
     let category = device_category(device.icon.as_ref().map(|s| s.as_ref()));
     let battery_text = device.battery.map(|b| format!("{}%", b));
 
-    // RSSI typically ranges from -100 (weak) to -40 (strong)
-    let signal_strength = device.rssi.map(|rssi| {
-      ((rssi.clamp(-100, -40) + 100) as f32 / 60.0).clamp(0.0, 1.0)
-    });
+    let status_color = if device.connected {
+      rgb(0x44AA44)
+    } else if !device.paired {
+      rgb(0xDD8833)
+    } else if device.rssi.is_some() {
+      rgb(0x4488CC)
+    } else {
+      rgb(0x666666)
+    };
 
     v_flex()
       .w_full()
@@ -681,40 +672,19 @@ impl PickerDelegate for DevicesDelegate {
           .items_center()
           .w_full()
           .child(
-            // Signal strength bar when RSSI available, device icon otherwise
-            if let Some(strength) = signal_strength {
-              let signal_color = hsla(strength * 0.33, 0.8, 0.5, 1.0);
-              v_flex()
-                .w(px(5.))
-                .h(px(24.))
-                .flex_shrink_0()
-                .rounded_sm()
-                .bg(rgba(0xFFFFFF11))
-                .justify_end()
-                .child(
-                  div()
-                    .w_full()
-                    .h(relative(strength))
-                    .rounded_sm()
-                    .bg(signal_color),
-                )
-                .into_any_element()
-            } else {
-              div()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(5.))
-                .child(
-                  div()
-                    .w(px(5.))
-                    .h(px(5.))
-                    .rounded_full()
-                    .bg(rgb(0x555555)),
-                )
-                .into_any_element()
-            },
+            div()
+              .flex_shrink_0()
+              .flex()
+              .items_center()
+              .justify_center()
+              .w(px(8.))
+              .child(
+                div()
+                  .w(px(8.))
+                  .h(px(8.))
+                  .rounded_full()
+                  .bg(status_color),
+              ),
           )
           .child(
             v_flex()
@@ -734,16 +704,7 @@ impl PickerDelegate for DevicesDelegate {
                       .text_color(rgb(0x666666))
                       .flex_shrink_0()
                       .child(address),
-                  )
-                  .when_some(status, |this, status| {
-                    this.child(
-                      div()
-                        .text_sm()
-                        .text_color(status_color)
-                        .flex_shrink_0()
-                        .child(status),
-                    )
-                  }),
+                  ),
               )
               .child(
                 div()
