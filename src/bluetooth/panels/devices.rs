@@ -5,8 +5,9 @@ use std::sync::{
 
 use futures::StreamExt;
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled,
-  Subscription, Task, Window, div, hsla, prelude::*, px, relative, rems, rgb, rgba,
+  App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render, SharedString,
+  Styled, Subscription, Task, Window, actions, div, hsla, prelude::*, px, relative, rems, rgb,
+  rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -226,10 +227,14 @@ pub struct BluetoothDevicesPanel {
   _subscriptions: Vec<Subscription>,
 }
 
+actions!(bluetooth, [TogglePower]);
+
 const CONTEXT: &str = "bluetooth";
 
 impl BluetoothDevicesPanel {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    cx.bind_keys([KeyBinding::new("ctrl-t", TogglePower, Some(CONTEXT))]);
+
     let picker = cx.new(|cx| {
       let mut picker = Picker::new(DevicesDelegate, Arc::new(vec![]), window, cx);
       picker.placeholder("Search bluetooth devices...", cx);
@@ -494,6 +499,23 @@ impl BluetoothDevicesPanel {
     })
   }
 
+  fn toggle_power(&mut self, _: &TogglePower, _window: &mut Window, cx: &mut Context<Self>) {
+    let Some(adapter) = self.adapter.clone() else {
+      return;
+    };
+
+    let new_powered = !self.adapter_powered.unwrap_or(false);
+
+    cx.background_spawn(async move {
+      adapter.set_powered(new_powered).await?;
+      if new_powered {
+        adapter.start_discovery().await?;
+      }
+      Ok::<(), anyhow::Error>(())
+    })
+    .detach_and_log_err(cx);
+  }
+
   fn handle_device_picked(&mut self, device: Device, _window: &mut Window, cx: &mut Context<Self>) {
     cx.background_spawn(async move {
       if !device.paired {
@@ -519,10 +541,24 @@ impl Focusable for BluetoothDevicesPanel {
 }
 
 impl Render for BluetoothDevicesPanel {
-  fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-    let mut input = picker_input(&self.picker)
-      .show_back_button(true)
-      .loading(self.is_discovering);
+  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let mut input = picker_input(&self.picker).show_back_button(true);
+
+    let mut suffix = div()
+      .flex()
+      .flex_row()
+      .items_center()
+      .gap_3()
+      .flex_shrink_0();
+
+    if self.is_discovering {
+      suffix = suffix.child(
+        div()
+          .text_sm()
+          .text_color(rgb(0x888888))
+          .child("Scanning"),
+      );
+    }
 
     if let Some(powered) = self.adapter_powered {
       let (color, label) = if powered {
@@ -531,13 +567,12 @@ impl Render for BluetoothDevicesPanel {
         (rgb(0xCC4444), "Off")
       };
 
-      input = input.suffix(
+      suffix = suffix.child(
         div()
           .flex()
           .flex_row()
           .items_center()
           .gap_1p5()
-          .flex_shrink_0()
           .child(
             div()
               .w(px(8.))
@@ -554,8 +589,11 @@ impl Render for BluetoothDevicesPanel {
       );
     }
 
+    input = input.suffix(suffix);
+
     v_flex()
       .key_context(CONTEXT)
+      .on_action(cx.listener(Self::toggle_power))
       .size_full()
       .child(input)
       .child(picker_results(&self.picker))

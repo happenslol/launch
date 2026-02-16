@@ -131,6 +131,11 @@ impl Adapter {
     Ok(self.proxy.powered().await?)
   }
 
+  pub async fn set_powered(&self, powered: bool) -> Result<()> {
+    self.proxy.set_powered(powered).await?;
+    Ok(())
+  }
+
   pub async fn listen_powered_changed(&self) -> Result<impl Stream<Item = bool> + use<>> {
     let stream = self.proxy.receive_powered_changed().await;
     Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
