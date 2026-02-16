@@ -70,9 +70,10 @@ impl ClipboardDbWriter {
 
   fn insert(&self, mime_types: &[String], data: &[u8]) {
     let mime_types_json = mime_types_to_json(mime_types);
-    let mut statement = match self.0.prepare_cached(
-      "INSERT INTO clipboard_history (mime_types, data) VALUES (?1, ?2)",
-    ) {
+    let mut statement = match self
+      .0
+      .prepare_cached("INSERT INTO clipboard_history (mime_types, data) VALUES (?1, ?2)")
+    {
       Ok(statement) => statement,
       Err(err) => {
         error!(?err, "Failed to prepare clipboard history insert");
@@ -102,8 +103,7 @@ impl ClipboardDbReader {
   }
 
   fn open(&self) -> anyhow::Result<rusqlite::Connection> {
-    let conn =
-      rusqlite::Connection::open_with_flags(&self.0, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = rusqlite::Connection::open_with_flags(&self.0, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     Ok(conn)
   }
 

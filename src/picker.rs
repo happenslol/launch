@@ -521,6 +521,7 @@ pub fn picker_input<D: PickerDelegate>(picker: &Entity<Picker<D>>) -> PickerInpu
     show_back_button: false,
     is_loading: false,
     text_size: None,
+    suffix: None,
   }
 }
 
@@ -531,6 +532,7 @@ pub struct PickerInput<D: PickerDelegate> {
   show_back_button: bool,
   is_loading: bool,
   text_size: Option<Pixels>,
+  suffix: Option<AnyElement>,
 }
 
 impl<D: PickerDelegate> PickerInput<D> {
@@ -546,6 +548,11 @@ impl<D: PickerDelegate> PickerInput<D> {
 
   pub fn text_size(mut self, size: Pixels) -> Self {
     self.text_size = Some(size);
+    self
+  }
+
+  pub fn suffix(mut self, element: impl IntoElement) -> Self {
+    self.suffix = Some(element.into_any_element());
     self
   }
 }
@@ -596,7 +603,8 @@ impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
           .child(input(&search_input).flex_grow())
           .when(self.is_loading, |this| {
             this.child(Spinner::new().color(rgb(0x888888).into()))
-          }),
+          })
+          .when_some(self.suffix, |this, suffix| this.child(suffix)),
       )
   }
 }

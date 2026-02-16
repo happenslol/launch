@@ -126,6 +126,24 @@ impl Adapter {
     self.proxy.stop_discovery().await?;
     Ok(())
   }
+
+  pub async fn powered(&self) -> Result<bool> {
+    Ok(self.proxy.powered().await?)
+  }
+
+  pub async fn listen_powered_changed(&self) -> Result<impl Stream<Item = bool> + use<>> {
+    let stream = self.proxy.receive_powered_changed().await;
+    Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
+  }
+
+  pub async fn discovering(&self) -> Result<bool> {
+    Ok(self.proxy.discovering().await?)
+  }
+
+  pub async fn listen_discovering_changed(&self) -> Result<impl Stream<Item = bool> + use<>> {
+    let stream = self.proxy.receive_discovering_changed().await;
+    Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
+  }
 }
 
 impl std::fmt::Debug for Adapter {
@@ -141,8 +159,10 @@ impl std::fmt::Debug for Adapter {
 pub struct Device {
   pub address: SharedString,
   pub name: SharedString,
+  pub icon: Option<SharedString>,
   pub connected: bool,
   pub paired: bool,
+  pub rssi: Option<i16>,
   pub battery: Option<u8>,
 
   path: OwnedObjectPath,
@@ -164,6 +184,9 @@ impl Device {
       device_proxy.paired(),
     )?;
 
+    let icon = device_proxy.icon().await.ok().map(SharedString::from);
+    let rssi = device_proxy.rssi().await.ok();
+
     let battery = async {
       let builder = api::Battery1Proxy::builder(conn).path(path.clone()).ok()?;
       let proxy = builder.build().await.ok()?;
@@ -174,8 +197,10 @@ impl Device {
     Ok(Self {
       address: SharedString::from(address),
       name: SharedString::from(alias),
+      icon,
       connected,
       paired,
+      rssi,
       battery,
       path,
       conn: conn.clone(),
@@ -213,6 +238,11 @@ impl Device {
     Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
   }
 
+  pub async fn listen_rssi_changed(&self) -> Result<impl Stream<Item = Option<i16>> + use<>> {
+    let stream = self.device_proxy.receive_rssi_changed().await;
+    Ok(stream.filter_map(|signal| async move { signal.get().await.ok().map(Some) }))
+  }
+
   pub async fn listen_battery_changed(&self) -> Result<impl Stream<Item = Option<u8>> + use<>> {
     let battery_proxy = api::Battery1Proxy::builder(&self.conn)
       .path(self.path.clone())?
@@ -229,8 +259,10 @@ impl std::fmt::Debug for Device {
     f.debug_struct("Device")
       .field("address", &self.address)
       .field("name", &self.name)
+      .field("icon", &self.icon)
       .field("connected", &self.connected)
       .field("paired", &self.paired)
+      .field("rssi", &self.rssi)
       .field("battery", &self.battery)
       .finish()
   }
