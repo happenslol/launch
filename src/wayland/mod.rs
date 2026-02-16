@@ -2,6 +2,8 @@
 //! wayland protocols we require there. So, this module provides a separate global wayland
 //! connection that allows us to use any protocols we want.
 
+mod clipboard;
+
 use std::thread;
 
 use anyhow::Result;
@@ -11,21 +13,24 @@ use calloop::{
 };
 use calloop_wayland_source::WaylandSource;
 use gpui::{App, Entity, EventEmitter, Global, prelude::*};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 use wayland_client::{
-  Connection, Dispatch, QueueHandle, delegate_noop, event_created_child,
+  Connection, Dispatch, QueueHandle, delegate_noop,
   protocol::{wl_registry, wl_seat},
 };
 use wayland_protocols_wlr::data_control::v1::client::{
-  zwlr_data_control_device_v1, zwlr_data_control_manager_v1, zwlr_data_control_offer_v1,
-  zwlr_data_control_source_v1,
+  zwlr_data_control_device_v1, zwlr_data_control_manager_v1,
 };
+
+use clipboard::ClipboardState;
 
 #[derive(Debug)]
 pub enum Command {}
 
 #[derive(Debug, Clone)]
-pub enum WaylandEvent {}
+pub enum WaylandEvent {
+  ClipboardText(Vec<u8>),
+}
 
 struct GlobalWaylandConnection(Entity<WaylandConnection>);
 
@@ -44,12 +49,35 @@ impl WaylandConnection {
   }
 }
 
-#[derive(Default)]
-struct State {
-  seat: Option<wl_seat::WlSeat>,
-  data_device: Option<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1>,
-  data_manager: Option<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1>,
-  event_tx: Option<flume::Sender<WaylandEvent>>,
+pub struct State {
+  pub seat: Option<wl_seat::WlSeat>,
+  pub data_device: Option<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1>,
+  pub data_manager: Option<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1>,
+  pub event_tx: Option<flume::Sender<WaylandEvent>>,
+  pub loop_handle: Option<calloop::LoopHandle<'static, State>>,
+  pub clipboard: ClipboardState,
+}
+
+impl State {
+  fn new(event_tx: flume::Sender<WaylandEvent>) -> Self {
+    Self {
+      seat: None,
+      data_device: None,
+      data_manager: None,
+      event_tx: Some(event_tx),
+      loop_handle: None,
+      clipboard: ClipboardState::new(),
+    }
+  }
+
+  fn handle_command(&mut self, cmd: Event<Command>) {
+    let _cmd = match cmd {
+      Event::Msg(cmd) => cmd,
+      Event::Closed => return,
+    };
+
+    // handle command
+  }
 }
 
 pub fn init(cx: &mut App) -> Result<()> {
@@ -105,10 +133,7 @@ fn run(
   let mut event_queue = conn.new_event_queue();
   let qh = event_queue.handle();
   let _registry = display.get_registry(&qh, ());
-  let mut state = State {
-    event_tx: Some(event_tx),
-    ..Default::default()
-  };
+  let mut state = State::new(event_tx);
 
   event_queue.roundtrip(&mut state)?;
 
@@ -122,32 +147,20 @@ fn run(
   let mut event_loop = EventLoop::<State>::try_new()?;
   let handle = event_loop.handle();
 
+  state.loop_handle = Some(handle.clone());
+
   handle
     .insert_source(cmd_rx, |cmd, _, state| state.handle_command(cmd))
-    .unwrap();
+    .map_err(|err| anyhow::anyhow!("Failed to insert command source: {err}"))?;
 
   WaylandSource::new(conn, event_queue)
     .insert(handle)
-    .unwrap();
+    .map_err(|err| anyhow::anyhow!("Failed to insert wayland source: {err}"))?;
 
   init_tx.send(event_loop.get_signal())?;
   event_loop.run(None, &mut state, |_| {})?;
 
   Ok(())
-}
-
-impl State {
-  fn handle_command(&mut self, cmd: Event<Command>) {
-    let _cmd = match cmd {
-      Event::Msg(cmd) => cmd,
-      Event::Closed => {
-        error!("Command channel closed");
-        return;
-      }
-    };
-
-    // handle command
-  }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -197,59 +210,3 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
 
 delegate_noop!(State: ignore wl_seat::WlSeat);
 delegate_noop!(State: ignore zwlr_data_control_manager_v1::ZwlrDataControlManagerV1);
-
-impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for State {
-  fn event(
-    _state: &mut Self,
-    _device: &zwlr_data_control_device_v1::ZwlrDataControlDeviceV1,
-    event: zwlr_data_control_device_v1::Event,
-    _data: &(),
-    _conn: &Connection,
-    _qh: &wayland_client::QueueHandle<Self>,
-  ) {
-    info!("Received zwlr_data_control_device_v1 event: {:?}", event);
-    match event {
-      zwlr_data_control_device_v1::Event::DataOffer { id } => {}
-      zwlr_data_control_device_v1::Event::Selection { id } => {}
-      zwlr_data_control_device_v1::Event::Finished => {}
-      zwlr_data_control_device_v1::Event::PrimarySelection { id } => {}
-      _ => {}
-    }
-  }
-
-  event_created_child!(State, zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, [
-    zwlr_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()),
-  ]);
-}
-
-impl Dispatch<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()> for State {
-  fn event(
-    _state: &mut Self,
-    _offer: &zwlr_data_control_offer_v1::ZwlrDataControlOfferV1,
-    event: zwlr_data_control_offer_v1::Event,
-    _data: &(),
-    _conn: &Connection,
-    _qh: &wayland_client::QueueHandle<Self>,
-  ) {
-    if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
-      info!("Received mime type: {}", mime_type);
-    }
-  }
-}
-
-impl Dispatch<zwlr_data_control_source_v1::ZwlrDataControlSourceV1, ()> for State {
-  fn event(
-    _state: &mut Self,
-    _source: &zwlr_data_control_source_v1::ZwlrDataControlSourceV1,
-    event: zwlr_data_control_source_v1::Event,
-    _data: &(),
-    _conn: &Connection,
-    _qh: &wayland_client::QueueHandle<Self>,
-  ) {
-    match event {
-      zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {}
-      zwlr_data_control_source_v1::Event::Cancelled => {}
-      _ => {}
-    }
-  }
-}

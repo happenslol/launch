@@ -2,6 +2,7 @@
 #![feature(vec_into_chunks)]
 #![feature(result_option_map_or_default)]
 #![feature(string_from_utf8_lossy_owned)]
+#![feature(if_let_guard)]
 
 mod assets;
 mod audio;
