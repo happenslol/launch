@@ -314,7 +314,13 @@ impl<D: PickerDelegate> Picker<D> {
       }
 
       let selectable_count = selectable_items.len();
+
+      // HACK: Preserve relative scroll position. This does work, but I'm 99% sure there's a better
+      // way to do this.
+      let scroll_top = self.category_list_state.logical_scroll_top();
       self.category_list_state.reset(visual_entries.len());
+      self.category_list_state.scroll_to(scroll_top);
+
       self.visual_entries = Some(visual_entries);
       self.selectable_items = Some(selectable_items);
 

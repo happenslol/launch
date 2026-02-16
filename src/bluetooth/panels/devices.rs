@@ -548,7 +548,7 @@ impl Render for BluetoothDevicesPanel {
 
     if let Some(powered) = self.adapter_powered {
       let (color, label) = if self.is_discovering {
-        (rgb(0x4488CC), "Scanning")
+        (rgb(0x4488CC), "Discovering")
       } else if powered {
         (rgb(0x44AA44), "On")
       } else {
