@@ -7,6 +7,7 @@ use gpui::SharedString;
 use zbus::Result;
 use zvariant::{ObjectPath, OwnedObjectPath};
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityType {
   Open,

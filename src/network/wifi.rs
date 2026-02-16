@@ -704,14 +704,14 @@ impl WifiPanel {
         match result {
           Ok(()) => {
             tracing::info!(%ssid, "Disconnected from wifi network");
-            let _ = entry.update(cx, |entry, cx| {
+            entry.update(cx, |entry, cx| {
               entry.is_connected = false;
               cx.notify();
             });
           }
           Err(error) => {
             tracing::error!(%ssid, %error, "Failed to disconnect from wifi network");
-            let _ = entry.update(cx, |entry, cx| {
+            entry.update(cx, |entry, cx| {
               entry.connection_state = ConnectionState::Failed;
               cx.notify();
             });
@@ -829,7 +829,7 @@ impl WifiPanel {
         match result {
           Ok(()) => {
             tracing::info!(%ssid, "Connected to known wifi network");
-            let _ = entry.update(cx, |entry, cx| {
+            entry.update(cx, |entry, cx| {
               entry.connection_state = ConnectionState::Idle;
               entry.is_connected = true;
               cx.notify();
@@ -837,7 +837,7 @@ impl WifiPanel {
           }
           Err(error) => {
             tracing::error!(%ssid, %error, "Failed to connect to known wifi network");
-            let _ = entry.update(cx, |entry, cx| {
+            entry.update(cx, |entry, cx| {
               entry.connection_state = ConnectionState::Failed;
               cx.notify();
             });
@@ -908,7 +908,7 @@ impl WifiPanel {
           }
           Err(error) => {
             tracing::error!(%ssid, %error, "Failed to connect to open wifi network");
-            let _ = entry.update(cx, |entry, cx| {
+            entry.update(cx, |entry, cx| {
               entry.connection_state = ConnectionState::Failed;
               cx.notify();
             });
@@ -981,7 +981,7 @@ impl WifiPanel {
           }
           Err(error) => {
             tracing::error!(%ssid, %error, "Failed to connect to secured wifi network");
-            let _ = entry.update(cx, |entry, cx| {
+            entry.update(cx, |entry, cx| {
               entry.connection_state = ConnectionState::Failed;
               cx.notify();
             });

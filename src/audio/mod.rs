@@ -52,7 +52,7 @@ impl AudioState {
       async move |cx| {
         while let Ok(event) = sink_list_rx.recv_async().await {
           if let SinkListEvent::DefaultChanged(id) = event {
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
               this.default_sink = id;
               cx.notify();
             });
@@ -69,7 +69,7 @@ impl AudioState {
       async move |cx| {
         while let Ok(event) = source_list_rx.recv_async().await {
           if let SourceListEvent::DefaultChanged(id) = event {
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
               this.default_source = id;
               cx.notify();
             });
