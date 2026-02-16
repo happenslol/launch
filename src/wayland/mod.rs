@@ -135,6 +135,25 @@ fn run(
   let _registry = display.get_registry(&qh, ());
   let mut state = State::new(event_tx);
 
+  if let Some(reader) = &state.clipboard.db_reader {
+    match reader.recent(10) {
+      Ok(entries) => {
+        for entry in &entries {
+          let text = String::from_utf8_lossy(&entry.data);
+          debug!(
+            id = entry.id,
+            timestamp = entry.timestamp,
+            mime_types = ?entry.mime_types,
+            text = %text,
+            "Clipboard history entry"
+          );
+        }
+        debug!(count = entries.len(), "Loaded recent clipboard history");
+      }
+      Err(err) => error!(?err, "Failed to load clipboard history"),
+    }
+  }
+
   event_queue.roundtrip(&mut state)?;
 
   // Create data control device for the seat

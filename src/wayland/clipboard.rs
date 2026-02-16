@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsFd;
+use std::path::PathBuf;
 
 use calloop::generic::Generic;
 use calloop::{Interest, Mode, PostAction};
+use rusqlite::OpenFlags;
 use rustix::fs::{OFlags, fcntl_setfl};
 use rustix::pipe::PipeFlags;
 use tracing::{debug, error, warn};
@@ -31,20 +33,144 @@ pub enum SelectionState {
   },
 }
 
+fn clipboard_db_path() -> anyhow::Result<PathBuf> {
+  let local = dirs::data_local_dir()
+    .ok_or_else(|| anyhow::anyhow!("No local data dir"))?
+    .join("launch");
+  fs::create_dir_all(&local)?;
+  Ok(local.join("clipboard.db"))
+}
+
+struct ClipboardDbWriter(rusqlite::Connection);
+
+impl ClipboardDbWriter {
+  fn new() -> anyhow::Result<(Self, ClipboardDbReader)> {
+    let path = clipboard_db_path()?;
+
+    let conn = rusqlite::Connection::open_with_flags(
+      &path,
+      OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )?;
+
+    conn.execute_batch(
+      r#"
+      CREATE TABLE IF NOT EXISTS clipboard_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp INTEGER NOT NULL DEFAULT (unixepoch()),
+        mime_types TEXT NOT NULL,
+        data BLOB NOT NULL
+      ) STRICT;
+      "#,
+    )?;
+
+    let reader = ClipboardDbReader::new(path);
+
+    Ok((Self(conn), reader))
+  }
+
+  fn insert(&self, mime_types: &[String], data: &[u8]) {
+    let mime_types_json = mime_types_to_json(mime_types);
+    let mut statement = match self.0.prepare_cached(
+      "INSERT INTO clipboard_history (mime_types, data) VALUES (?1, ?2)",
+    ) {
+      Ok(statement) => statement,
+      Err(err) => {
+        error!(?err, "Failed to prepare clipboard history insert");
+        return;
+      }
+    };
+
+    if let Err(err) = statement.execute(rusqlite::params![mime_types_json, data]) {
+      error!(?err, "Failed to insert clipboard history entry");
+    }
+  }
+}
+
+pub struct ClipboardEntry {
+  pub id: i64,
+  pub timestamp: i64,
+  pub mime_types: Vec<String>,
+  pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClipboardDbReader(PathBuf);
+
+impl ClipboardDbReader {
+  fn new(path: PathBuf) -> Self {
+    Self(path)
+  }
+
+  fn open(&self) -> anyhow::Result<rusqlite::Connection> {
+    let conn =
+      rusqlite::Connection::open_with_flags(&self.0, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(conn)
+  }
+
+  pub fn recent(&self, limit: u32) -> anyhow::Result<Vec<ClipboardEntry>> {
+    let conn = self.open()?;
+    let mut statement = conn.prepare_cached(
+      "SELECT id, timestamp, mime_types, data FROM clipboard_history ORDER BY id DESC LIMIT ?1",
+    )?;
+
+    let rows = statement.query_map([limit], |row| {
+      Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, i64>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, Vec<u8>>(3)?,
+      ))
+    })?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+      let (id, timestamp, mime_types_json, data) = row?;
+      entries.push(ClipboardEntry {
+        id,
+        timestamp,
+        mime_types: parse_mime_types_json(&mime_types_json),
+        data,
+      });
+    }
+
+    Ok(entries)
+  }
+}
+
+fn mime_types_to_json(mime_types: &[String]) -> String {
+  serde_json::to_string(mime_types).expect("serialize mime types")
+}
+
+fn parse_mime_types_json(json: &str) -> Vec<String> {
+  serde_json::from_str(json).unwrap_or_default()
+}
+
 pub struct ClipboardState {
   pub pending_offer: Option<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1>,
   pub pending_mime_types: Vec<String>,
   pub clipboard_data: HashMap<String, Vec<u8>>,
   pub selection_state: SelectionState,
+  db_writer: Option<ClipboardDbWriter>,
+  pub db_reader: Option<ClipboardDbReader>,
 }
 
 impl ClipboardState {
   pub fn new() -> Self {
+    let (db_writer, db_reader) = match ClipboardDbWriter::new() {
+      Ok((writer, reader)) => (Some(writer), Some(reader)),
+      Err(err) => {
+        error!(?err, "Failed to open clipboard history database");
+        (None, None)
+      }
+    };
+
     Self {
       pending_offer: None,
       pending_mime_types: Vec::new(),
       clipboard_data: HashMap::new(),
       selection_state: SelectionState::Free,
+      db_writer,
+      db_reader,
     }
   }
 }
@@ -90,6 +216,10 @@ impl State {
       mime_types = ?self.clipboard.clipboard_data.keys().collect::<Vec<_>>(),
       "Clipboard data captured"
     );
+
+    if let Some(writer) = &self.clipboard.db_writer {
+      writer.insert(&offered_mime_types, &data);
+    }
 
     if let Some(event_tx) = &self.event_tx
       && let Err(err) = event_tx.send(WaylandEvent::ClipboardText(data))
