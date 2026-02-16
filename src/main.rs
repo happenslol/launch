@@ -53,7 +53,7 @@ fn main() -> Result<()> {
   let args = Args::try_parse()?;
 
   if args.no_daemon {
-    run_app(args.panel, args.no_keyboard_capture, None);
+    run_app(args.panel, args.no_keyboard_capture, true, None);
     return Ok(());
   }
 
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
         }
 
         let receiver = instance::listen(listener);
-        run_app(args.panel, args.no_keyboard_capture, Some(receiver));
+        run_app(args.panel, args.no_keyboard_capture, false, Some(receiver));
       }
     }
   }
@@ -89,7 +89,12 @@ fn main() -> Result<()> {
   Ok(())
 }
 
-fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Receiver<Message>>) {
+fn run_app(
+  panel: Option<String>,
+  no_keyboard_capture: bool,
+  no_daemon: bool,
+  receiver: Option<Receiver<Message>>,
+) {
   let mode = if receiver.is_some() {
     QuitMode::Explicit
   } else {
@@ -100,7 +105,7 @@ fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Re
     .with_assets(Assets)
     .with_quit_mode(mode)
     .run(move |cx| {
-      wayland::init(cx).unwrap();
+      wayland::init(cx, !no_daemon).unwrap();
       matcher::init(cx);
       dbus::init(cx);
       audio::init(cx);

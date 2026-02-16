@@ -182,13 +182,17 @@ pub struct ClipboardState {
 }
 
 impl ClipboardState {
-  pub fn new() -> Self {
-    let (db_writer, db_reader) = match ClipboardDbWriter::new() {
-      Ok((writer, reader)) => (Some(writer), Some(reader)),
-      Err(err) => {
-        error!(?err, "Failed to open clipboard history database");
-        (None, None)
+  pub fn new(clipboard_monitoring: bool) -> Self {
+    let (db_writer, db_reader) = if clipboard_monitoring {
+      match ClipboardDbWriter::new() {
+        Ok((writer, reader)) => (Some(writer), Some(reader)),
+        Err(err) => {
+          error!(?err, "Failed to open clipboard history database");
+          (None, None)
+        }
       }
+    } else {
+      (None, None)
     };
 
     Self {
