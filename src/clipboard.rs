@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled, Task,
-  Window, prelude::*, rgb, rgba,
+  App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled,
+  Subscription, Task, Window, prelude::*, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -16,9 +16,9 @@ use crate::{
   icon::{Icon, IconName},
   launcher::RootItem,
   matcher::MatcherPool,
-  picker::{Picker, PickerDelegate, picker_input, picker_results},
+  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
-  wayland::{ClipboardDbReader, ClipboardEntry},
+  wayland::{self, ClipboardDbReader, ClipboardEntry},
 };
 
 pub fn get_items() -> Vec<RootItem> {
@@ -62,16 +62,31 @@ impl ClipboardItem {
 
 struct ClipboardPanel {
   picker: Entity<Picker<ClipboardDelegate>>,
+  connection: Entity<wayland::WaylandConnection>,
   _load_task: Option<Task<()>>,
+  _subscriptions: Vec<Subscription>,
 }
 
 impl ClipboardPanel {
   fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let connection = wayland::WaylandConnection::global(cx);
+
     let picker = cx.new(|cx| {
       let mut picker = Picker::new(ClipboardDelegate, Arc::new(vec![]), window, cx);
       picker.placeholder("Search clipboard history...", cx);
       picker
     });
+
+    let subscriptions = vec![cx.subscribe_in(
+      &picker,
+      window,
+      |this, _picker, event, window, cx| {
+        if let PickerEvent::Picked(item) = event {
+          this.connection.read(cx).send_command(wayland::Command::CopyHistoryEntry { id: item.id });
+          window.remove_window();
+        }
+      },
+    )];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
@@ -79,7 +94,9 @@ impl ClipboardPanel {
 
     Self {
       picker,
+      connection,
       _load_task: Some(load_task),
+      _subscriptions: subscriptions,
     }
   }
 

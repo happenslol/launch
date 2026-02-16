@@ -22,15 +22,17 @@ use wayland_protocols_wlr::data_control::v1::client::{
   zwlr_data_control_device_v1, zwlr_data_control_manager_v1,
 };
 
-pub use clipboard::{ClipboardDbReader, ClipboardEntry};
 use clipboard::ClipboardState;
+pub use clipboard::{ClipboardDbReader, ClipboardEntry};
 
 #[derive(Debug)]
-pub enum Command {}
+pub enum Command {
+  CopyHistoryEntry { id: i64 },
+}
 
 #[derive(Debug, Clone)]
 pub enum WaylandEvent {
-  ClipboardText(Vec<u8>),
+  ClipboardText,
 }
 
 struct GlobalWaylandConnection(Entity<WaylandConnection>);
@@ -59,6 +61,12 @@ impl WaylandConnection {
   pub fn global(cx: &App) -> Entity<Self> {
     cx.global::<GlobalWaylandConnection>().0.clone()
   }
+
+  pub fn send_command(&self, cmd: Command) {
+    if let Err(err) = self.cmd_tx.send(cmd) {
+      error!(?err, "Failed to send command to wayland thread");
+    }
+  }
 }
 
 pub struct State {
@@ -67,6 +75,7 @@ pub struct State {
   pub data_manager: Option<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1>,
   pub event_tx: Option<flume::Sender<WaylandEvent>>,
   pub loop_handle: Option<calloop::LoopHandle<'static, State>>,
+  pub qh: Option<QueueHandle<Self>>,
   pub clipboard: ClipboardState,
 }
 
@@ -78,17 +87,22 @@ impl State {
       data_manager: None,
       event_tx: Some(event_tx),
       loop_handle: None,
+      qh: None,
       clipboard: ClipboardState::new(),
     }
   }
 
   fn handle_command(&mut self, cmd: Event<Command>) {
-    let _cmd = match cmd {
+    let cmd = match cmd {
       Event::Msg(cmd) => cmd,
       Event::Closed => return,
     };
 
-    // handle command
+    match cmd {
+      Command::CopyHistoryEntry { id } => {
+        self.copy_history_entry(id);
+      }
+    }
   }
 }
 
@@ -158,6 +172,7 @@ fn run(
   let qh = event_queue.handle();
   let _registry = display.get_registry(&qh, ());
   let mut state = State::new(event_tx);
+  state.qh = Some(qh.clone());
 
   event_queue.roundtrip(&mut state)?;
 

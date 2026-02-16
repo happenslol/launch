@@ -107,6 +107,33 @@ impl ClipboardDbReader {
     Ok(conn)
   }
 
+  pub fn get_by_id(&self, id: i64) -> anyhow::Result<Option<ClipboardEntry>> {
+    let conn = self.open()?;
+    let mut statement = conn.prepare_cached(
+      "SELECT id, timestamp, mime_types, data FROM clipboard_history WHERE id = ?1",
+    )?;
+
+    let mut rows = statement.query_map([id], |row| {
+      Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, i64>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, Vec<u8>>(3)?,
+      ))
+    })?;
+
+    match rows.next() {
+      Some(Ok((id, timestamp, mime_types_json, data))) => Ok(Some(ClipboardEntry {
+        id,
+        timestamp,
+        mime_types: parse_mime_types_json(&mime_types_json),
+        data,
+      })),
+      Some(Err(err)) => Err(err.into()),
+      None => Ok(None),
+    }
+  }
+
   pub fn recent(&self, limit: u32) -> anyhow::Result<Vec<ClipboardEntry>> {
     let conn = self.open()?;
     let mut statement = conn.prepare_cached(
@@ -185,6 +212,40 @@ fn pick_mime_type(offered: &[String]) -> Option<String> {
 }
 
 impl State {
+  pub fn copy_history_entry(&mut self, id: i64) {
+    let Some(reader) = &self.clipboard.db_reader else {
+      error!("No clipboard database reader available");
+      return;
+    };
+
+    let entry = match reader.get_by_id(id) {
+      Ok(Some(entry)) => entry,
+      Ok(None) => {
+        error!(id, "Clipboard history entry not found");
+        return;
+      }
+      Err(err) => {
+        error!(?err, id, "Failed to read clipboard history entry");
+        return;
+      }
+    };
+
+    self.clipboard.clipboard_data.clear();
+    for mime_type in TEXT_MIME_TYPES {
+      self
+        .clipboard
+        .clipboard_data
+        .insert((*mime_type).to_string(), entry.data.clone());
+    }
+
+    let Some(qh) = &self.qh else {
+      error!("No QueueHandle available");
+      return;
+    };
+    let qh = qh.clone();
+    self.offer(&qh);
+  }
+
   fn on_clipboard_read_complete(
     &mut self,
     data: Vec<u8>,
@@ -222,15 +283,15 @@ impl State {
     }
 
     if let Some(event_tx) = &self.event_tx
-      && let Err(err) = event_tx.send(WaylandEvent::ClipboardText(data))
+      && let Err(err) = event_tx.send(WaylandEvent::ClipboardText)
     {
       error!(?err, "Failed to send clipboard event");
     }
 
-    self.offer_captured_clipboard(qh);
+    self.offer(qh);
   }
 
-  fn offer_captured_clipboard(&mut self, qh: &QueueHandle<Self>) {
+  fn offer(&mut self, qh: &QueueHandle<Self>) {
     if let SelectionState::Ours(old_source) = &self.clipboard.selection_state {
       old_source.destroy();
     }
