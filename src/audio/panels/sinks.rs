@@ -317,7 +317,10 @@ impl RenderOnce for VolumeBar {
     let fill_percentage = (self.volume_percent as f32 / 100.0).min(1.0);
 
     let (track_color, fill_color) = match (self.is_muted, self.is_default, self.is_selected) {
-      (true, _, _) => (rgba(0xFFFFFF03), rgba(0xFFFFFF05)),
+      (true, true, true) => (rgba(0x3B82F60C), rgba(0x3B82F618)),
+      (true, true, false) => (rgba(0x3B82F608), rgba(0x3B82F610)),
+      (true, false, true) => (rgba(0xFFFFFF08), rgba(0xFFFFFF0C)),
+      (true, false, false) => (rgba(0xFFFFFF03), rgba(0xFFFFFF05)),
       (_, true, true) => (rgba(0x3B82F618), rgba(0x3B82F635)),
       (_, true, false) => (rgba(0x3B82F610), rgba(0x3B82F625)),
       (_, false, true) => (rgba(0xFFFFFF0C), rgba(0xFFFFFF22)),
@@ -326,7 +329,7 @@ impl RenderOnce for VolumeBar {
 
     let inset_y = px(4.0);
     let inset_x = px(0.0);
-    let rounding = px(5.0);
+    let rounding = px(8.0);
 
     div()
       .absolute()
@@ -422,8 +425,10 @@ impl PickerDelegate for SinksDelegate {
           .child(
             div()
               .text_xs()
-              .font_weight(FontWeight::MEDIUM)
               .text_color(rgb(0x888888))
+              .when(sink.mute, |div| {
+                div.text_color(rgb(0x666666)).font_weight(FontWeight::BOLD)
+              })
               .child(if sink.mute {
                 "MUTE".to_string()
               } else {
