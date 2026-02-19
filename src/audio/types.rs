@@ -8,6 +8,7 @@ pub struct SinkInfo {
   pub id: SinkId,
   pub name: Option<SharedString>,
   pub description: Option<SharedString>,
+  pub form_factor: Option<SharedString>,
   pub volume: ChannelVolumes,
   pub base_volume: Volume,
   pub mute: bool,

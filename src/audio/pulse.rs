@@ -752,6 +752,11 @@ impl PulseState {
     let mut events_to_send: Vec<SinkEvent> = Vec::new();
     let mut list_event: Option<SinkListEvent> = None;
 
+    let form_factor = info
+      .proplist
+      .get_str("device.icon_name")
+      .map(|s| SharedString::from(s.to_string()));
+
     if let Some(sink) = this.sinks.get_mut(&info.index) {
       if sink.volume != info.volume {
         sink.volume = info.volume.into();
@@ -766,6 +771,7 @@ impl PulseState {
 
       if sink.name.as_ref().map(|s| s.as_str()) != info.name.as_deref()
         || sink.description.as_ref().map(|s| s.as_str()) != info.description.as_deref()
+        || sink.form_factor != form_factor
       {
         sink.name = info
           .name
@@ -775,6 +781,7 @@ impl PulseState {
           .description
           .as_ref()
           .map(|s| SharedString::from(s.to_string()));
+        sink.form_factor = form_factor;
         events_to_send.push(SinkEvent::InfoChanged(sink.clone()));
       }
     } else {
@@ -788,6 +795,7 @@ impl PulseState {
           .description
           .as_ref()
           .map(|s| SharedString::from(s.to_string())),
+        form_factor,
         volume: info.volume.into(),
         base_volume: info.base_volume.into(),
         mute: info.mute,

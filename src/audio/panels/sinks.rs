@@ -1,8 +1,9 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
-  App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render,
-  RenderOnce, Styled, Subscription, Task, Window, actions, div, prelude::*, px, relative, rgba,
+  App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding,
+  Render, RenderOnce, Styled, Subscription, Task, Window, actions, div, prelude::*, px, relative,
+  rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -15,6 +16,7 @@ use crate::{
     pulse::{SetMute, SetVolume},
     types::{SinkEvent, SinkId, SinkInfo, SinkListEvent},
   },
+  icon::{Icon, IconName},
   matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
@@ -344,6 +346,24 @@ impl RenderOnce for VolumeBar {
   }
 }
 
+fn sink_icon(icon_name: Option<&str>) -> IconName {
+  let Some(icon_name) = icon_name else {
+    return IconName::DeviceSpeaker;
+  };
+
+  if icon_name.contains("headphone") {
+    IconName::Headphones
+  } else if icon_name.contains("headset") {
+    IconName::Headset
+  } else if icon_name.contains("speaker") {
+    IconName::DeviceSpeaker
+  } else if icon_name.contains("card") {
+    IconName::Volume
+  } else {
+    IconName::DeviceSpeaker
+  }
+}
+
 struct SinksDelegate {
   audio_state: Entity<AudioState>,
 }
@@ -361,6 +381,7 @@ impl PickerDelegate for SinksDelegate {
     let sink = &item.entry.read(cx).sink;
     let is_default = self.audio_state.read(cx).default_sink == Some(sink.id);
     let volume_percent = sink.volume.as_percent(sink.base_volume);
+    let icon = sink_icon(sink.form_factor.as_ref().map(|s| s.as_ref()));
 
     v_flex()
       .w_full()
@@ -373,12 +394,24 @@ impl PickerDelegate for SinksDelegate {
         h_flex()
           .w_full()
           .gap_2()
+          .child({
+            let icon_color = match (sink.mute, is_default, is_selected) {
+              (true, _, _) => rgb(0x555555),
+              (_, true, true) => rgb(0x6EA8F0),
+              (_, true, false) => rgb(0x5B93D5),
+              (_, false, true) => rgb(0xBBBBBB),
+              (_, false, false) => rgb(0x888888),
+            };
+            Icon::new(icon)
+              .custom_size(rems(1.1))
+              .color(icon_color.into())
+          })
           .child(
             h_flex()
               .flex_1()
               .text_ellipsis()
               .overflow_x_hidden()
-              .when(sink.mute, |div| div.child("MUTE "))
+              .when(sink.mute, |div| div.opacity(0.5))
               .child(
                 sink
                   .description
@@ -386,7 +419,17 @@ impl PickerDelegate for SinksDelegate {
                   .unwrap_or_else(|| sink.name.clone().unwrap_or_default()),
               ),
           )
-          .child(div().child(format!("{}%", volume_percent))),
+          .child(
+            div()
+              .text_xs()
+              .font_weight(FontWeight::MEDIUM)
+              .text_color(rgb(0x888888))
+              .child(if sink.mute {
+                "MUTE".to_string()
+              } else {
+                format!("{}%", volume_percent)
+              }),
+          ),
       )
   }
 
