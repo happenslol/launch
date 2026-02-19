@@ -12,6 +12,8 @@ pub struct SinkInfo {
   pub volume: ChannelVolumes,
   pub base_volume: Volume,
   pub mute: bool,
+  pub is_hardware: bool,
+  pub port_available: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]

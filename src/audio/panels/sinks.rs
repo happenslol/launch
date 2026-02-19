@@ -2,8 +2,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding,
-  Render, RenderOnce, Styled, Subscription, Task, Window, actions, div, prelude::*, px, relative,
-  rems, rgb, rgba,
+  Render, RenderOnce, SharedString, Styled, Subscription, Task, Window, actions, div, prelude::*,
+  px, relative, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -18,14 +18,16 @@ use crate::{
   },
   icon::{Icon, IconName},
   matcher::MatcherPool,
-  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
+  picker::{Category, Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
 };
 
 #[derive(Clone)]
 pub struct SinkEntry {
   id: SinkId,
+  description: Option<SharedString>,
   search_string: String,
+  port_available: Option<bool>,
   entry: Entity<SinkEntryInner>,
 }
 
@@ -37,6 +39,8 @@ impl SinkEntry {
     cx: &mut App,
   ) -> Self {
     let id = sink.id;
+    let description = sink.description.clone();
+    let port_available = sink.port_available;
     let mut search_parts = Vec::new();
     if let Some(ref name) = sink.name {
       search_parts.push(name.to_string());
@@ -49,7 +53,9 @@ impl SinkEntry {
 
     Self {
       id,
+      description,
       search_string,
+      port_available,
       entry,
     }
   }
@@ -59,6 +65,10 @@ pub struct SinkEntryInner {
   sink: SinkInfo,
   _event_listener: Task<()>,
 }
+
+pub struct SinkStateChanged;
+
+impl gpui::EventEmitter<SinkStateChanged> for SinkEntryInner {}
 
 impl SinkEntryInner {
   pub fn new(
@@ -86,6 +96,7 @@ impl SinkEntryInner {
             }
             SinkEvent::InfoChanged(info) => {
               this.sink = info;
+              cx.emit(SinkStateChanged);
               cx.notify();
             }
             SinkEvent::BecameDefault | SinkEvent::NoLongerDefault => {
@@ -160,6 +171,11 @@ impl AudioSinksPanel {
             .map(|sink| SinkEntry::new(sink, &audio_state, window, cx))
             .collect();
 
+          let entries: Vec<_> = this.sinks.clone();
+          for entry in &entries {
+            this.subscribe_to_sink_entry(entry, window, cx);
+          }
+
           picker.update(cx, |picker, cx| {
             picker.set_items(this.sinks.clone(), window, cx);
           });
@@ -178,6 +194,7 @@ impl AudioSinksPanel {
             SinkListEvent::Added(sink_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
                 let new_entry = SinkEntry::new(sink_info, &audio_state, window, cx);
+                this.subscribe_to_sink_entry(&new_entry, window, cx);
                 this.sinks.push(new_entry);
 
                 picker.update(cx, |picker, cx| {
@@ -206,6 +223,9 @@ impl AudioSinksPanel {
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
         if let PickerEvent::Picked(entry) = ev {
+          if entry.port_available == Some(false) {
+            return;
+          }
           this
             .audio_state
             .update(cx, |state, cx| state.set_default_sink(entry.id, cx))
@@ -224,6 +244,29 @@ impl AudioSinksPanel {
       _list_subscription_task: list_subscription_task,
       _initial_load_task: initial_load_task,
     }
+  }
+
+  fn subscribe_to_sink_entry(
+    &mut self,
+    entry: &SinkEntry,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let picker = self.picker.clone();
+    self._subscriptions.push(cx.subscribe_in(
+      &entry.entry,
+      window,
+      move |this, entry, _event: &SinkStateChanged, window, cx| {
+        let sink = &entry.read(cx).sink;
+        if let Some(sink_entry) = this.sinks.iter_mut().find(|e| e.entry == *entry) {
+          sink_entry.description = sink.description.clone();
+          sink_entry.port_available = sink.port_available;
+        }
+        picker.update(cx, |picker, cx| {
+          picker.set_items(this.sinks.clone(), window, cx);
+        });
+      },
+    ));
   }
 
   fn get_selected_id(&self, cx: &mut Context<Self>) -> Option<SinkId> {
@@ -383,6 +426,8 @@ impl PickerDelegate for SinksDelegate {
   ) -> impl IntoElement {
     let sink = &item.entry.read(cx).sink;
     let is_default = self.audio_state.read(cx).default_sink == Some(sink.id);
+    let is_unavailable = sink.port_available == Some(false);
+    let is_dimmed = sink.mute || is_unavailable;
     let volume_percent = sink.volume.as_percent(sink.base_volume);
     let icon = sink_icon(sink.form_factor.as_ref().map(|s| s.as_ref()));
 
@@ -392,13 +437,13 @@ impl PickerDelegate for SinksDelegate {
       .px_2()
       .py_3()
       .rounded_md()
-      .child(VolumeBar::new(volume_percent, sink.mute, is_selected).default(is_default))
+      .child(VolumeBar::new(volume_percent, is_dimmed, is_selected).default(is_default))
       .child(
         h_flex()
           .w_full()
           .gap_2()
           .child({
-            let icon_color = match (sink.mute, is_default, is_selected) {
+            let icon_color = match (is_dimmed, is_default, is_selected) {
               (true, _, _) => rgb(0x555555),
               (_, true, true) => rgb(0x6EA8F0),
               (_, true, false) => rgb(0x5B93D5),
@@ -414,7 +459,7 @@ impl PickerDelegate for SinksDelegate {
               .flex_1()
               .text_ellipsis()
               .overflow_x_hidden()
-              .when(sink.mute, |div| div.opacity(0.5))
+              .when(is_dimmed, |div| div.opacity(0.5))
               .child(
                 sink
                   .description
@@ -436,6 +481,24 @@ impl PickerDelegate for SinksDelegate {
               }),
           ),
       )
+  }
+
+  fn sort_items(&self, _cx: &App, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
+    matches.sort_by_key(|(index, score)| {
+      let description = items[*index].description.clone().unwrap_or_default();
+      (std::cmp::Reverse(*score), description)
+    });
+  }
+
+  fn categories(&self) -> Option<Vec<Category<Self::ListItem>>> {
+    Some(vec![
+      Category::new("Available", |entry: &SinkEntry| {
+        entry.port_available != Some(false)
+      }),
+      Category::new("Unavailable", |entry: &SinkEntry| {
+        entry.port_available == Some(false)
+      }),
+    ])
   }
 
   fn update_matches(

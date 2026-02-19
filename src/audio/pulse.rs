@@ -19,7 +19,7 @@ use pulse::{
     introspect::{self, Introspector, ServerInfo},
     subscribe::{Facility, InterestMaskSet, Operation},
   },
-  def::Retval,
+  def::{self, Retval},
   mainloop::{
     api::Mainloop as _,
     events::io::FlagSet as EventFlagSet,
@@ -752,10 +752,25 @@ impl PulseState {
     let mut events_to_send: Vec<SinkEvent> = Vec::new();
     let mut list_event: Option<SinkListEvent> = None;
 
+    let is_hardware = info.flags.contains(def::SinkFlagSet::HARDWARE);
+
+    // Skip virtual (non-hardware) sinks entirely
+    if !is_hardware {
+      return;
+    }
+
     let form_factor = info
       .proplist
       .get_str("device.icon_name")
       .map(|s| SharedString::from(s.to_string()));
+
+    let port_available = info.active_port.as_ref().and_then(|port| {
+      match port.available {
+        def::PortAvailable::Unknown => None,
+        def::PortAvailable::No => Some(false),
+        def::PortAvailable::Yes => Some(true),
+      }
+    });
 
     if let Some(sink) = this.sinks.get_mut(&info.index) {
       if sink.volume != info.volume {
@@ -772,6 +787,7 @@ impl PulseState {
       if sink.name.as_ref().map(|s| s.as_str()) != info.name.as_deref()
         || sink.description.as_ref().map(|s| s.as_str()) != info.description.as_deref()
         || sink.form_factor != form_factor
+        || sink.port_available != port_available
       {
         sink.name = info
           .name
@@ -782,6 +798,7 @@ impl PulseState {
           .as_ref()
           .map(|s| SharedString::from(s.to_string()));
         sink.form_factor = form_factor;
+        sink.port_available = port_available;
         events_to_send.push(SinkEvent::InfoChanged(sink.clone()));
       }
     } else {
@@ -799,6 +816,8 @@ impl PulseState {
         volume: info.volume.into(),
         base_volume: info.base_volume.into(),
         mute: info.mute,
+        is_hardware,
+        port_available,
       };
 
       this.sinks.insert(info.index, managed.clone());

@@ -76,6 +76,7 @@ impl BluetoothEntry {
   }
 }
 
+// TODO: Why the hell are these atomic lol
 pub struct DeviceEntryInner {
   device: Device,
   is_connected: Arc<AtomicBool>,
