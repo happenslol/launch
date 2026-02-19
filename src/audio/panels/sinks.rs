@@ -314,12 +314,12 @@ impl RenderOnce for VolumeBar {
   fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
     let fill_percentage = (self.volume_percent as f32 / 100.0).min(1.0);
 
-    let (track_color, fill_color) = if self.is_muted {
-      (rgba(0xFFFFFF03), rgba(0xFFFFFF05))
-    } else if self.is_default {
-      (rgba(0x3B82F610), rgba(0x3B82F625))
-    } else {
-      (rgba(0xFFFFFF06), rgba(0xFFFFFF15))
+    let (track_color, fill_color) = match (self.is_muted, self.is_default, self.is_selected) {
+      (true, _, _) => (rgba(0xFFFFFF03), rgba(0xFFFFFF05)),
+      (_, true, true) => (rgba(0x3B82F618), rgba(0x3B82F635)),
+      (_, true, false) => (rgba(0x3B82F610), rgba(0x3B82F625)),
+      (_, false, true) => (rgba(0xFFFFFF0C), rgba(0xFFFFFF22)),
+      (_, false, false) => (rgba(0xFFFFFF06), rgba(0xFFFFFF15)),
     };
 
     let inset_y = px(4.0);
@@ -368,7 +368,6 @@ impl PickerDelegate for SinksDelegate {
       .px_2()
       .py_3()
       .rounded_md()
-      // .when(is_selected, |this| this.bg(rgba(0xFFFFFF10)))
       .child(VolumeBar::new(volume_percent, sink.mute, is_selected).default(is_default))
       .child(
         h_flex()

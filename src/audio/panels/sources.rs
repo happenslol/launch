@@ -315,7 +315,6 @@ impl PickerDelegate for SourcesDelegate {
       .px_2()
       .py_3()
       .rounded_md()
-      .when(is_selected, |this| this.bg(rgba(0xFFFFFF10)))
       .child(VolumeBar::new(volume_percent, source.mute, is_selected).default(is_default))
       .child(
         h_flex()

@@ -482,7 +482,6 @@ impl PickerDelegate for StreamsDelegate {
       .px_2()
       .py_3()
       .rounded_md()
-      .when(is_selected, |this| this.bg(rgba(0xFFFFFF10)))
       .child(VolumeBar::new(volume_percent, sink_input.mute, is_selected))
       .child(
         h_flex()
