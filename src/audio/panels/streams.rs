@@ -51,8 +51,7 @@ impl StreamEntry {
       search_parts.push(app_name.to_string());
     }
     let search_string = search_parts.join(" ");
-    let entry =
-      cx.new(|cx| SinkInputEntryInner::new(sink_input, audio_state, sinks, window, cx));
+    let entry = cx.new(|cx| SinkInputEntryInner::new(sink_input, audio_state, sinks, window, cx));
 
     Self {
       id,
@@ -190,9 +189,7 @@ impl AudioStreamsPanel {
 
           this.sink_inputs = sink_inputs
             .into_iter()
-            .map(|input| {
-              StreamEntry::new(input, &audio_state, &sinks, window, cx)
-            })
+            .map(|input| StreamEntry::new(input, &audio_state, &sinks, window, cx))
             .collect();
 
           picker.update(cx, |picker, cx| {
@@ -212,13 +209,7 @@ impl AudioStreamsPanel {
           match event {
             SinkInputListEvent::Added(input_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                let new_entry = StreamEntry::new(
-                  input_info,
-                  &audio_state,
-                  &this.sinks,
-                  window,
-                  cx,
-                );
+                let new_entry = StreamEntry::new(input_info, &audio_state, &this.sinks, window, cx);
                 this.sink_inputs.push(new_entry);
 
                 picker.update(cx, |picker, cx| {
@@ -487,11 +478,12 @@ impl PickerDelegate for StreamsDelegate {
 
     v_flex()
       .w_full()
+      .relative()
       .px_2()
-      .py_2()
+      .py_3()
       .rounded_md()
-      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
-      .gap_1()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF10)))
+      .child(VolumeBar::new(volume_percent, sink_input.mute, is_selected))
       .child(
         h_flex()
           .w_full()
@@ -516,7 +508,6 @@ impl PickerDelegate for StreamsDelegate {
           )
           .child(div().child(format!("{}%", volume_percent))),
       )
-      .child(VolumeBar::new(volume_percent, sink_input.mute))
       .when_some(sink_description, |this, desc| {
         this.child(div().text_sm().text_color(rgb(0x888888)).child(desc))
       })

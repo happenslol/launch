@@ -311,11 +311,12 @@ impl PickerDelegate for SourcesDelegate {
 
     v_flex()
       .w_full()
+      .relative()
       .px_2()
-      .py_2()
+      .py_3()
       .rounded_md()
-      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
-      .gap_1()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF10)))
+      .child(VolumeBar::new(volume_percent, source.mute, is_selected).default(is_default))
       .child(
         h_flex()
           .w_full()
@@ -325,7 +326,6 @@ impl PickerDelegate for SourcesDelegate {
               .flex_1()
               .text_ellipsis()
               .overflow_x_hidden()
-              .when(is_default, |div| div.child("---> "))
               .when(source.mute, |div| div.child("MUTE "))
               .child(
                 source
@@ -336,7 +336,6 @@ impl PickerDelegate for SourcesDelegate {
           )
           .child(div().child(format!("{}%", volume_percent))),
       )
-      .child(VolumeBar::new(volume_percent, source.mute))
   }
 
   fn update_matches(

@@ -2,8 +2,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render,
-  RenderOnce, Styled, Subscription, Task, Window, actions, div, prelude::*, px, relative, rgb,
-  rgba,
+  RenderOnce, Styled, Subscription, Task, Window, actions, div, prelude::*, px, relative, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -290,42 +289,57 @@ impl Render for AudioSinksPanel {
 pub struct VolumeBar {
   volume_percent: u32,
   is_muted: bool,
+  is_default: bool,
+  is_selected: bool,
 }
 
+// TODO: This can just be a function?
 impl VolumeBar {
-  pub fn new(volume_percent: u32, is_muted: bool) -> Self {
+  pub fn new(volume_percent: u32, is_muted: bool, is_selected: bool) -> Self {
     Self {
       volume_percent,
       is_muted,
+      is_selected,
+      is_default: false,
     }
+  }
+
+  pub fn default(mut self, is_default: bool) -> Self {
+    self.is_default = is_default;
+    self
   }
 }
 
 impl RenderOnce for VolumeBar {
   fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-    // Calculate fill percentage, clamped to 0.0-1.0 for visual display
     let fill_percentage = (self.volume_percent as f32 / 100.0).min(1.0);
 
-    // Determine bar color based on mute state
-    let bar_color = if self.is_muted {
-      rgb(0x666666) // Dimmed gray for muted
+    let (track_color, fill_color) = if self.is_muted {
+      (rgba(0xFFFFFF03), rgba(0xFFFFFF05))
+    } else if self.is_default {
+      (rgba(0x3B82F610), rgba(0x3B82F625))
     } else {
-      rgb(0x007ACC) // Blue for normal
+      (rgba(0xFFFFFF06), rgba(0xFFFFFF15))
     };
 
-    // Two-layer div structure (same as Zed's ProgressBar)
+    let inset_y = px(4.0);
+    let inset_x = px(0.0);
+    let rounding = px(5.0);
+
     div()
-      .w_full()
-      .h(px(6.0))
-      .rounded(px(3.0))
-      .p(px(1.0))
-      .bg(rgb(0x333333)) // Dark gray background
+      .absolute()
+      .top(inset_y)
+      .bottom(inset_y)
+      .left(inset_x)
+      .right(inset_x)
+      .rounded(rounding)
+      .bg(track_color)
       .child(
         div()
           .h_full()
-          .rounded(px(2.0))
-          .bg(bar_color)
-          .w(relative(fill_percentage)), // Proportional width
+          .rounded(rounding)
+          .bg(fill_color)
+          .w(relative(fill_percentage)),
       )
   }
 }
@@ -350,11 +364,12 @@ impl PickerDelegate for SinksDelegate {
 
     v_flex()
       .w_full()
+      .relative()
       .px_2()
-      .py_2()
+      .py_3()
       .rounded_md()
-      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
-      .gap_1()
+      // .when(is_selected, |this| this.bg(rgba(0xFFFFFF10)))
+      .child(VolumeBar::new(volume_percent, sink.mute, is_selected).default(is_default))
       .child(
         h_flex()
           .w_full()
@@ -364,7 +379,6 @@ impl PickerDelegate for SinksDelegate {
               .flex_1()
               .text_ellipsis()
               .overflow_x_hidden()
-              .when(is_default, |div| div.child("---> "))
               .when(sink.mute, |div| div.child("MUTE "))
               .child(
                 sink
@@ -374,10 +388,6 @@ impl PickerDelegate for SinksDelegate {
               ),
           )
           .child(div().child(format!("{}%", volume_percent))),
-      )
-      .child(
-        // Second row: full-width volume bar only
-        VolumeBar::new(volume_percent, sink.mute),
       )
   }
 
