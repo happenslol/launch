@@ -80,7 +80,7 @@ pub struct State {
 }
 
 impl State {
-  fn new(event_tx: flume::Sender<WaylandEvent>, clipboard_monitoring: bool) -> Self {
+  fn new(event_tx: flume::Sender<WaylandEvent>) -> Self {
     Self {
       seat: None,
       data_device: None,
@@ -88,7 +88,7 @@ impl State {
       event_tx: Some(event_tx),
       loop_handle: None,
       qh: None,
-      clipboard: ClipboardState::new(clipboard_monitoring),
+      clipboard: ClipboardState::new(),
     }
   }
 
@@ -111,7 +111,7 @@ struct InitResult {
   clipboard_reader: Option<ClipboardDbReader>,
 }
 
-pub fn init(cx: &mut App, clipboard_monitoring: bool) -> Result<()> {
+pub fn init(cx: &mut App) -> Result<()> {
   let (cmd_tx, cmd_rx) = calloop::channel::channel::<Command>();
   let (init_tx, init_rx) = flume::bounded::<InitResult>(1);
   let (event_tx, event_rx) = flume::unbounded::<WaylandEvent>();
@@ -119,7 +119,7 @@ pub fn init(cx: &mut App, clipboard_monitoring: bool) -> Result<()> {
   // Bit awkward since we can't move the event loop into the background thread, so we have to send
   // the signal back to the main thread after init.
   thread::spawn(move || {
-    if let Err(err) = run(cmd_rx, init_tx, event_tx, clipboard_monitoring) {
+    if let Err(err) = run(cmd_rx, init_tx, event_tx) {
       error!(?err, "Error in wayland connection");
     }
   });
@@ -165,21 +165,18 @@ fn run(
   cmd_rx: Channel<Command>,
   init_tx: flume::Sender<InitResult>,
   event_tx: flume::Sender<WaylandEvent>,
-  clipboard_monitoring: bool,
 ) -> Result<()> {
   let conn = Connection::connect_to_env()?;
   let display = conn.display();
   let mut event_queue = conn.new_event_queue();
   let qh = event_queue.handle();
   let _registry = display.get_registry(&qh, ());
-  let mut state = State::new(event_tx, clipboard_monitoring);
+  let mut state = State::new(event_tx);
   state.qh = Some(qh.clone());
 
   event_queue.roundtrip(&mut state)?;
 
-  if clipboard_monitoring
-    && let (Some(data_manager), Some(seat)) = (&state.data_manager, &state.seat)
-  {
+  if let (Some(data_manager), Some(seat)) = (&state.data_manager, &state.seat) {
     let device = data_manager.get_data_device(seat, &qh, ());
     state.data_device = Some(device);
     debug!("Created zwlr_data_control_device_v1");
