@@ -455,7 +455,6 @@ impl<D: PickerDelegate> Picker<D> {
       .id(("item", ix))
       .cursor_pointer()
       .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-        // ix is already the resolved item index, no need to resolve again
         cx.emit(PickerEvent::Picked(this.items[ix].clone()));
 
         // Maintain focus on the search input

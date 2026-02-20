@@ -5,8 +5,8 @@ use std::{
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding,
-  Render, RenderOnce, SharedString, Styled, Subscription, Task, Window, actions, div, prelude::*,
-  px, relative, rems, rgb, rgba,
+  Render, RenderOnce, SharedString, Styled, Subscription, Task, Transformation, Window, actions,
+  div, point, prelude::*, px, relative, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -570,6 +570,7 @@ impl PickerDelegate for SinksDelegate {
             this.child(
               Icon::new(IconName::StarFilled)
                 .size(rems(0.85))
+                .transform(Transformation::translate(point(px(0.), px(-0.75))))
                 .text_color(rgb(0xD4A017)),
             )
           })

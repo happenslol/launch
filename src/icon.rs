@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use gpui::{
   Animation, AnimationExt, App, Hsla, IntoElement, RenderOnce, SharedString, StyleRefinement,
-  Styled, Transformation, Window, percentage, prelude::*, rems, rgb, svg,
+  Styled, Transformation, Window, div, percentage, prelude::*, rems, rgb, svg,
 };
+
+use crate::util::StyledExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
@@ -68,6 +70,7 @@ impl IconName {
 #[derive(IntoElement)]
 pub struct Icon {
   name: IconName,
+  transform: Transformation,
   style: StyleRefinement,
 }
 
@@ -75,8 +78,14 @@ impl Icon {
   pub fn new(name: IconName) -> Self {
     Self {
       name,
+      transform: Transformation::default(),
       style: StyleRefinement::default(),
     }
+  }
+
+  pub fn transform(mut self, transform: Transformation) -> Self {
+    self.transform = transform;
+    self
   }
 }
 
@@ -89,7 +98,17 @@ impl Styled for Icon {
 impl RenderOnce for Icon {
   fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
     let color = self.style.text.color.unwrap_or(rgb(0x555555).into());
-    svg().path(self.name.path()).flex_none().text_color(color)
+    let width = self.style.size.width.unwrap_or(rems(1.0).into());
+    let height = self.style.size.height.unwrap_or(rems(1.0).into());
+
+    div().refine_style(&self.style).flex_none().child(
+      svg()
+        .path(self.name.path())
+        .with_transformation(self.transform)
+        .w(width)
+        .h(height)
+        .text_color(color),
+    )
   }
 }
 

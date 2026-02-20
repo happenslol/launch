@@ -1,6 +1,4 @@
-#![allow(unused)]
-use futures::{Stream, stream::FilterMap};
-use gpui::{Div, Styled, div};
+use gpui::{Div, Refineable, StyleRefinement, Styled, div};
 
 pub trait StyledExt: Styled + Sized {
   fn h_flex(self) -> Self {
@@ -9,6 +7,11 @@ pub trait StyledExt: Styled + Sized {
 
   fn v_flex(self) -> Self {
     self.flex().flex_col()
+  }
+
+  fn refine_style(mut self, style: &StyleRefinement) -> Self {
+    self.style().refine(style);
+    self
   }
 }
 
@@ -28,6 +31,8 @@ pub trait ResultExt<E> {
   type Ok;
 
   fn log_err(self) -> Option<Self::Ok>;
+
+  #[allow(unused)]
   fn warn_on_err(self) -> Option<Self::Ok>;
 }
 
