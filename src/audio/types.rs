@@ -12,7 +12,6 @@ pub struct SinkInfo {
   pub volume: ChannelVolumes,
   pub base_volume: Volume,
   pub mute: bool,
-  pub is_hardware: bool,
   pub port_available: Option<bool>,
 }
 
@@ -181,7 +180,7 @@ pub enum SourceEvent {
 
 #[derive(Debug, Clone)]
 pub enum SinkListEvent {
-  Added(SinkInfo),
+  Added(Box<SinkInfo>),
   Removed(SinkId),
   DefaultChanged(Option<SinkId>),
 }

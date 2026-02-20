@@ -1167,8 +1167,8 @@ impl PickerDelegate for WifiDelegate {
                   .when(security.is_secured(), |this| {
                     this.child(
                       Icon::new(IconName::Lock)
-                        .custom_size(rems(0.85))
-                        .color(rgb(0x888888).into()),
+                        .size(rems(0.85))
+                        .text_color(rgb(0x888888)),
                     )
                   })
                   .child(security.to_string()),

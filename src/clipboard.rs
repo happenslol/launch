@@ -1,11 +1,7 @@
-use std::sync::{
-  Arc,
-  atomic::AtomicBool,
-};
+use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled,
-  Subscription, Task, Window, prelude::*, rgb, rgba,
+  App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Styled, Subscription, Task, Window, prelude::*, rems, rgb, rgba
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -77,16 +73,18 @@ impl ClipboardPanel {
       picker
     });
 
-    let subscriptions = vec![cx.subscribe_in(
-      &picker,
-      window,
-      |this, _picker, event, window, cx| {
-        if let PickerEvent::Picked(item) = event {
-          this.connection.read(cx).send_command(wayland::Command::CopyHistoryEntry { id: item.id });
-          window.remove_window();
-        }
-      },
-    )];
+    let subscriptions =
+      vec![
+        cx.subscribe_in(&picker, window, |this, _picker, event, window, cx| {
+          if let PickerEvent::Picked(item) = event {
+            this
+              .connection
+              .read(cx)
+              .send_command(wayland::Command::CopyHistoryEntry { id: item.id });
+            window.remove_window();
+          }
+        }),
+      ];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
@@ -113,9 +111,7 @@ impl ClipboardPanel {
         return;
       };
 
-      let entries = cx
-        .background_spawn(async move { reader.recent(50) })
-        .await;
+      let entries = cx.background_spawn(async move { reader.recent(50) }).await;
 
       let Ok(entries) = entries else {
         return;
@@ -205,8 +201,8 @@ impl PickerDelegate for ClipboardDelegate {
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .child(
         Icon::new(IconName::Clipboard)
-          .custom_size(gpui::rems(0.85))
-          .color(rgb(0x666666).into()),
+          .size(rems(0.85))
+          .text_color(rgb(0x666666)),
       )
       .child(
         h_flex()

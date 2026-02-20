@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-  Animation, AnimationExt, App, Hsla, IntoElement, Rems, RenderOnce, SharedString, Styled,
-  Transformation, Window, percentage, prelude::*, rems, rgb, svg,
+  Animation, AnimationExt, App, Hsla, IntoElement, RenderOnce, SharedString, StyleRefinement,
+  Styled, Transformation, Window, percentage, prelude::*, rems, rgb, svg,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,13 +13,11 @@ pub enum IconName {
   Bluetooth,
   Broadcast,
   BroadcastOff,
-  Car,
   Clipboard,
   CircleCheckFilled,
   DeviceDesktop,
   DeviceGamepad,
   DeviceSpeaker,
-  DeviceWatch,
   Headphones,
   Headset,
   Keyboard,
@@ -30,6 +28,7 @@ pub enum IconName {
   Network,
   Phone,
   Printer,
+  StarFilled,
   Volume,
   Wifi,
 }
@@ -43,13 +42,11 @@ impl IconName {
       IconName::Bluetooth => "bluetooth",
       IconName::Broadcast => "broadcast",
       IconName::BroadcastOff => "broadcast-off",
-      IconName::Car => "car",
       IconName::Clipboard => "clipboard",
       IconName::CircleCheckFilled => "circle-check-filled",
       IconName::DeviceDesktop => "device-desktop",
       IconName::DeviceGamepad => "device-gamepad",
       IconName::DeviceSpeaker => "device-speaker",
-      IconName::DeviceWatch => "device-watch",
       IconName::Headphones => "headphones",
       IconName::Headset => "headset",
       IconName::Keyboard => "keyboard",
@@ -60,6 +57,7 @@ impl IconName {
       IconName::Network => "network",
       IconName::Phone => "phone",
       IconName::Printer => "printer",
+      IconName::StarFilled => "star-filled",
       IconName::Volume => "volume",
       IconName::Wifi => "wifi",
     };
@@ -70,39 +68,28 @@ impl IconName {
 #[derive(IntoElement)]
 pub struct Icon {
   name: IconName,
-  size: Rems,
-  color: Option<Hsla>,
+  style: StyleRefinement,
 }
 
 impl Icon {
   pub fn new(name: IconName) -> Self {
     Self {
       name,
-      size: rems(1.0),
-      color: None,
+      style: StyleRefinement::default(),
     }
   }
+}
 
-  pub fn custom_size(mut self, size: Rems) -> Self {
-    self.size = size;
-    self
-  }
-
-  pub fn color(mut self, color: Hsla) -> Self {
-    self.color = Some(color);
-    self
+impl Styled for Icon {
+  fn style(&mut self) -> &mut StyleRefinement {
+    &mut self.style
   }
 }
 
 impl RenderOnce for Icon {
   fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-    let color = self.color.unwrap_or(rgb(0x555555).into());
-
-    svg()
-      .path(self.name.path())
-      .size(self.size)
-      .flex_none()
-      .text_color(color)
+    let color = self.style.text.color.unwrap_or(rgb(0x555555).into());
+    svg().path(self.name.path()).flex_none().text_color(color)
   }
 }
 

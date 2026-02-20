@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+  collections::HashSet,
+  sync::{Arc, atomic::AtomicBool},
+};
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding,
@@ -16,31 +19,86 @@ use crate::{
     pulse::{SetMute, SetVolume},
     types::{SinkEvent, SinkId, SinkInfo, SinkListEvent},
   },
+  db::DB,
   icon::{Icon, IconName},
   matcher::MatcherPool,
   picker::{Category, Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
 };
 
+struct SinkFavoritesDb;
+
+impl SinkFavoritesDb {
+  fn ensure_table() {
+    let conn = DB.lock();
+    conn
+      .execute_batch(
+        "CREATE TABLE IF NOT EXISTS sink_favorites (sink_name TEXT PRIMARY KEY) STRICT;",
+      )
+      .log_err();
+  }
+
+  fn toggle_favorite(sink_name: &str) {
+    let conn = DB.lock();
+    let exists = conn
+      .prepare_cached("SELECT 1 FROM sink_favorites WHERE sink_name = ?1")
+      .and_then(|mut stmt| stmt.exists([sink_name]))
+      .unwrap_or(false);
+
+    if exists {
+      conn
+        .prepare_cached("DELETE FROM sink_favorites WHERE sink_name = ?1")
+        .and_then(|mut stmt| stmt.execute([sink_name]))
+        .log_err();
+    } else {
+      conn
+        .prepare_cached("INSERT INTO sink_favorites (sink_name) VALUES (?1)")
+        .and_then(|mut stmt| stmt.execute([sink_name]))
+        .log_err();
+    }
+  }
+
+  fn get_favorites() -> HashSet<String> {
+    let conn = DB.lock();
+    let Ok(mut stmt) = conn.prepare_cached("SELECT sink_name FROM sink_favorites") else {
+      return HashSet::new();
+    };
+
+    let Ok(rows) = stmt.query_map([], |row| row.get(0)) else {
+      return HashSet::new();
+    };
+
+    rows.filter_map(|row| row.ok()).collect()
+  }
+}
+
 #[derive(Clone)]
 pub struct SinkEntry {
   id: SinkId,
+  name: Option<SharedString>,
   description: Option<SharedString>,
   search_string: String,
   port_available: Option<bool>,
+  is_favorite: bool,
   entry: Entity<SinkEntryInner>,
 }
 
 impl SinkEntry {
   pub fn new(
     sink: SinkInfo,
+    favorites: &HashSet<String>,
     audio_state: &Entity<AudioState>,
     window: &mut Window,
     cx: &mut App,
   ) -> Self {
     let id = sink.id;
+    let name = sink.name.clone();
     let description = sink.description.clone();
     let port_available = sink.port_available;
+    let is_favorite = name
+      .as_ref()
+      .map(|n| favorites.contains(n.as_ref()))
+      .unwrap_or(false);
     let mut search_parts = Vec::new();
     if let Some(ref name) = sink.name {
       search_parts.push(name.to_string());
@@ -53,9 +111,11 @@ impl SinkEntry {
 
     Self {
       id,
+      name,
       description,
       search_string,
       port_available,
+      is_favorite,
       entry,
     }
   }
@@ -125,6 +185,7 @@ pub struct AudioSinksPanel {
   picker: Entity<Picker<SinksDelegate>>,
   audio_state: Entity<AudioState>,
   sinks: Vec<SinkEntry>,
+  favorites: HashSet<String>,
   _subscriptions: Vec<Subscription>,
   _list_subscription_task: Task<()>,
   _initial_load_task: Task<()>,
@@ -132,7 +193,7 @@ pub struct AudioSinksPanel {
 
 const CONTEXT: &str = "sinks";
 
-actions!(sinks, [VolumeUp, VolumeDown, Mute]);
+actions!(sinks, [VolumeUp, VolumeDown, Mute, ToggleFavorite]);
 
 impl AudioSinksPanel {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -142,11 +203,16 @@ impl AudioSinksPanel {
       KeyBinding::new("ctrl-up", VolumeUp, Some(CONTEXT)),
       KeyBinding::new("ctrl-down", VolumeDown, Some(CONTEXT)),
       KeyBinding::new("ctrl-m", Mute, Some(CONTEXT)),
+      KeyBinding::new("ctrl-f", ToggleFavorite, Some(CONTEXT)),
     ]);
+
+    SinkFavoritesDb::ensure_table();
+    let favorites = SinkFavoritesDb::get_favorites();
 
     let audio_state = AudioState::global(cx);
     let delegate = SinksDelegate {
       audio_state: audio_state.clone(),
+      favorites: Arc::new(favorites.clone()),
     };
 
     // Start with empty picker
@@ -168,7 +234,7 @@ impl AudioSinksPanel {
         let _ = this.update_in(cx, |this, window, cx| {
           this.sinks = sinks
             .into_iter()
-            .map(|sink| SinkEntry::new(sink, &audio_state, window, cx))
+            .map(|sink| SinkEntry::new(sink, &this.favorites, &audio_state, window, cx))
             .collect();
 
           let entries: Vec<_> = this.sinks.clone();
@@ -176,7 +242,9 @@ impl AudioSinksPanel {
             this.subscribe_to_sink_entry(entry, window, cx);
           }
 
+          let favorites = Arc::new(this.favorites.clone());
           picker.update(cx, |picker, cx| {
+            picker.delegate.favorites = favorites;
             picker.set_items(this.sinks.clone(), window, cx);
           });
         });
@@ -193,7 +261,8 @@ impl AudioSinksPanel {
           match event {
             SinkListEvent::Added(sink_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                let new_entry = SinkEntry::new(sink_info, &audio_state, window, cx);
+                let new_entry =
+                  SinkEntry::new(*sink_info, &this.favorites, &audio_state, window, cx);
                 this.subscribe_to_sink_entry(&new_entry, window, cx);
                 this.sinks.push(new_entry);
 
@@ -240,6 +309,7 @@ impl AudioSinksPanel {
       picker,
       audio_state,
       sinks: Vec::new(),
+      favorites,
       _subscriptions: subscriptions,
       _list_subscription_task: list_subscription_task,
       _initial_load_task: initial_load_task,
@@ -259,8 +329,14 @@ impl AudioSinksPanel {
       move |this, entry, _event: &SinkStateChanged, window, cx| {
         let sink = &entry.read(cx).sink;
         if let Some(sink_entry) = this.sinks.iter_mut().find(|e| e.entry == *entry) {
+          sink_entry.name = sink.name.clone();
           sink_entry.description = sink.description.clone();
           sink_entry.port_available = sink.port_available;
+          sink_entry.is_favorite = sink_entry
+            .name
+            .as_ref()
+            .map(|n| this.favorites.contains(n.as_ref()))
+            .unwrap_or(false);
         }
         picker.update(cx, |picker, cx| {
           picker.set_items(this.sinks.clone(), window, cx);
@@ -309,6 +385,42 @@ impl AudioSinksPanel {
       .read(cx)
       .set_sink_mute(selected_id, SetMute::Toggle)
   }
+
+  fn toggle_favorite(&mut self, _: &ToggleFavorite, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(selected) = self.picker.read(cx).get_selected_item().cloned() else {
+      return;
+    };
+    let Some(sink_name) = selected.name.as_ref() else {
+      return;
+    };
+
+    SinkFavoritesDb::toggle_favorite(sink_name);
+
+    if self.favorites.contains(sink_name.as_ref()) {
+      self.favorites.remove(sink_name.as_ref());
+    } else {
+      self.favorites.insert(sink_name.to_string());
+    }
+
+    self.sync_favorites(window, cx);
+  }
+
+  fn sync_favorites(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    for entry in &mut self.sinks {
+      entry.is_favorite = entry
+        .name
+        .as_ref()
+        .map(|n| self.favorites.contains(n.as_ref()))
+        .unwrap_or(false);
+    }
+
+    let favorites = Arc::new(self.favorites.clone());
+    let sinks = self.sinks.clone();
+    self.picker.update(cx, |picker, cx| {
+      picker.delegate.favorites = favorites;
+      picker.set_items(sinks, window, cx);
+    });
+  }
 }
 
 impl Focusable for AudioSinksPanel {
@@ -325,6 +437,7 @@ impl Render for AudioSinksPanel {
       .on_action(cx.listener(Self::volume_up))
       .on_action(cx.listener(Self::volume_down))
       .on_action(cx.listener(Self::mute))
+      .on_action(cx.listener(Self::toggle_favorite))
       .child(picker_input(&self.picker).show_back_button(true))
       .child(picker_results(&self.picker))
   }
@@ -412,6 +525,7 @@ fn sink_icon(icon_name: Option<&str>) -> IconName {
 
 struct SinksDelegate {
   audio_state: Entity<AudioState>,
+  favorites: Arc<HashSet<String>>,
 }
 
 impl PickerDelegate for SinksDelegate {
@@ -450,9 +564,14 @@ impl PickerDelegate for SinksDelegate {
               (_, false, true) => rgb(0xBBBBBB),
               (_, false, false) => rgb(0x888888),
             };
-            Icon::new(icon)
-              .custom_size(rems(1.1))
-              .color(icon_color.into())
+            Icon::new(icon).size(rems(1.1)).text_color(icon_color)
+          })
+          .when(item.is_favorite, |this| {
+            this.child(
+              Icon::new(IconName::StarFilled)
+                .size(rems(0.85))
+                .text_color(rgb(0xD4A017)),
+            )
           })
           .child(
             h_flex()
@@ -492,8 +611,11 @@ impl PickerDelegate for SinksDelegate {
 
   fn categories(&self) -> Option<Vec<Category<Self::ListItem>>> {
     Some(vec![
+      Category::new("Favorites", |entry: &SinkEntry| {
+        entry.port_available != Some(false) && entry.is_favorite
+      }),
       Category::new("Available", |entry: &SinkEntry| {
-        entry.port_available != Some(false)
+        entry.port_available != Some(false) && !entry.is_favorite
       }),
       Category::new("Unavailable", |entry: &SinkEntry| {
         entry.port_available == Some(false)

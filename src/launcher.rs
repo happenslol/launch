@@ -381,12 +381,12 @@ impl PickerDelegate for RootDelegate {
                 this.child(img(ImageSource::Resource(icon.clone())).size(icon_size))
               })
               .when_none(&icon, |this| {
-                this.child(Icon::new(IconName::AppWindow).custom_size(icon_size))
+                this.child(Icon::new(IconName::AppWindow).size(icon_size))
               })
               .child(name.clone())
           }
           RootItem::Panel { name, icon, .. } => this
-            .child(Icon::new(*icon).custom_size(icon_size))
+            .child(Icon::new(*icon).size(icon_size))
             .child(name.clone()),
         }
       }))

@@ -90,7 +90,7 @@ impl ClipboardDbWriter {
 pub struct ClipboardEntry {
   pub id: i64,
   pub timestamp: i64,
-  pub mime_types: Vec<String>,
+  pub _mime_types: Vec<String>,
   pub data: Vec<u8>,
 }
 
@@ -126,7 +126,7 @@ impl ClipboardDbReader {
       Some(Ok((id, timestamp, mime_types_json, data))) => Ok(Some(ClipboardEntry {
         id,
         timestamp,
-        mime_types: parse_mime_types_json(&mime_types_json),
+        _mime_types: parse_mime_types_json(&mime_types_json),
         data,
       })),
       Some(Err(err)) => Err(err.into()),
@@ -155,7 +155,7 @@ impl ClipboardDbReader {
       entries.push(ClipboardEntry {
         id,
         timestamp,
-        mime_types: parse_mime_types_json(&mime_types_json),
+        _mime_types: parse_mime_types_json(&mime_types_json),
         data,
       });
     }

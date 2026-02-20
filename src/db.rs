@@ -50,6 +50,10 @@ impl Db {
     Self(Arc::new(Mutex::new(conn)))
   }
 
+  pub fn lock(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+    self.0.lock().unwrap()
+  }
+
   pub fn record_launch(&self, id: &str) {
     let conn = self.0.lock().unwrap();
     let mut query = conn

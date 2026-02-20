@@ -1,7 +1,4 @@
-use std::sync::{
-  Arc,
-  atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, atomic::AtomicBool};
 
 use futures::StreamExt;
 use std::time::Duration;
@@ -49,8 +46,8 @@ fn device_category(icon: Option<&str>) -> Option<(&'static str, IconName)> {
 pub struct BluetoothEntry {
   id: String,
   search_string: String,
-  is_connected: Arc<AtomicBool>,
-  is_paired: Arc<AtomicBool>,
+  is_connected: bool,
+  is_paired: bool,
   entry: Entity<DeviceEntryInner>,
 }
 
@@ -58,13 +55,9 @@ impl BluetoothEntry {
   pub fn new(device: Device, window: &mut Window, cx: &mut App) -> Self {
     let id = device.address.to_string();
     let search_string = format!("{} {}", device.name, device.address);
-    let is_connected = Arc::new(AtomicBool::new(device.connected));
-    let is_paired = Arc::new(AtomicBool::new(device.paired));
-    let entry = cx.new({
-      let is_connected = is_connected.clone();
-      let is_paired = is_paired.clone();
-      |cx| DeviceEntryInner::new(device, is_connected, is_paired, window, cx)
-    });
+    let is_paired = device.paired;
+    let is_connected = device.connected;
+    let entry = cx.new(|cx| DeviceEntryInner::new(device, window, cx));
 
     Self {
       id,
@@ -76,11 +69,8 @@ impl BluetoothEntry {
   }
 }
 
-// TODO: Why the hell are these atomic lol
 pub struct DeviceEntryInner {
   device: Device,
-  is_connected: Arc<AtomicBool>,
-  is_paired: Arc<AtomicBool>,
   _property_listeners: Vec<Task<()>>,
 }
 
@@ -89,17 +79,9 @@ pub struct DeviceStateChanged;
 impl gpui::EventEmitter<DeviceStateChanged> for DeviceEntryInner {}
 
 impl DeviceEntryInner {
-  pub fn new(
-    device: Device,
-    is_connected: Arc<AtomicBool>,
-    is_paired: Arc<AtomicBool>,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) -> Self {
+  pub fn new(device: Device, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let mut entry = Self {
       device: device.clone(),
-      is_connected,
-      is_paired,
       _property_listeners: Vec::new(),
     };
 
@@ -158,7 +140,6 @@ impl DeviceEntryInner {
         while let Some(new_connected) = connected_stream.next().await {
           let _ = this.update(cx, |this, cx| {
             this.device.connected = new_connected;
-            this.is_connected.store(new_connected, Ordering::Relaxed);
             cx.emit(DeviceStateChanged);
             cx.notify();
           });
@@ -449,10 +430,7 @@ impl BluetoothDevicesPanel {
           let _ = this.update_in(cx, |this, window, cx| {
             let device_address = device.address.to_string();
 
-            let already_exists = this
-              .devices
-              .iter()
-              .any(|entry| entry.id == device_address);
+            let already_exists = this.devices.iter().any(|entry| entry.id == device_address);
 
             if !already_exists {
               let new_entry = BluetoothEntry::new(device, window, cx);
@@ -504,11 +482,7 @@ impl BluetoothDevicesPanel {
     })
   }
 
-  fn listen_for_powered_changes(
-    &self,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) -> Task<()> {
+  fn listen_for_powered_changes(&self, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
     let Some(adapter) = self.adapter.clone() else {
       return Task::ready(());
     };
@@ -590,11 +564,7 @@ impl Render for BluetoothDevicesPanel {
         (rgb(0xCC4444), "Off")
       };
 
-      let circle = div()
-        .w(px(8.))
-        .h(px(8.))
-        .rounded_full()
-        .bg(color);
+      let circle = div().w(px(8.)).h(px(8.)).rounded_full().bg(color);
 
       let circle_element = if self.is_discovering {
         circle
@@ -619,12 +589,7 @@ impl Render for BluetoothDevicesPanel {
           .gap_1p5()
           .flex_shrink_0()
           .child(circle_element)
-          .child(
-            div()
-              .text_sm()
-              .text_color(color)
-              .child(label),
-          ),
+          .child(div().text_sm().text_color(color).child(label)),
       );
     }
 
@@ -655,16 +620,12 @@ impl PickerDelegate for DevicesDelegate {
 
   fn categories(&self) -> Option<Vec<Category<Self::ListItem>>> {
     Some(vec![
-      Category::new("Connected", |entry: &BluetoothEntry| {
-        entry.is_connected.load(Ordering::Relaxed)
-      }),
+      Category::new("Connected", |entry: &BluetoothEntry| entry.is_connected),
       Category::new("Paired", |entry: &BluetoothEntry| {
-        !entry.is_connected.load(Ordering::Relaxed)
-          && entry.is_paired.load(Ordering::Relaxed)
+        !entry.is_connected && entry.is_paired
       }),
       Category::new("New Devices", |entry: &BluetoothEntry| {
-        !entry.is_connected.load(Ordering::Relaxed)
-          && !entry.is_paired.load(Ordering::Relaxed)
+        !entry.is_connected && !entry.is_paired
       }),
     ])
   }
@@ -708,8 +669,8 @@ impl PickerDelegate for DevicesDelegate {
           .w_full()
           .child(
             Icon::new(status_icon)
-              .custom_size(rems(0.85))
-              .color(status_color.into()),
+              .size(rems(0.85))
+              .text_color(status_color),
           )
           .child(
             v_flex()
@@ -746,11 +707,7 @@ impl PickerDelegate for DevicesDelegate {
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(
-                          Icon::new(icon)
-                            .custom_size(rems(0.75))
-                            .color(rgb(0x888888).into()),
-                        )
+                        .child(Icon::new(icon).size(rems(0.75)).text_color(rgb(0x888888)))
                         .child(label),
                     )
                   })

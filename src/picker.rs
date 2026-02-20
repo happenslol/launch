@@ -79,7 +79,7 @@ pub trait PickerDelegate: Sized + 'static {
 }
 
 pub struct Picker<D: PickerDelegate> {
-  delegate: D,
+  pub delegate: D,
   items: Arc<Vec<D::ListItem>>,
   matches: Option<Vec<(usize, u32)>>,
 
@@ -640,7 +640,7 @@ impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
                 .on_click(|_event, window, cx| {
                   window.dispatch_action(GoBack.boxed_clone(), cx);
                 })
-                .child(Icon::new(IconName::ArrowLeft).color(rgb(0xCCCCCC).into())),
+                .child(Icon::new(IconName::ArrowLeft).text_color(rgb(0xCCCCCC))),
             )
           })
           .child(input(&search_input).flex_grow())

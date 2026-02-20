@@ -816,12 +816,11 @@ impl PulseState {
         volume: info.volume.into(),
         base_volume: info.base_volume.into(),
         mute: info.mute,
-        is_hardware,
         port_available,
       };
 
       this.sinks.insert(info.index, managed.clone());
-      list_event = Some(SinkListEvent::Added(managed));
+      list_event = Some(SinkListEvent::Added(Box::new(managed)));
     }
 
     // Now send events after releasing the sink borrow

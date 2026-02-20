@@ -2,7 +2,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render,
-  Styled, Subscription, Task, Window, actions, div, prelude::*, rgba,
+  Styled, Subscription, Task, Window, actions, div, prelude::*,
 };
 use nucleo_matcher::{
   Utf32Str,

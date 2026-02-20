@@ -177,12 +177,12 @@ fn run(
 
   event_queue.roundtrip(&mut state)?;
 
-  if clipboard_monitoring {
-    if let (Some(data_manager), Some(seat)) = (&state.data_manager, &state.seat) {
-      let device = data_manager.get_data_device(seat, &qh, ());
-      state.data_device = Some(device);
-      debug!("Created zwlr_data_control_device_v1");
-    }
+  if clipboard_monitoring
+    && let (Some(data_manager), Some(seat)) = (&state.data_manager, &state.seat)
+  {
+    let device = data_manager.get_data_device(seat, &qh, ());
+    state.data_device = Some(device);
+    debug!("Created zwlr_data_control_device_v1");
   }
 
   let mut event_loop = EventLoop::<State>::try_new()?;

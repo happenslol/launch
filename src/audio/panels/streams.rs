@@ -240,7 +240,7 @@ impl AudioStreamsPanel {
           match event {
             SinkListEvent::Added(sink) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                this.sinks.push(sink.clone());
+                this.sinks.push(*sink.clone());
                 // Update sink descriptions in entries
                 for stream_entry in &this.sink_inputs {
                   stream_entry.entry.update(cx, |inner, cx| {
