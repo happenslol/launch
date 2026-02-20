@@ -335,6 +335,10 @@ impl<D: PickerDelegate> Picker<D> {
       } else {
         None
       };
+
+      if self.selected_index == Some(0) {
+        self.scroll_to_top();
+      }
     } else {
       self.visual_entries = None;
       self.selectable_items = None;
