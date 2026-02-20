@@ -79,18 +79,20 @@ impl ClipboardPanel {
       picker
     });
 
-    let subscriptions =
-      vec![
-        cx.subscribe_in(&picker, window, |this, _picker, event, window, cx| {
-          if let PickerEvent::Picked(item) = event {
-            this
-              .connection
-              .read(cx)
-              .send_command(wayland::Command::CopyHistoryEntry { id: item.id });
-            window.remove_window();
-          }
-        }),
-      ];
+    let subscriptions = vec![
+      cx.subscribe_in(&picker, window, |this, _picker, event, window, cx| {
+        if let PickerEvent::Picked(item) = event {
+          this
+            .connection
+            .read(cx)
+            .send_command(wayland::Command::CopyHistoryEntry { id: item.id });
+          window.remove_window();
+        }
+      }),
+      cx.subscribe_in(&connection, window, |this, _connection, _event, window, cx| {
+        this._load_task = Some(Self::load_entries(&this.picker, window, cx));
+      }),
+    ];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
