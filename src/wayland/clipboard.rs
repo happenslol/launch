@@ -440,13 +440,16 @@ fn compute_preview(
       if let Some(data) = text_data
         && let Ok(text) = std::str::from_utf8(data)
       {
-        return text
-          .lines()
-          .next()
-          .unwrap_or("")
-          .chars()
-          .take(200)
-          .collect();
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+          return trimmed
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect();
+        }
       }
       String::new()
     }

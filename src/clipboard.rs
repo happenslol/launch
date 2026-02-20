@@ -220,7 +220,12 @@ impl PickerDelegate for ClipboardDelegate {
             gpui::div()
               .text_ellipsis()
               .overflow_x_hidden()
-              .child(item.preview.clone()),
+              .when(item.preview.is_empty(), |this| {
+                this.text_color(rgb(0x555555)).child("(blank)")
+              })
+              .when(!item.preview.is_empty(), |this| {
+                this.child(item.preview.clone())
+              }),
           )
           .child(
             gpui::div()
