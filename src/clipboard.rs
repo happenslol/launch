@@ -14,7 +14,7 @@ use crate::{
   matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
-  wayland::{self, ClipboardDbReader, ClipboardEntry},
+  wayland::{self, ClipboardDbReader, ClipboardEntry, ContentType},
 };
 
 pub fn get_items() -> Vec<RootItem> {
@@ -31,28 +31,34 @@ pub fn get_items() -> Vec<RootItem> {
 struct ClipboardItem {
   id: i64,
   timestamp: i64,
+  content_type: ContentType,
   preview: SharedString,
   search_string: String,
 }
 
 impl ClipboardItem {
   fn from_entry(entry: ClipboardEntry) -> Self {
-    let text = String::from_utf8_lossy(&entry.data);
-    let preview: SharedString = text
-      .lines()
-      .next()
-      .unwrap_or("")
-      .chars()
-      .take(200)
-      .collect::<String>()
-      .into();
+    let preview: SharedString = entry.preview.clone().into();
+    let search_string = entry.preview.clone();
 
     Self {
       id: entry.id,
       timestamp: entry.timestamp,
+      content_type: entry.content_type,
       preview,
-      search_string: text.into_owned(),
+      search_string,
     }
+  }
+}
+
+fn icon_for_content_type(content_type: ContentType) -> IconName {
+  match content_type {
+    ContentType::Text => IconName::Clipboard,
+    ContentType::Url => IconName::Link,
+    ContentType::Code => IconName::Code,
+    ContentType::File => IconName::FileText,
+    ContentType::Image => IconName::Photo,
+    ContentType::Other => IconName::FileUnknown,
   }
 }
 
@@ -200,7 +206,7 @@ impl PickerDelegate for ClipboardDelegate {
       .items_center()
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .child(
-        Icon::new(IconName::Clipboard)
+        Icon::new(icon_for_content_type(item.content_type))
           .size(rems(0.85))
           .text_color(rgb(0x666666)),
       )

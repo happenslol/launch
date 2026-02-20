@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use calloop::generic::Generic;
 use calloop::{Interest, Mode, PostAction};
@@ -24,6 +26,50 @@ const TEXT_MIME_TYPES: &[&str] = &[
   "STRING",
   "TEXT",
 ];
+
+const X11_METADATA_MIMES: &[&str] = &[
+  "TARGETS",
+  "TIMESTAMP",
+  "MULTIPLE",
+  "SAVE_TARGETS",
+  "x-special/gnome-copied-files-icon",
+];
+
+const MAX_ENTRY_SIZE: usize = 10 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentType {
+  Text,
+  Url,
+  Code,
+  File,
+  Image,
+  Other,
+}
+
+impl ContentType {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      ContentType::Text => "text",
+      ContentType::Url => "url",
+      ContentType::Code => "code",
+      ContentType::File => "file",
+      ContentType::Image => "image",
+      ContentType::Other => "other",
+    }
+  }
+
+  pub fn from_str(s: &str) -> Self {
+    match s {
+      "text" => ContentType::Text,
+      "url" => ContentType::Url,
+      "code" => ContentType::Code,
+      "file" => ContentType::File,
+      "image" => ContentType::Image,
+      _ => ContentType::Other,
+    }
+  }
+}
 
 pub enum SelectionState {
   Free,
@@ -52,13 +98,34 @@ impl ClipboardDbWriter {
       OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE,
     )?;
 
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+    // Check if we need to migrate from old schema
+    let needs_migration: bool = conn
+      .prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='clipboard_mime_data'")?
+      .query_row([], |row| row.get::<_, i64>(0))
+      .map(|count| count == 0)?;
+
+    if needs_migration {
+      // Drop old table if it exists (it had a different schema)
+      conn.execute_batch("DROP TABLE IF EXISTS clipboard_history;")?;
+    }
+
     conn.execute_batch(
       r#"
       CREATE TABLE IF NOT EXISTS clipboard_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp INTEGER NOT NULL DEFAULT (unixepoch()),
         mime_types TEXT NOT NULL,
-        data BLOB NOT NULL
+        content_type TEXT NOT NULL DEFAULT 'text',
+        preview TEXT NOT NULL DEFAULT ''
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS clipboard_mime_data (
+        history_id INTEGER NOT NULL REFERENCES clipboard_history(id) ON DELETE CASCADE,
+        mime_type TEXT NOT NULL,
+        data BLOB NOT NULL,
+        PRIMARY KEY (history_id, mime_type)
       ) STRICT;
       "#,
     )?;
@@ -68,21 +135,57 @@ impl ClipboardDbWriter {
     Ok((Self(conn), reader))
   }
 
-  fn insert(&self, mime_types: &[String], data: &[u8]) {
+  fn insert(
+    &self,
+    mime_types: &[String],
+    mime_data: &HashMap<String, Vec<u8>>,
+    content_type: ContentType,
+    preview: &str,
+  ) {
     let mime_types_json = mime_types_to_json(mime_types);
-    let mut statement = match self
-      .0
-      .prepare_cached("INSERT INTO clipboard_history (mime_types, data) VALUES (?1, ?2)")
-    {
-      Ok(statement) => statement,
+
+    let tx = match self.0.unchecked_transaction() {
+      Ok(tx) => tx,
       Err(err) => {
-        error!(?err, "Failed to prepare clipboard history insert");
+        error!(?err, "Failed to begin clipboard insert transaction");
         return;
       }
     };
 
-    if let Err(err) = statement.execute(rusqlite::params![mime_types_json, data]) {
-      error!(?err, "Failed to insert clipboard history entry");
+    let history_id: i64 = match tx.query_row(
+      "INSERT INTO clipboard_history (mime_types, content_type, preview) VALUES (?1, ?2, ?3) RETURNING id",
+      rusqlite::params![mime_types_json, content_type.as_str(), preview],
+      |row| row.get(0),
+    ) {
+      Ok(id) => id,
+      Err(err) => {
+        error!(?err, "Failed to insert clipboard history entry");
+        return;
+      }
+    };
+
+    let mut statement = match tx.prepare_cached(
+      "INSERT INTO clipboard_mime_data (history_id, mime_type, data) VALUES (?1, ?2, ?3)",
+    ) {
+      Ok(s) => s,
+      Err(err) => {
+        error!(?err, "Failed to prepare mime data insert");
+        return;
+      }
+    };
+
+    for (mime_type, data) in mime_data {
+      if let Err(err) =
+        statement.execute(rusqlite::params![history_id, mime_type, data])
+      {
+        error!(?err, mime_type, "Failed to insert mime data");
+        return;
+      }
+    }
+
+    drop(statement);
+    if let Err(err) = tx.commit() {
+      error!(?err, "Failed to commit clipboard insert transaction");
     }
   }
 }
@@ -91,7 +194,8 @@ pub struct ClipboardEntry {
   pub id: i64,
   pub timestamp: i64,
   pub _mime_types: Vec<String>,
-  pub data: Vec<u8>,
+  pub content_type: ContentType,
+  pub preview: String,
 }
 
 #[derive(Debug, Clone)]
@@ -107,37 +211,29 @@ impl ClipboardDbReader {
     Ok(conn)
   }
 
-  pub fn get_by_id(&self, id: i64) -> anyhow::Result<Option<ClipboardEntry>> {
+  pub fn get_mime_data_by_id(&self, id: i64) -> anyhow::Result<HashMap<String, Vec<u8>>> {
     let conn = self.open()?;
     let mut statement = conn.prepare_cached(
-      "SELECT id, timestamp, mime_types, data FROM clipboard_history WHERE id = ?1",
+      "SELECT mime_type, data FROM clipboard_mime_data WHERE history_id = ?1",
     )?;
 
-    let mut rows = statement.query_map([id], |row| {
-      Ok((
-        row.get::<_, i64>(0)?,
-        row.get::<_, i64>(1)?,
-        row.get::<_, String>(2)?,
-        row.get::<_, Vec<u8>>(3)?,
-      ))
+    let rows = statement.query_map([id], |row| {
+      Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
     })?;
 
-    match rows.next() {
-      Some(Ok((id, timestamp, mime_types_json, data))) => Ok(Some(ClipboardEntry {
-        id,
-        timestamp,
-        _mime_types: parse_mime_types_json(&mime_types_json),
-        data,
-      })),
-      Some(Err(err)) => Err(err.into()),
-      None => Ok(None),
+    let mut data = HashMap::new();
+    for row in rows {
+      let (mime_type, blob) = row?;
+      data.insert(mime_type, blob);
     }
+
+    Ok(data)
   }
 
   pub fn recent(&self, limit: u32) -> anyhow::Result<Vec<ClipboardEntry>> {
     let conn = self.open()?;
     let mut statement = conn.prepare_cached(
-      "SELECT id, timestamp, mime_types, data FROM clipboard_history ORDER BY id DESC LIMIT ?1",
+      "SELECT id, timestamp, mime_types, content_type, preview FROM clipboard_history ORDER BY id DESC LIMIT ?1",
     )?;
 
     let rows = statement.query_map([limit], |row| {
@@ -145,18 +241,20 @@ impl ClipboardDbReader {
         row.get::<_, i64>(0)?,
         row.get::<_, i64>(1)?,
         row.get::<_, String>(2)?,
-        row.get::<_, Vec<u8>>(3)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, String>(4)?,
       ))
     })?;
 
     let mut entries = Vec::new();
     for row in rows {
-      let (id, timestamp, mime_types_json, data) = row?;
+      let (id, timestamp, mime_types_json, content_type_str, preview) = row?;
       entries.push(ClipboardEntry {
         id,
         timestamp,
         _mime_types: parse_mime_types_json(&mime_types_json),
-        data,
+        content_type: ContentType::from_str(&content_type_str),
+        preview,
       });
     }
 
@@ -206,13 +304,167 @@ impl ClipboardState {
   }
 }
 
-fn pick_mime_type(offered: &[String]) -> Option<String> {
-  for preferred in TEXT_MIME_TYPES {
-    if let Some(found) = offered.iter().find(|m| m.as_str() == *preferred) {
-      return Some(found.clone());
+fn is_text_mime(mime: &str) -> bool {
+  TEXT_MIME_TYPES.contains(&mime)
+}
+
+fn is_x11_metadata(mime: &str) -> bool {
+  X11_METADATA_MIMES.contains(&mime)
+}
+
+/// Select which mime types to actually read from the offer.
+/// Groups text aliases so we only read one representative, picks the best image format,
+/// and reads all other content mimes directly.
+fn select_target_mimes(offered: &[String]) -> Vec<String> {
+  let mut targets = Vec::new();
+
+  // Pick one text representative
+  let have_text = TEXT_MIME_TYPES.iter().find(|preferred| {
+    offered.iter().any(|m| m.as_str() == **preferred)
+  });
+  if let Some(text_mime) = have_text {
+    targets.push((*text_mime).to_string());
+  }
+
+  // Pick best image format
+  let image_preference = ["image/png", "image/jpeg", "image/bmp", "image/gif", "image/webp"];
+  let have_image = image_preference.iter().find(|preferred| {
+    offered.iter().any(|m| m.as_str() == **preferred)
+  });
+  if let Some(image_mime) = have_image {
+    targets.push((*image_mime).to_string());
+  }
+
+  // Add remaining non-text, non-metadata, non-already-picked mimes
+  for mime in offered {
+    if is_text_mime(mime) || is_x11_metadata(mime) {
+      continue;
+    }
+    if mime.starts_with("image/") && have_image.is_some() {
+      continue;
+    }
+    if !targets.contains(mime) {
+      targets.push(mime.clone());
     }
   }
-  None
+
+  targets
+}
+
+/// Expand text aliases: if we read one text mime, copy its data to all offered text aliases.
+fn expand_text_aliases(
+  mime_data: &mut HashMap<String, Vec<u8>>,
+  offered_mime_types: &[String],
+) {
+  let text_data = TEXT_MIME_TYPES
+    .iter()
+    .find_map(|t| mime_data.get(*t).cloned());
+
+  if let Some(data) = text_data {
+    for offered in offered_mime_types {
+      if is_text_mime(offered) && !mime_data.contains_key(offered.as_str()) {
+        mime_data.insert(offered.clone(), data.clone());
+      }
+    }
+  }
+}
+
+fn detect_content_type(
+  offered_mime_types: &[String],
+  mime_data: &HashMap<String, Vec<u8>>,
+) -> ContentType {
+  if offered_mime_types.iter().any(|m| m.starts_with("image/")) {
+    return ContentType::Image;
+  }
+
+  let has_file_mime = offered_mime_types.iter().any(|m| {
+    m == "text/uri-list"
+      || m == "x-special/gnome-copied-files"
+      || m.contains("nautilus")
+      || m.contains("dolphin")
+  });
+  if has_file_mime {
+    return ContentType::File;
+  }
+
+  // Check text content
+  let text_data = TEXT_MIME_TYPES
+    .iter()
+    .find_map(|t| mime_data.get(*t));
+
+  if let Some(data) = text_data
+    && let Ok(text) = std::str::from_utf8(data)
+  {
+    let trimmed = text.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+      return ContentType::Url;
+    }
+    let code_indicators = [
+      "fn ", "impl ", "class ", "function ", "def ", "import ", "pub fn ",
+      "struct ", "#include", "const ", "let ", "var ", "package ", "module ",
+    ];
+    if code_indicators.iter().any(|kw| trimmed.contains(kw)) {
+      return ContentType::Code;
+    }
+    return ContentType::Text;
+  }
+
+  ContentType::Other
+}
+
+fn compute_preview(
+  content_type: ContentType,
+  mime_data: &HashMap<String, Vec<u8>>,
+) -> String {
+  match content_type {
+    ContentType::Image => {
+      let size = mime_data
+        .values()
+        .map(|d| d.len())
+        .max()
+        .unwrap_or(0);
+      format!("[Image, {} KiB]", size / 1024)
+    }
+    ContentType::File => {
+      if let Some(data) = mime_data.get("text/uri-list")
+        && let Ok(text) = std::str::from_utf8(data)
+      {
+        return text.lines().next().unwrap_or("[File]").to_string();
+      }
+      "[File]".to_string()
+    }
+    ContentType::Text | ContentType::Url | ContentType::Code => {
+      let text_data = TEXT_MIME_TYPES
+        .iter()
+        .find_map(|t| mime_data.get(*t));
+      if let Some(data) = text_data
+        && let Ok(text) = std::str::from_utf8(data)
+      {
+        return text
+          .lines()
+          .next()
+          .unwrap_or("")
+          .chars()
+          .take(200)
+          .collect();
+      }
+      String::new()
+    }
+    ContentType::Other => {
+      let best_mime = mime_data.keys().next().unwrap_or(&String::new()).clone();
+      let size = mime_data.values().map(|d| d.len()).max().unwrap_or(0);
+      format!("[{best_mime}, {} KiB]", size / 1024)
+    }
+  }
+}
+
+struct MimeReadState {
+  buffers: HashMap<String, Vec<u8>>,
+  completed: HashSet<String>,
+  total_count: usize,
+  original_offer_id: wayland_client::backend::ObjectId,
+  offered_mime_types: Vec<String>,
+  total_bytes: usize,
 }
 
 impl State {
@@ -222,25 +474,19 @@ impl State {
       return;
     };
 
-    let entry = match reader.get_by_id(id) {
-      Ok(Some(entry)) => entry,
-      Ok(None) => {
-        error!(id, "Clipboard history entry not found");
+    let mime_data = match reader.get_mime_data_by_id(id) {
+      Ok(data) if data.is_empty() => {
+        error!(id, "No mime data found for clipboard history entry");
         return;
       }
+      Ok(data) => data,
       Err(err) => {
-        error!(?err, id, "Failed to read clipboard history entry");
+        error!(?err, id, "Failed to read clipboard history entry mime data");
         return;
       }
     };
 
-    self.clipboard.clipboard_data.clear();
-    for mime_type in TEXT_MIME_TYPES {
-      self
-        .clipboard
-        .clipboard_data
-        .insert((*mime_type).to_string(), entry.data.clone());
-    }
+    self.clipboard.clipboard_data = mime_data;
 
     let Some(qh) = &self.qh else {
       error!("No QueueHandle available");
@@ -250,9 +496,9 @@ impl State {
     self.offer(&qh);
   }
 
-  fn on_clipboard_read_complete(
+  fn on_all_mimes_read_complete(
     &mut self,
-    data: Vec<u8>,
+    mut mime_data: HashMap<String, Vec<u8>>,
     original_offer_id: wayland_client::backend::ObjectId,
     offered_mime_types: Vec<String>,
     qh: &QueueHandle<Self>,
@@ -266,25 +512,23 @@ impl State {
       return;
     }
 
-    self.clipboard.clipboard_data.clear();
-    for mime_type in &offered_mime_types {
-      if TEXT_MIME_TYPES.contains(&mime_type.as_str()) {
-        self
-          .clipboard
-          .clipboard_data
-          .insert(mime_type.clone(), data.clone());
-      }
-    }
+    expand_text_aliases(&mut mime_data, &offered_mime_types);
+
+    let content_type = detect_content_type(&offered_mime_types, &mime_data);
+    let preview = compute_preview(content_type, &mime_data);
 
     debug!(
-      bytes = data.len(),
-      mime_types = ?self.clipboard.clipboard_data.keys().collect::<Vec<_>>(),
+      content_type = ?content_type,
+      mime_count = mime_data.len(),
+      preview = &preview,
       "Clipboard data captured"
     );
 
     if let Some(writer) = &self.clipboard.db_writer {
-      writer.insert(&offered_mime_types, &data);
+      writer.insert(&offered_mime_types, &mime_data, content_type, &preview);
     }
+
+    self.clipboard.clipboard_data = mime_data;
 
     if let Some(event_tx) = &self.event_tx
       && let Err(err) = event_tx.send(WaylandEvent::ClipboardText)
@@ -363,26 +607,12 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Stat
         let mime_types = std::mem::take(&mut state.clipboard.pending_mime_types);
         state.clipboard.pending_offer = None;
 
-        let Some(chosen_mime) = pick_mime_type(&mime_types) else {
-          debug!("No supported text mime type in offer");
+        let target_mimes = select_target_mimes(&mime_types);
+        if target_mimes.is_empty() {
+          debug!("No supported mime types in offer");
           offer.destroy();
           return;
-        };
-
-        // Create a pipe to read the offer data
-        let (read_fd, write_fd) = match rustix::pipe::pipe_with(PipeFlags::CLOEXEC) {
-          Ok(fds) => fds,
-          Err(err) => {
-            error!(?err, "Failed to create pipe");
-            offer.destroy();
-            return;
-          }
-        };
-
-        offer.receive(chosen_mime, write_fd.as_fd());
-        drop(write_fd);
-
-        let generic_source = Generic::new(fs::File::from(read_fd), Interest::READ, Mode::Level);
+        }
 
         let Some(loop_handle) = &state.loop_handle else {
           error!("No loop handle available");
@@ -390,43 +620,139 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Stat
           return;
         };
 
-        let captured_offer_id = offer_id;
-        let captured_mime_types = mime_types;
-        let mut buffer = Vec::new();
-        let qh = qh.clone();
+        let read_state = Rc::new(RefCell::new(MimeReadState {
+          buffers: HashMap::new(),
+          completed: HashSet::new(),
+          total_count: target_mimes.len(),
+          original_offer_id: offer_id,
+          offered_mime_types: mime_types,
+          total_bytes: 0,
+        }));
 
-        if let Err(err) = loop_handle.insert_source(generic_source, move |_, file, state| {
-          // SAFETY: safe as long as we don't close the underlying file
-          // TODO: Can we make this safe?
-          let file: &mut fs::File = unsafe { file.get_mut() };
-          let mut reader = BufReader::new(file);
-          match reader.fill_buf() {
-            Ok([]) => {
-              state.on_clipboard_read_complete(
-                std::mem::take(&mut buffer),
-                captured_offer_id.clone(),
-                captured_mime_types.clone(),
-                &qh,
-              );
-
-              Ok(PostAction::Remove)
-            }
-            Ok(buf) => {
-              buffer.extend_from_slice(buf);
-              let len = buf.len();
-              reader.consume(len);
-              Ok(PostAction::Continue)
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => Ok(PostAction::Continue),
+        for target_mime in &target_mimes {
+          let (read_fd, write_fd) = match rustix::pipe::pipe_with(PipeFlags::CLOEXEC) {
+            Ok(fds) => fds,
             Err(err) => {
-              error!(?err, "Error reading clipboard data from pipe");
-              Ok(PostAction::Remove)
+              error!(?err, mime_type = target_mime, "Failed to create pipe");
+              continue;
             }
+          };
+
+          offer.receive(target_mime.clone(), write_fd.as_fd());
+          drop(write_fd);
+
+          let generic_source =
+            Generic::new(fs::File::from(read_fd), Interest::READ, Mode::Level);
+
+          let mime_key = target_mime.clone();
+          let closure_read_state = Rc::clone(&read_state);
+          let qh = qh.clone();
+
+          if let Err(err) =
+            loop_handle.insert_source(generic_source, move |_, file, state| {
+              let read_state = &closure_read_state;
+              // SAFETY: safe as long as we don't close the underlying file
+              let file: &mut fs::File = unsafe { file.get_mut() };
+              let mut reader = BufReader::new(file);
+              match reader.fill_buf() {
+                Ok([]) => {
+                  let all_done = {
+                    let mut rs = read_state.borrow_mut();
+                    rs.completed.insert(mime_key.clone());
+                    rs.completed.len() == rs.total_count
+                  };
+
+                  if all_done {
+                    let rs = read_state.borrow();
+                    let mime_data = rs.buffers.clone();
+                    let original_offer_id = rs.original_offer_id.clone();
+                    let offered_mime_types = rs.offered_mime_types.clone();
+                    drop(rs);
+
+                    state.on_all_mimes_read_complete(
+                      mime_data,
+                      original_offer_id,
+                      offered_mime_types,
+                      &qh,
+                    );
+                  }
+
+                  Ok(PostAction::Remove)
+                }
+                Ok(buf) => {
+                  let mut rs = read_state.borrow_mut();
+                  rs.total_bytes += buf.len();
+                  if rs.total_bytes > MAX_ENTRY_SIZE {
+                    warn!(
+                      total_bytes = rs.total_bytes,
+                      "Clipboard entry exceeds size limit, truncating"
+                    );
+                    rs.completed.insert(mime_key.clone());
+                    let all_done = rs.completed.len() == rs.total_count;
+                    drop(rs);
+
+                    if all_done {
+                      let rs = read_state.borrow();
+                      let mime_data = rs.buffers.clone();
+                      let original_offer_id = rs.original_offer_id.clone();
+                      let offered_mime_types = rs.offered_mime_types.clone();
+                      drop(rs);
+
+                      state.on_all_mimes_read_complete(
+                        mime_data,
+                        original_offer_id,
+                        offered_mime_types,
+                        &qh,
+                      );
+                    }
+                    return Ok(PostAction::Remove);
+                  }
+
+                  let entry = rs.buffers.entry(mime_key.clone()).or_default();
+                  entry.extend_from_slice(buf);
+                  let len = buf.len();
+                  reader.consume(len);
+                  Ok(PostAction::Continue)
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                  Ok(PostAction::Continue)
+                }
+                Err(err) => {
+                  error!(?err, mime_type = mime_key, "Error reading clipboard pipe");
+
+                  let all_done = {
+                    let mut rs = read_state.borrow_mut();
+                    rs.completed.insert(mime_key.clone());
+                    rs.completed.len() == rs.total_count
+                  };
+
+                  if all_done {
+                    let rs = read_state.borrow();
+                    let mime_data = rs.buffers.clone();
+                    let original_offer_id = rs.original_offer_id.clone();
+                    let offered_mime_types = rs.offered_mime_types.clone();
+                    drop(rs);
+
+                    state.on_all_mimes_read_complete(
+                      mime_data,
+                      original_offer_id,
+                      offered_mime_types,
+                      &qh,
+                    );
+                  }
+
+                  Ok(PostAction::Remove)
+                }
+              }
+            })
+          {
+            error!(?err, "Failed to insert pipe read source");
+            let mut rs = read_state.borrow_mut();
+            rs.completed.insert(target_mime.clone());
           }
-        }) {
-          error!(?err, "Failed to insert pipe read source");
-          offer.destroy();
         }
+
+        offer.destroy();
       }
       zwlr_data_control_device_v1::Event::Finished => {
         state.data_device = None;

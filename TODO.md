@@ -5,7 +5,9 @@
 - [x] spinner in bluetooth and wifi
 - [x] fend calculations
 - [x] clipboard stuff
+- [x] audio styles
 - [ ] secret clipboard hints
-- [ ] audio styles
 - [ ] more clipboard mime types
 - [ ] dropdown menu
+- [ ] audio mute icons
+- [ ] audio styles for sources, streams

@@ -23,7 +23,7 @@ use wayland_protocols_wlr::data_control::v1::client::{
 };
 
 use clipboard::ClipboardState;
-pub use clipboard::{ClipboardDbReader, ClipboardEntry};
+pub use clipboard::{ClipboardDbReader, ClipboardEntry, ContentType};
 
 #[derive(Debug)]
 pub enum Command {
