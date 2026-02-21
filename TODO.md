@@ -10,6 +10,7 @@
 - [x] secret clipboard hints
 - [x] audio mute icons
 - [x] audio styles for sources
+- [x] unix timestamps
 - [ ] delete from clipboard
 - [ ] clipboard preview (images, links)
 - [ ] copy calc results
@@ -17,7 +18,6 @@
 - [ ] search providers (google, youtube, kagi, wikipedia)
 - [ ] process monitor/kill
 - [ ] color conversion (with contrast color text)
-- [ ] unix timestamps
 - [ ] alternate actions in clipboard (e.g. open uri)
 - [ ] lock, hibernate, shutdown
 - [ ] update styling for streams

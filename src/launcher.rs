@@ -7,6 +7,8 @@ use std::{
   },
 };
 
+use chrono::{DateTime, Local, TimeZone};
+
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
   AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString,
@@ -48,6 +50,7 @@ pub struct Launcher {
   focus_handle: FocusHandle,
   picker: Entity<Picker<RootDelegate>>,
   active_panel: Option<AnyView>,
+  timestamp_result: Option<SharedString>,
   fend_result: Option<SharedString>,
   fend_cancel_flag: Arc<AtomicBool>,
   fend_task: Option<Task<()>>,
@@ -145,7 +148,7 @@ impl Launcher {
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
         PickerEvent::Picked(item) => this.launch(item.clone(), window, cx),
         PickerEvent::QueryChanged(query) => {
-          this.update_fend_result(query.clone(), window, cx);
+          this.update_inline_results(query.clone(), window, cx);
         }
       },
     )];
@@ -154,6 +157,7 @@ impl Launcher {
       focus_handle: cx.focus_handle(),
       picker,
       active_panel,
+      timestamp_result: None,
       fend_result: None,
       fend_cancel_flag: Arc::new(AtomicBool::new(false)),
       fend_task: None,
@@ -161,7 +165,29 @@ impl Launcher {
     }
   }
 
-  fn update_fend_result(
+  fn try_parse_timestamp(query: &str) -> Option<SharedString> {
+    let trimmed = query.trim();
+    let len = trimmed.len();
+    let timestamp: i64 = trimmed.parse().ok()?;
+
+    // 10 digits = seconds, 13 = milliseconds, 19 = nanoseconds
+    let datetime: DateTime<Local> = match len {
+      10 => Local.timestamp_opt(timestamp, 0).single()?,
+      13 => Local.timestamp_millis_opt(timestamp).single()?,
+      19 => {
+        let seconds = timestamp / 1_000_000_000;
+        let nanos = (timestamp % 1_000_000_000) as u32;
+        Local.timestamp_opt(seconds, nanos).single()?
+      }
+      _ => return None,
+    };
+
+    Some(SharedString::from(
+      datetime.format("%A, %Y-%m-%d %H:%M:%S %Z").to_string(),
+    ))
+  }
+
+  fn update_inline_results(
     &mut self,
     query: String,
     _window: &mut Window,
@@ -169,9 +195,12 @@ impl Launcher {
   ) {
     self.fend_cancel_flag.store(true, Ordering::Release);
     self.fend_cancel_flag = Arc::new(AtomicBool::new(false));
+    self.timestamp_result = None;
     self.fend_result = None;
     self.fend_task = None;
     cx.notify();
+
+    self.timestamp_result = Self::try_parse_timestamp(&query);
 
     if query.is_empty() {
       return;
@@ -276,21 +305,25 @@ impl Render for Launcher {
       .when_none(&self.active_panel, |this| {
         this
           .child(picker_input(&self.picker).text_size(px(18.)))
-          .when_some(self.fend_result.clone(), |this, result| {
-            this.child(
-              h_flex()
-                .px_3()
-                .py_2()
-                .border_b_1()
-                .border_color(rgba(0xFFFFFF12))
-                .gap_2()
-                .text_color(rgb(0x888888))
-                .child("=")
-                .child(
-                  div().text_color(rgb(0xFFFFFF)).child(result),
-                ),
-            )
-          })
+          .when_some(
+            self
+              .timestamp_result
+              .clone()
+              .or_else(|| self.fend_result.clone()),
+            |this, result| {
+              this.child(
+                h_flex()
+                  .px_3()
+                  .py_2()
+                  .border_b_1()
+                  .border_color(rgba(0xFFFFFF12))
+                  .gap_2()
+                  .text_color(rgb(0x888888))
+                  .child("=")
+                  .child(div().text_color(rgb(0xFFFFFF)).child(result)),
+              )
+            },
+          )
           .child(picker_results(&self.picker))
       })
   }

@@ -2879,6 +2879,7 @@ dependencies = [
  "async-process",
  "calloop",
  "calloop-wayland-source",
+ "chrono",
  "clap",
  "deadpool",
  "dirs 6.0.0",
