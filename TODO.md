@@ -13,8 +13,8 @@
 - [x] unix timestamps
 - [x] color conversion
 - [x] search providers (google, youtube, kagi, wikipedia)
-- [ ] delete from clipboard
 - [ ] clipboard preview (images, links)
+- [ ] delete from clipboard
 - [ ] copy calc results
 - [ ] calc result history/panel
 - [ ] process monitor/kill
