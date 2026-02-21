@@ -504,6 +504,23 @@ struct MimeReadState {
 }
 
 impl State {
+  pub fn offer_text(&mut self, text: String) {
+    let data = text.into_bytes();
+    let mut mime_data = HashMap::new();
+    for mime in TEXT_MIME_TYPES {
+      mime_data.insert((*mime).to_string(), data.clone());
+    }
+
+    self.clipboard.clipboard_data = mime_data;
+
+    let Some(qh) = &self.qh else {
+      error!("No QueueHandle available");
+      return;
+    };
+    let qh = qh.clone();
+    self.offer(&qh);
+  }
+
   pub fn copy_history_entry(&mut self, id: i64) {
     let Some(reader) = &self.clipboard.db_reader else {
       error!("No clipboard database reader available");

@@ -11,8 +11,8 @@ use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
-  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString,
-  Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
+  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString, Size,
+  Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -43,11 +43,12 @@ impl fend_core::Interrupt for FendInterrupt {
   }
 }
 
-actions!(launcher, [Quit, GoBack]);
+actions!(launcher, [Quit, GoBack, CopyResult]);
 const CONTEXT: &str = "launcher";
 
 struct ColorResult {
   text: SharedString,
+  copy_text: SharedString,
   conversion: Option<SharedString>,
   color: gpui::Hsla,
 }
@@ -97,6 +98,7 @@ impl Launcher {
     cx.bind_keys([
       KeyBinding::new("escape", Quit, Some(CONTEXT)),
       KeyBinding::new("shift-escape", GoBack, Some(CONTEXT)),
+      KeyBinding::new("ctrl-enter", CopyResult, Some(CONTEXT)),
     ]);
 
     let launches = Arc::new(DB.get_launches());
@@ -205,12 +207,14 @@ impl Launcher {
 
     let conversion = target_format
       .as_deref()
-      .and_then(|target| Self::convert_color(&color, target))
-      .map(SharedString::from);
+      .and_then(|target| Self::convert_color(&color, target));
+
+    let copy_text = SharedString::from(conversion.clone().unwrap_or_else(|| color_str.to_string()));
 
     Some(ColorResult {
       text: SharedString::from(color_str.to_string()),
-      conversion,
+      copy_text,
+      conversion: conversion.map(SharedString::from),
       color: gpui::hsla(h / 360.0, s, l, a),
     })
   }
@@ -237,12 +241,7 @@ impl Launcher {
     ))
   }
 
-  fn update_inline_results(
-    &mut self,
-    query: String,
-    _window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  fn update_inline_results(&mut self, query: String, _window: &mut Window, cx: &mut Context<Self>) {
     self.fend_cancel_flag.store(true, Ordering::Release);
     self.fend_cancel_flag = Arc::new(AtomicBool::new(false));
     self.color_result = None;
@@ -266,8 +265,7 @@ impl Launcher {
           .background_spawn(async move {
             let interrupt = FendInterrupt(cancel_flag);
             let mut context = fend_core::Context::new();
-            let expr =
-              fend_core::parse_with_interrupt(&query, &mut context, &interrupt).ok()?;
+            let expr = fend_core::parse_with_interrupt(&query, &mut context, &interrupt).ok()?;
             if !expr.contains_computation() {
               return None;
             }
@@ -294,6 +292,16 @@ impl Launcher {
 
   fn quit(&mut self, _: &Quit, window: &mut Window, _cx: &mut Context<Self>) {
     window.remove_window();
+  }
+
+  fn copy_result(&mut self, _: &CopyResult, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(color) = &self.color_result {
+      let connection = crate::wayland::WaylandConnection::global(cx);
+      connection.read(cx).send_command(crate::wayland::Command::OfferText {
+        text: color.copy_text.to_string(),
+      });
+      window.remove_window();
+    }
   }
 
   fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
@@ -345,6 +353,7 @@ impl Render for Launcher {
       .text_color(rgb(0xFFFFFF))
       .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::go_back))
+      .on_action(cx.listener(Self::copy_result))
       .rounded_xl()
       .size_full()
       .border_1()
@@ -367,12 +376,7 @@ impl Render for Launcher {
                 .gap_4()
                 .border_b_1()
                 .border_color(rgba(0xFFFFFF12))
-                .child(
-                  div()
-                    .size(px(64.))
-                    .rounded_md()
-                    .bg(color.color),
-                )
+                .child(div().size(px(64.)).rounded_md().bg(color.color))
                 .child(
                   v_flex()
                     .gap_1()
