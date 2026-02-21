@@ -12,11 +12,11 @@
 - [x] audio styles for sources
 - [x] unix timestamps
 - [x] color conversion
+- [x] search providers (google, youtube, kagi, wikipedia)
 - [ ] delete from clipboard
 - [ ] clipboard preview (images, links)
 - [ ] copy calc results
 - [ ] calc result history/panel
-- [ ] search providers (google, youtube, kagi, wikipedia)
 - [ ] process monitor/kill
 - [ ] alternate actions in clipboard (e.g. open uri)
 - [ ] lock, hibernate, shutdown

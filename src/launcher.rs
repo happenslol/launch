@@ -32,7 +32,7 @@ use crate::{
   network,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
-  xdg::{self, XdgIconCache},
+  xdg::{self, XdgIconCache, open_url},
 };
 
 struct FendInterrupt(Arc<AtomicBool>);
@@ -118,6 +118,7 @@ impl Launcher {
     items.extend(network::get_items());
     items.extend(bluetooth::get_items());
     items.extend(clipboard::get_items());
+    items.extend(search_providers());
 
     let items = Arc::new(items);
 
@@ -334,6 +335,15 @@ impl Launcher {
         });
         cx.notify();
       }
+      RootItem::Search { url_template, .. } => {
+        let query = self.picker.read(cx).search_input.read(cx).value();
+        let encoded = urlencoding::encode(&query);
+        let url = url_template.replace("{}", &encoded);
+        match open_url(&url) {
+          Ok(_) => window.remove_window(),
+          Err(err) => error!(?err, "Failed to open search URL"),
+        }
+      }
     }
   }
 }
@@ -459,6 +469,12 @@ pub enum RootItem {
     terms: Vec<String>,
     view: Arc<PanelView>,
   },
+  Search {
+    id: &'static str,
+    icon: IconName,
+    name: SharedString,
+    url_template: &'static str,
+  },
 }
 
 impl RootItem {
@@ -466,6 +482,7 @@ impl RootItem {
     match self {
       RootItem::App { entry, .. } => format!("app:{}", entry.appid),
       RootItem::Panel { id, .. } => format!("panel:{}", id),
+      RootItem::Search { id, .. } => format!("search:{}", id),
     }
   }
 
@@ -473,8 +490,38 @@ impl RootItem {
     match self {
       RootItem::App { .. } => "app",
       RootItem::Panel { .. } => "panel",
+      RootItem::Search { .. } => "search",
     }
   }
+}
+
+fn search_providers() -> Vec<RootItem> {
+  vec![
+    RootItem::Search {
+      id: "google",
+      icon: IconName::BrandGoogle,
+      name: "Google".into(),
+      url_template: "https://www.google.com/search?q={}",
+    },
+    RootItem::Search {
+      id: "youtube",
+      icon: IconName::BrandYoutube,
+      name: "YouTube".into(),
+      url_template: "https://www.youtube.com/results?search_query={}",
+    },
+    RootItem::Search {
+      id: "wikipedia",
+      icon: IconName::BrandWikipedia,
+      name: "Wikipedia".into(),
+      url_template: "https://en.wikipedia.org/w/index.php?search={}",
+    },
+    RootItem::Search {
+      id: "kagi",
+      icon: IconName::Search,
+      name: "Kagi".into(),
+      url_template: "https://kagi.com/search?q={}",
+    },
+  ]
 }
 
 impl PickerDelegate for RootDelegate {
@@ -512,7 +559,7 @@ impl PickerDelegate for RootDelegate {
               })
               .child(name.clone())
           }
-          RootItem::Panel { name, icon, .. } => this
+          RootItem::Panel { name, icon, .. } | RootItem::Search { name, icon, .. } => this
             .child(Icon::new(*icon).size(icon_size))
             .child(name.clone()),
         }
@@ -528,14 +575,16 @@ impl PickerDelegate for RootDelegate {
 
   fn sort_items(&self, _cx: &App, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
     matches.sort_by_key(|(i, score)| {
+      let is_search = matches!(items[*i], RootItem::Search { .. });
+      let priority = if is_search { 1u8 } else { 0u8 };
+
       let (count, last_launch) = self
         .launches
         .get(&items[*i].id())
         .copied()
         .unwrap_or_default();
 
-      // Sort by score (descending), then count (descending), then last_launch (descending)
-      Reverse((*score, count, last_launch))
+      Reverse((Reverse(priority), *score, count, last_launch))
     });
   }
 
@@ -572,6 +621,11 @@ impl PickerDelegate for RootDelegate {
           }
 
           for (i, item) in items.iter().enumerate() {
+            if matches!(item, RootItem::Search { .. }) {
+              matches.push((i, 0));
+              continue;
+            }
+
             let mut max_score: Option<u32> = None;
             let mut do_match = |term: &str| {
               let term = Utf32Str::new(term, &mut buf);
@@ -605,6 +659,7 @@ impl PickerDelegate for RootDelegate {
                   do_match(term);
                 }
               }
+              RootItem::Search { .. } => unreachable!(),
             }
 
             if let Some(score) = max_score {

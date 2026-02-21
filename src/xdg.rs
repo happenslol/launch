@@ -154,6 +154,24 @@ pub fn get_icon(name: &str) -> Option<PathBuf> {
   lookup.find()
 }
 
+pub fn open_url(url: &str) -> Result<()> {
+  if let Fork::Child = fork::fork()? {
+    if fork::setsid().is_err() {
+      eprintln!("Failed to setsid: {}", std::io::Error::last_os_error());
+      process::exit(1);
+    }
+    if fork::redirect_stdio().is_err() {
+      eprintln!("Failed to close_fd: {}", std::io::Error::last_os_error());
+    }
+
+    let err = exec::execvp("xdg-open", &["xdg-open", url]);
+    eprintln!("Failed to exec xdg-open: {}", err);
+    process::exit(1);
+  }
+
+  Ok(())
+}
+
 pub fn start(entry: &DesktopEntry) -> Result<()> {
   let cmd = entry.parse_exec()?;
 
