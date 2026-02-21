@@ -505,21 +505,25 @@ impl RenderOnce for VolumeBar {
   }
 }
 
-fn sink_icon(icon_name: Option<&str>) -> IconName {
+fn sink_icon(icon_name: Option<&str>, muted: bool) -> IconName {
   let Some(icon_name) = icon_name else {
-    return IconName::DeviceSpeaker;
+    return if muted {
+      IconName::DeviceSpeakerOff
+    } else {
+      IconName::DeviceSpeaker
+    };
   };
 
   if icon_name.contains("headphone") {
-    IconName::Headphones
+    if muted { IconName::HeadphonesOff } else { IconName::Headphones }
   } else if icon_name.contains("headset") {
-    IconName::Headset
+    if muted { IconName::HeadsetOff } else { IconName::Headset }
   } else if icon_name.contains("speaker") {
-    IconName::DeviceSpeaker
+    if muted { IconName::DeviceSpeakerOff } else { IconName::DeviceSpeaker }
   } else if icon_name.contains("card") {
-    IconName::Volume
+    if muted { IconName::VolumeOff } else { IconName::Volume }
   } else {
-    IconName::DeviceSpeaker
+    if muted { IconName::DeviceSpeakerOff } else { IconName::DeviceSpeaker }
   }
 }
 
@@ -543,7 +547,7 @@ impl PickerDelegate for SinksDelegate {
     let is_unavailable = sink.port_available == Some(false);
     let is_dimmed = sink.mute || is_unavailable;
     let volume_percent = sink.volume.as_percent(sink.base_volume);
-    let icon = sink_icon(sink.form_factor.as_ref().map(|s| s.as_ref()));
+    let icon = sink_icon(sink.form_factor.as_ref().map(|s| s.as_ref()), sink.mute);
 
     v_flex()
       .w_full()
@@ -591,10 +595,12 @@ impl PickerDelegate for SinksDelegate {
             div()
               .text_xs()
               .text_color(rgb(0x888888))
-              .when(sink.mute, |div| {
+              .when(sink.mute || is_unavailable, |div| {
                 div.text_color(rgb(0x666666)).font_weight(FontWeight::BOLD)
               })
-              .child(if sink.mute {
+              .child(if is_unavailable {
+                "UNAVAILABLE".to_string()
+              } else if sink.mute {
                 "MUTE".to_string()
               } else {
                 format!("{}%", volume_percent)

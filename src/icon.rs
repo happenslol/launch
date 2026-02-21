@@ -21,10 +21,13 @@ pub enum IconName {
   DeviceDesktop,
   DeviceGamepad,
   DeviceSpeaker,
+  DeviceSpeakerOff,
   FileText,
   FileUnknown,
   Headphones,
+  HeadphonesOff,
   Headset,
+  HeadsetOff,
   Keyboard,
   Link,
   Loader,
@@ -37,6 +40,7 @@ pub enum IconName {
   Printer,
   StarFilled,
   Volume,
+  VolumeOff,
   Wifi,
 }
 
@@ -55,10 +59,13 @@ impl IconName {
       IconName::DeviceDesktop => "device-desktop",
       IconName::DeviceGamepad => "device-gamepad",
       IconName::DeviceSpeaker => "device-speaker",
+      IconName::DeviceSpeakerOff => "device-speaker-off",
       IconName::FileText => "file-text",
       IconName::FileUnknown => "file-unknown",
       IconName::Headphones => "headphones",
+      IconName::HeadphonesOff => "headphones-off",
       IconName::Headset => "headset",
+      IconName::HeadsetOff => "headset-off",
       IconName::Keyboard => "keyboard",
       IconName::Link => "link",
       IconName::Loader => "loader-2",
@@ -71,6 +78,7 @@ impl IconName {
       IconName::Printer => "printer",
       IconName::StarFilled => "star-filled",
       IconName::Volume => "volume",
+      IconName::VolumeOff => "volume-off",
       IconName::Wifi => "wifi",
     };
     SharedString::from(format!("assets/icons/{name}.svg"))

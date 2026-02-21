@@ -8,7 +8,7 @@
 - [x] audio styles
 - [x] more clipboard mime types
 - [x] secret clipboard hints
-- [ ] audio mute icons
+- [x] audio mute icons
 - [ ] audio styles for sources, streams
 - [ ] delete from clipboard
 - [ ] clipboard preview (images, links)
