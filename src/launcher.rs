@@ -46,10 +46,17 @@ impl fend_core::Interrupt for FendInterrupt {
 actions!(launcher, [Quit, GoBack]);
 const CONTEXT: &str = "launcher";
 
+struct ColorResult {
+  text: SharedString,
+  conversion: Option<SharedString>,
+  color: gpui::Hsla,
+}
+
 pub struct Launcher {
   focus_handle: FocusHandle,
   picker: Entity<Picker<RootDelegate>>,
   active_panel: Option<AnyView>,
+  color_result: Option<ColorResult>,
   timestamp_result: Option<SharedString>,
   fend_result: Option<SharedString>,
   fend_cancel_flag: Arc<AtomicBool>,
@@ -157,12 +164,55 @@ impl Launcher {
       focus_handle: cx.focus_handle(),
       picker,
       active_panel,
+      color_result: None,
       timestamp_result: None,
       fend_result: None,
       fend_cancel_flag: Arc::new(AtomicBool::new(false)),
       fend_task: None,
       _subscriptions: subscriptions,
     }
+  }
+
+  fn convert_color(color: &csscolorparser::Color, target: &str) -> Option<String> {
+    match target {
+      "hex" => Some(color.to_css_hex()),
+      "rgb" | "rgba" => Some(color.to_css_rgb()),
+      "hsl" | "hsla" => Some(color.to_css_hsl()),
+      "oklch" => Some(color.to_css_oklch()),
+      "oklab" => Some(color.to_css_oklab()),
+      "hwb" => Some(color.to_css_hwb()),
+      "lab" => Some(color.to_css_lab()),
+      "lch" => Some(color.to_css_lch()),
+      _ => None,
+    }
+  }
+
+  fn try_parse_color(query: &str) -> Option<ColorResult> {
+    let trimmed = query.trim();
+
+    // Check for conversion syntax: "<color> to|as|in <format>"
+    let (color_str, target_format) = [" to ", " as ", " in "]
+      .iter()
+      .find_map(|sep| {
+        let (left, right) = trimmed.rsplit_once(sep)?;
+        let target = right.trim().to_lowercase();
+        Some((left.trim(), Some(target)))
+      })
+      .unwrap_or((trimmed, None));
+
+    let color = csscolorparser::parse(color_str).ok()?;
+    let [h, s, l, a] = color.to_hsla();
+
+    let conversion = target_format
+      .as_deref()
+      .and_then(|target| Self::convert_color(&color, target))
+      .map(SharedString::from);
+
+    Some(ColorResult {
+      text: SharedString::from(color_str.to_string()),
+      conversion,
+      color: gpui::hsla(h / 360.0, s, l, a),
+    })
   }
 
   fn try_parse_timestamp(query: &str) -> Option<SharedString> {
@@ -195,11 +245,13 @@ impl Launcher {
   ) {
     self.fend_cancel_flag.store(true, Ordering::Release);
     self.fend_cancel_flag = Arc::new(AtomicBool::new(false));
+    self.color_result = None;
     self.timestamp_result = None;
     self.fend_result = None;
     self.fend_task = None;
     cx.notify();
 
+    self.color_result = Self::try_parse_color(&query);
     self.timestamp_result = Self::try_parse_timestamp(&query);
 
     if query.is_empty() {
@@ -305,25 +357,63 @@ impl Render for Launcher {
       .when_none(&self.active_panel, |this| {
         this
           .child(picker_input(&self.picker).text_size(px(18.)))
-          .when_some(
-            self
-              .timestamp_result
-              .clone()
-              .or_else(|| self.fend_result.clone()),
-            |this, result| {
-              this.child(
-                h_flex()
-                  .px_3()
-                  .py_2()
-                  .border_b_1()
-                  .border_color(rgba(0xFFFFFF12))
-                  .gap_2()
-                  .text_color(rgb(0x888888))
-                  .child("=")
-                  .child(div().text_color(rgb(0xFFFFFF)).child(result)),
-              )
-            },
-          )
+          .when_some(self.color_result.as_ref(), |this, color| {
+            this.child(
+              h_flex()
+                .items_center()
+                .justify_center()
+                .px_3()
+                .py_4()
+                .gap_4()
+                .border_b_1()
+                .border_color(rgba(0xFFFFFF12))
+                .child(
+                  div()
+                    .size(px(64.))
+                    .rounded_md()
+                    .bg(color.color),
+                )
+                .child(
+                  v_flex()
+                    .gap_1()
+                    .child(
+                      div()
+                        .text_color(rgb(0xFFFFFF))
+                        .text_size(px(16.))
+                        .child(color.text.clone()),
+                    )
+                    .when_some(color.conversion.clone(), |this, conversion| {
+                      this.child(
+                        div()
+                          .text_color(rgb(0x888888))
+                          .text_size(px(14.))
+                          .child(conversion),
+                      )
+                    }),
+                ),
+            )
+          })
+          .when(self.color_result.is_none(), |this| {
+            this.when_some(
+              self
+                .timestamp_result
+                .clone()
+                .or_else(|| self.fend_result.clone()),
+              |this, result| {
+                this.child(
+                  h_flex()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgba(0xFFFFFF12))
+                    .gap_2()
+                    .text_color(rgb(0x888888))
+                    .child("=")
+                    .child(div().text_color(rgb(0xFFFFFF)).child(result)),
+                )
+              },
+            )
+          })
           .child(picker_results(&self.picker))
       })
   }

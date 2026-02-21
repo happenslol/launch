@@ -58,6 +58,7 @@ calloop = "0.14.4"
 calloop-wayland-source = "0.4.1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 chrono = "0.4.43"
+csscolorparser = { version = "0.8.2", default-features = false }
 
 [dependencies.gpui]
 git = "https://github.com/zed-industries/zed"

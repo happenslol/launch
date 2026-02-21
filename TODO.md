@@ -11,16 +11,17 @@
 - [x] audio mute icons
 - [x] audio styles for sources
 - [x] unix timestamps
+- [x] color conversion
 - [ ] delete from clipboard
 - [ ] clipboard preview (images, links)
 - [ ] copy calc results
 - [ ] calc result history/panel
 - [ ] search providers (google, youtube, kagi, wikipedia)
 - [ ] process monitor/kill
-- [ ] color conversion (with contrast color text)
 - [ ] alternate actions in clipboard (e.g. open uri)
 - [ ] lock, hibernate, shutdown
 - [ ] update styling for streams
+- [ ] update styling for inline results
 
 # refactor
 
