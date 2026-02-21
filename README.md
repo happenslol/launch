@@ -28,8 +28,3 @@
 - fuzzy file search
 - process kill
 - color picker
-
-# refactor
-
-- (bluetooth) move strings relevant for picker search outside of entity for performance
-- (dbus) instead of observing global, just have an async function that returns instantly when available, and waits otherwise
