@@ -36,6 +36,8 @@ const X11_METADATA_MIMES: &[&str] = &[
   "x-special/gnome-copied-files-icon",
 ];
 
+const SECRET_HINT_MIME: &str = "x-kde-passwordManagerHint";
+
 const MAX_ENTRY_SIZE: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -639,6 +641,12 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Stat
 
         let mime_types = std::mem::take(&mut state.clipboard.pending_mime_types);
         state.clipboard.pending_offer = None;
+
+        if mime_types.iter().any(|m| m == SECRET_HINT_MIME) {
+          debug!("Clipboard offer contains secret hint, ignoring");
+          offer.destroy();
+          return;
+        }
 
         let target_mimes = select_target_mimes(&mime_types);
         if target_mimes.is_empty() {
