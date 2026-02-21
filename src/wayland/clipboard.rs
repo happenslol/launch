@@ -37,6 +37,7 @@ const X11_METADATA_MIMES: &[&str] = &[
 ];
 
 const SECRET_HINT_MIME: &str = "x-kde-passwordManagerHint";
+const REOFFER_HINT_MIME: &str = "x-launch-reoffer";
 
 const MAX_ENTRY_SIZE: usize = 10 * 1024 * 1024;
 
@@ -587,6 +588,7 @@ impl State {
     for mime_type in self.clipboard.clipboard_data.keys() {
       source.offer(mime_type.clone());
     }
+    source.offer(REOFFER_HINT_MIME.to_string());
 
     // Set state to Ours before set_selection so the echoed Selection event is recognized
     self.clipboard.selection_state = SelectionState::Ours(source);
@@ -642,8 +644,8 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Stat
         let mime_types = std::mem::take(&mut state.clipboard.pending_mime_types);
         state.clipboard.pending_offer = None;
 
-        if mime_types.iter().any(|m| m == SECRET_HINT_MIME) {
-          debug!("Clipboard offer contains secret hint, ignoring");
+        if mime_types.iter().any(|m| m == SECRET_HINT_MIME || m == REOFFER_HINT_MIME) {
+          debug!("Clipboard offer contains secret or reoffer hint, ignoring");
           offer.destroy();
           return;
         }
@@ -844,9 +846,14 @@ impl Dispatch<zwlr_data_control_source_v1::ZwlrDataControlSourceV1, ()> for Stat
           return;
         }
 
-        let Some(data) = state.clipboard.clipboard_data.get(&mime_type) else {
-          warn!(?mime_type, "Requested mime type not in clipboard data");
-          return;
+        let data = if mime_type == REOFFER_HINT_MIME {
+          &[] as &[u8]
+        } else {
+          let Some(data) = state.clipboard.clipboard_data.get(&mime_type) else {
+            warn!(?mime_type, "Requested mime type not in clipboard data");
+            return;
+          };
+          data.as_slice()
         };
 
         if let Err(err) = fcntl_setfl(&fd, OFlags::empty()) {
