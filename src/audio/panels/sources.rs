@@ -1,8 +1,8 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
-  App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Render,
-  Styled, Subscription, Task, Window, actions, div, prelude::*,
+  App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding,
+  Render, SharedString, Styled, Subscription, Task, Window, actions, div, prelude::*, rems, rgb,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -15,16 +15,44 @@ use crate::{
     pulse::{SetMute, SetVolume},
     types::{SourceEvent, SourceId, SourceInfo, SourceListEvent},
   },
+  icon::{Icon, IconName},
   matcher::MatcherPool,
-  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
-  util::{ResultExt, v_flex},
+  picker::{Category, Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
+  util::{ResultExt, h_flex, v_flex},
 };
 
-use super::VolumeBar;
+use super::{VolumeBar, sinks::sink_icon};
+
+fn source_icon(icon_name: Option<&str>, device_class: Option<&str>, muted: bool) -> IconName {
+  if device_class == Some("monitor") {
+    return sink_icon(icon_name, muted);
+  }
+
+  let Some(icon_name) = icon_name else {
+    return if muted {
+      IconName::MicrophoneOff
+    } else {
+      IconName::Microphone
+    };
+  };
+
+  if icon_name.contains("headphone") {
+    if muted { IconName::HeadphonesOff } else { IconName::Headphones }
+  } else if icon_name.contains("headset") {
+    if muted { IconName::HeadsetOff } else { IconName::Headset }
+  } else if icon_name.contains("card") {
+    if muted { IconName::VolumeOff } else { IconName::Volume }
+  } else {
+    if muted { IconName::MicrophoneOff } else { IconName::Microphone }
+  }
+}
 
 #[derive(Clone)]
 pub struct SourceEntry {
   id: SourceId,
+  description: Option<SharedString>,
+  device_class: Option<SharedString>,
+  port_available: Option<bool>,
   search_string: String,
   entry: Entity<SourceEntryInner>,
 }
@@ -37,6 +65,9 @@ impl SourceEntry {
     cx: &mut App,
   ) -> Self {
     let id = source.id;
+    let description = source.description.clone();
+    let device_class = source.device_class.clone();
+    let port_available = source.port_available;
     let mut search_parts = Vec::new();
     if let Some(ref name) = source.name {
       search_parts.push(name.to_string());
@@ -49,9 +80,16 @@ impl SourceEntry {
 
     Self {
       id,
+      description,
+      device_class,
+      port_available,
       search_string,
       entry,
     }
+  }
+
+  fn is_monitor(&self) -> bool {
+    self.device_class.as_ref().map(|s| s.as_ref()) == Some("monitor")
   }
 }
 
@@ -59,6 +97,10 @@ pub struct SourceEntryInner {
   source: SourceInfo,
   _event_listener: Task<()>,
 }
+
+pub struct SourceStateChanged;
+
+impl gpui::EventEmitter<SourceStateChanged> for SourceEntryInner {}
 
 impl SourceEntryInner {
   pub fn new(
@@ -86,6 +128,7 @@ impl SourceEntryInner {
             }
             SourceEvent::InfoChanged(info) => {
               this.source = info;
+              cx.emit(SourceStateChanged);
               cx.notify();
             }
             SourceEvent::BecameDefault | SourceEvent::NoLongerDefault => {
@@ -162,6 +205,11 @@ impl AudioSourcesPanel {
             .map(|source| SourceEntry::new(source, &audio_state, window, cx))
             .collect();
 
+          let entries: Vec<_> = this.sources.clone();
+          for entry in &entries {
+            this.subscribe_to_source_entry(entry, window, cx);
+          }
+
           picker.update(cx, |picker, cx| {
             picker.set_items(this.sources.clone(), window, cx);
           });
@@ -180,6 +228,7 @@ impl AudioSourcesPanel {
             SourceListEvent::Added(source_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
                 let new_entry = SourceEntry::new(source_info, &audio_state, window, cx);
+                this.subscribe_to_source_entry(&new_entry, window, cx);
                 this.sources.push(new_entry);
 
                 picker.update(cx, |picker, cx| {
@@ -208,6 +257,9 @@ impl AudioSourcesPanel {
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, _window, cx| {
         if let PickerEvent::Picked(entry) = ev {
+          if entry.port_available == Some(false) {
+            return;
+          }
           this
             .audio_state
             .update(cx, |state, cx| state.set_default_source(entry.id, cx))
@@ -226,6 +278,30 @@ impl AudioSourcesPanel {
       _list_subscription_task: list_subscription_task,
       _initial_load_task: initial_load_task,
     }
+  }
+
+  fn subscribe_to_source_entry(
+    &mut self,
+    entry: &SourceEntry,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let picker = self.picker.clone();
+    self._subscriptions.push(cx.subscribe_in(
+      &entry.entry,
+      window,
+      move |this, entry, _event: &SourceStateChanged, window, cx| {
+        let source = &entry.read(cx).source;
+        if let Some(source_entry) = this.sources.iter_mut().find(|e| e.entry == *entry) {
+          source_entry.description = source.description.clone();
+          source_entry.device_class = source.device_class.clone();
+          source_entry.port_available = source.port_available;
+        }
+        picker.update(cx, |picker, cx| {
+          picker.set_items(this.sources.clone(), window, cx);
+        });
+      },
+    ));
   }
 
   fn get_selected_id(&self, cx: &mut Context<Self>) -> Option<SourceId> {
@@ -284,7 +360,7 @@ impl Render for AudioSourcesPanel {
       .on_action(cx.listener(Self::volume_up))
       .on_action(cx.listener(Self::volume_down))
       .on_action(cx.listener(Self::mute))
-      .child(picker_input(&self.picker))
+      .child(picker_input(&self.picker).show_back_button(true))
       .child(picker_results(&self.picker))
   }
 }
@@ -303,11 +379,16 @@ impl PickerDelegate for SourcesDelegate {
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
-    use crate::util::h_flex;
-
     let source = &item.entry.read(cx).source;
     let is_default = self.audio_state.read(cx).default_source == Some(source.id);
+    let is_unavailable = source.port_available == Some(false);
+    let is_dimmed = source.mute || is_unavailable;
     let volume_percent = source.volume.as_percent(source.base_volume);
+    let icon = source_icon(
+      source.icon_name.as_ref().map(|s| s.as_ref()),
+      source.device_class.as_ref().map(|s| s.as_ref()),
+      source.mute,
+    );
 
     v_flex()
       .w_full()
@@ -315,17 +396,27 @@ impl PickerDelegate for SourcesDelegate {
       .px_2()
       .py_3()
       .rounded_md()
-      .child(VolumeBar::new(volume_percent, source.mute, is_selected).default(is_default))
+      .child(VolumeBar::new(volume_percent, is_dimmed, is_selected).default(is_default))
       .child(
         h_flex()
           .w_full()
           .gap_2()
+          .child({
+            let icon_color = match (is_dimmed, is_default, is_selected) {
+              (true, _, _) => rgb(0x555555),
+              (_, true, true) => rgb(0x6EA8F0),
+              (_, true, false) => rgb(0x5B93D5),
+              (_, false, true) => rgb(0xBBBBBB),
+              (_, false, false) => rgb(0x888888),
+            };
+            Icon::new(icon).size(rems(1.1)).text_color(icon_color)
+          })
           .child(
             h_flex()
               .flex_1()
               .text_ellipsis()
               .overflow_x_hidden()
-              .when(source.mute, |div| div.child("MUTE "))
+              .when(is_dimmed, |div| div.opacity(0.5))
               .child(
                 source
                   .description
@@ -333,8 +424,43 @@ impl PickerDelegate for SourcesDelegate {
                   .unwrap_or_else(|| source.name.clone().unwrap_or_default()),
               ),
           )
-          .child(div().child(format!("{}%", volume_percent))),
+          .child(
+            div()
+              .text_xs()
+              .text_color(rgb(0x888888))
+              .when(source.mute || is_unavailable, |div| {
+                div.text_color(rgb(0x666666)).font_weight(FontWeight::BOLD)
+              })
+              .child(if is_unavailable {
+                "UNAVAILABLE".to_string()
+              } else if source.mute {
+                "MUTE".to_string()
+              } else {
+                format!("{}%", volume_percent)
+              }),
+          ),
       )
+  }
+
+  fn sort_items(&self, _cx: &App, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
+    matches.sort_by_key(|(index, score)| {
+      let description = items[*index].description.clone().unwrap_or_default();
+      (std::cmp::Reverse(*score), description)
+    });
+  }
+
+  fn categories(&self) -> Option<Vec<Category<Self::ListItem>>> {
+    Some(vec![
+      Category::new("Microphones", |entry: &SourceEntry| {
+        entry.port_available != Some(false) && !entry.is_monitor()
+      }),
+      Category::new("Monitors", |entry: &SourceEntry| {
+        entry.port_available != Some(false) && entry.is_monitor()
+      }),
+      Category::new("Unavailable", |entry: &SourceEntry| {
+        entry.port_available == Some(false)
+      }),
+    ])
   }
 
   fn update_matches(

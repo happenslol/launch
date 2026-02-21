@@ -835,8 +835,31 @@ impl PulseState {
   fn handle_source_info(this: &Rc<RefCell<Self>>, info: ListResult<&introspect::SourceInfo>) {
     let ListResult::Item(info) = info else { return };
 
+    let is_hardware = info.flags.contains(def::SourceFlagSet::HARDWARE);
+
+    // Skip virtual (non-hardware) sources entirely
+    if !is_hardware {
+      return;
+    }
+
     let mut this = this.borrow_mut();
     let source_id = SourceId(info.index);
+
+    let icon_name = info
+      .proplist
+      .get_str("device.icon_name")
+      .map(|s| SharedString::from(s.to_string()));
+
+    let device_class = info
+      .proplist
+      .get_str("device.class")
+      .map(|s| SharedString::from(s.to_string()));
+
+    let port_available = info.active_port.as_ref().and_then(|port| match port.available {
+      def::PortAvailable::Unknown => None,
+      def::PortAvailable::No => Some(false),
+      def::PortAvailable::Yes => Some(true),
+    });
 
     // Collect events to send after releasing the source borrow
     let mut events_to_send: Vec<SourceEvent> = Vec::new();
@@ -856,6 +879,9 @@ impl PulseState {
 
       if source.name.as_ref().map(|s| s.as_str()) != info.name.as_deref()
         || source.description.as_ref().map(|s| s.as_str()) != info.description.as_deref()
+        || source.icon_name != icon_name
+        || source.device_class != device_class
+        || source.port_available != port_available
       {
         source.name = info
           .name
@@ -865,6 +891,9 @@ impl PulseState {
           .description
           .as_ref()
           .map(|s| SharedString::from(s.to_string()));
+        source.icon_name = icon_name;
+        source.device_class = device_class;
+        source.port_available = port_available;
         events_to_send.push(SourceEvent::InfoChanged(source.clone()));
       }
     } else {
@@ -878,9 +907,12 @@ impl PulseState {
           .description
           .as_ref()
           .map(|s| SharedString::from(s.to_string())),
+        icon_name,
+        device_class,
         volume: info.volume.into(),
         base_volume: info.base_volume.into(),
         mute: info.mute,
+        port_available,
       };
 
       this.sources.insert(info.index, managed.clone());

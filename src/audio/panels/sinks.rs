@@ -505,7 +505,7 @@ impl RenderOnce for VolumeBar {
   }
 }
 
-fn sink_icon(icon_name: Option<&str>, muted: bool) -> IconName {
+pub fn sink_icon(icon_name: Option<&str>, muted: bool) -> IconName {
   let Some(icon_name) = icon_name else {
     return if muted {
       IconName::DeviceSpeakerOff

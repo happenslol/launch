@@ -23,9 +23,12 @@ pub struct SourceInfo {
   pub id: SourceId,
   pub name: Option<SharedString>,
   pub description: Option<SharedString>,
+  pub icon_name: Option<SharedString>,
+  pub device_class: Option<SharedString>,
   pub volume: ChannelVolumes,
   pub base_volume: Volume,
   pub mute: bool,
+  pub port_available: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
