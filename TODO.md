@@ -9,7 +9,7 @@
 - [x] more clipboard mime types
 - [x] secret clipboard hints
 - [x] audio mute icons
-- [ ] audio styles for sources, streams
+- [x] audio styles for sources
 - [ ] delete from clipboard
 - [ ] clipboard preview (images, links)
 - [ ] copy calc results
@@ -20,6 +20,7 @@
 - [ ] unix timestamps
 - [ ] alternate actions in clipboard (e.g. open uri)
 - [ ] lock, hibernate, shutdown
+- [ ] update styling for streams
 
 # refactor
 

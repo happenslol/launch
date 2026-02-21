@@ -1,8 +1,12 @@
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+  collections::HashSet,
+  sync::{Arc, atomic::AtomicBool},
+};
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding,
-  Render, SharedString, Styled, Subscription, Task, Window, actions, div, prelude::*, rems, rgb,
+  Render, SharedString, Styled, Subscription, Task, Transformation, Window, actions, div, point,
+  prelude::*, px, rems, rgb,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -15,6 +19,7 @@ use crate::{
     pulse::{SetMute, SetVolume},
     types::{SourceEvent, SourceId, SourceInfo, SourceListEvent},
   },
+  db::DB,
   icon::{Icon, IconName},
   matcher::MatcherPool,
   picker::{Category, Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
@@ -22,6 +27,52 @@ use crate::{
 };
 
 use super::{VolumeBar, sinks::sink_icon};
+
+struct SourceFavoritesDb;
+
+impl SourceFavoritesDb {
+  fn ensure_table() {
+    let conn = DB.lock();
+    conn
+      .execute_batch(
+        "CREATE TABLE IF NOT EXISTS source_favorites (source_name TEXT PRIMARY KEY) STRICT;",
+      )
+      .log_err();
+  }
+
+  fn toggle_favorite(source_name: &str) {
+    let conn = DB.lock();
+    let exists = conn
+      .prepare_cached("SELECT 1 FROM source_favorites WHERE source_name = ?1")
+      .and_then(|mut stmt| stmt.exists([source_name]))
+      .unwrap_or(false);
+
+    if exists {
+      conn
+        .prepare_cached("DELETE FROM source_favorites WHERE source_name = ?1")
+        .and_then(|mut stmt| stmt.execute([source_name]))
+        .log_err();
+    } else {
+      conn
+        .prepare_cached("INSERT INTO source_favorites (source_name) VALUES (?1)")
+        .and_then(|mut stmt| stmt.execute([source_name]))
+        .log_err();
+    }
+  }
+
+  fn get_favorites() -> HashSet<String> {
+    let conn = DB.lock();
+    let Ok(mut stmt) = conn.prepare_cached("SELECT source_name FROM source_favorites") else {
+      return HashSet::new();
+    };
+
+    let Ok(rows) = stmt.query_map([], |row| row.get(0)) else {
+      return HashSet::new();
+    };
+
+    rows.filter_map(|row| row.ok()).collect()
+  }
+}
 
 fn source_icon(icon_name: Option<&str>, device_class: Option<&str>, muted: bool) -> IconName {
   if device_class == Some("monitor") {
@@ -50,9 +101,11 @@ fn source_icon(icon_name: Option<&str>, device_class: Option<&str>, muted: bool)
 #[derive(Clone)]
 pub struct SourceEntry {
   id: SourceId,
+  name: Option<SharedString>,
   description: Option<SharedString>,
   device_class: Option<SharedString>,
   port_available: Option<bool>,
+  is_favorite: bool,
   search_string: String,
   entry: Entity<SourceEntryInner>,
 }
@@ -60,14 +113,20 @@ pub struct SourceEntry {
 impl SourceEntry {
   pub fn new(
     source: SourceInfo,
+    favorites: &HashSet<String>,
     audio_state: &Entity<AudioState>,
     window: &mut Window,
     cx: &mut App,
   ) -> Self {
     let id = source.id;
+    let name = source.name.clone();
     let description = source.description.clone();
     let device_class = source.device_class.clone();
     let port_available = source.port_available;
+    let is_favorite = name
+      .as_ref()
+      .map(|n| favorites.contains(n.as_ref()))
+      .unwrap_or(false);
     let mut search_parts = Vec::new();
     if let Some(ref name) = source.name {
       search_parts.push(name.to_string());
@@ -80,9 +139,11 @@ impl SourceEntry {
 
     Self {
       id,
+      name,
       description,
       device_class,
       port_available,
+      is_favorite,
       search_string,
       entry,
     }
@@ -157,6 +218,7 @@ pub struct AudioSourcesPanel {
   picker: Entity<Picker<SourcesDelegate>>,
   audio_state: Entity<AudioState>,
   sources: Vec<SourceEntry>,
+  favorites: HashSet<String>,
   _subscriptions: Vec<Subscription>,
   _list_subscription_task: Task<()>,
   _initial_load_task: Task<()>,
@@ -164,7 +226,7 @@ pub struct AudioSourcesPanel {
 
 const CONTEXT: &str = "sources";
 
-actions!(sources, [VolumeUp, VolumeDown, Mute]);
+actions!(sources, [VolumeUp, VolumeDown, Mute, ToggleFavorite]);
 
 impl AudioSourcesPanel {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -174,11 +236,16 @@ impl AudioSourcesPanel {
       KeyBinding::new("ctrl-up", VolumeUp, Some(CONTEXT)),
       KeyBinding::new("ctrl-down", VolumeDown, Some(CONTEXT)),
       KeyBinding::new("ctrl-m", Mute, Some(CONTEXT)),
+      KeyBinding::new("ctrl-f", ToggleFavorite, Some(CONTEXT)),
     ]);
+
+    SourceFavoritesDb::ensure_table();
+    let favorites = SourceFavoritesDb::get_favorites();
 
     let audio_state = AudioState::global(cx);
     let delegate = SourcesDelegate {
       audio_state: audio_state.clone(),
+      favorites: Arc::new(favorites.clone()),
     };
 
     // Start with empty picker
@@ -202,7 +269,7 @@ impl AudioSourcesPanel {
         let _ = this.update_in(cx, |this, window, cx| {
           this.sources = sources
             .into_iter()
-            .map(|source| SourceEntry::new(source, &audio_state, window, cx))
+            .map(|source| SourceEntry::new(source, &this.favorites, &audio_state, window, cx))
             .collect();
 
           let entries: Vec<_> = this.sources.clone();
@@ -210,7 +277,9 @@ impl AudioSourcesPanel {
             this.subscribe_to_source_entry(entry, window, cx);
           }
 
+          let favorites = Arc::new(this.favorites.clone());
           picker.update(cx, |picker, cx| {
+            picker.delegate.favorites = favorites;
             picker.set_items(this.sources.clone(), window, cx);
           });
         });
@@ -227,7 +296,8 @@ impl AudioSourcesPanel {
           match event {
             SourceListEvent::Added(source_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
-                let new_entry = SourceEntry::new(source_info, &audio_state, window, cx);
+                let new_entry =
+                  SourceEntry::new(source_info, &this.favorites, &audio_state, window, cx);
                 this.subscribe_to_source_entry(&new_entry, window, cx);
                 this.sources.push(new_entry);
 
@@ -274,6 +344,7 @@ impl AudioSourcesPanel {
       picker,
       audio_state,
       sources: Vec::new(),
+      favorites,
       _subscriptions: subscriptions,
       _list_subscription_task: list_subscription_task,
       _initial_load_task: initial_load_task,
@@ -293,15 +364,57 @@ impl AudioSourcesPanel {
       move |this, entry, _event: &SourceStateChanged, window, cx| {
         let source = &entry.read(cx).source;
         if let Some(source_entry) = this.sources.iter_mut().find(|e| e.entry == *entry) {
+          source_entry.name = source.name.clone();
           source_entry.description = source.description.clone();
           source_entry.device_class = source.device_class.clone();
           source_entry.port_available = source.port_available;
+          source_entry.is_favorite = source_entry
+            .name
+            .as_ref()
+            .map(|n| this.favorites.contains(n.as_ref()))
+            .unwrap_or(false);
         }
         picker.update(cx, |picker, cx| {
           picker.set_items(this.sources.clone(), window, cx);
         });
       },
     ));
+  }
+
+  fn toggle_favorite(&mut self, _: &ToggleFavorite, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(selected) = self.picker.read(cx).get_selected_item().cloned() else {
+      return;
+    };
+    let Some(source_name) = selected.name.as_ref() else {
+      return;
+    };
+
+    SourceFavoritesDb::toggle_favorite(source_name);
+
+    if self.favorites.contains(source_name.as_ref()) {
+      self.favorites.remove(source_name.as_ref());
+    } else {
+      self.favorites.insert(source_name.to_string());
+    }
+
+    self.sync_favorites(window, cx);
+  }
+
+  fn sync_favorites(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    for entry in &mut self.sources {
+      entry.is_favorite = entry
+        .name
+        .as_ref()
+        .map(|n| self.favorites.contains(n.as_ref()))
+        .unwrap_or(false);
+    }
+
+    let favorites = Arc::new(self.favorites.clone());
+    let sources = self.sources.clone();
+    self.picker.update(cx, |picker, cx| {
+      picker.delegate.favorites = favorites;
+      picker.set_items(sources, window, cx);
+    });
   }
 
   fn get_selected_id(&self, cx: &mut Context<Self>) -> Option<SourceId> {
@@ -360,6 +473,7 @@ impl Render for AudioSourcesPanel {
       .on_action(cx.listener(Self::volume_up))
       .on_action(cx.listener(Self::volume_down))
       .on_action(cx.listener(Self::mute))
+      .on_action(cx.listener(Self::toggle_favorite))
       .child(picker_input(&self.picker).show_back_button(true))
       .child(picker_results(&self.picker))
   }
@@ -367,6 +481,7 @@ impl Render for AudioSourcesPanel {
 
 struct SourcesDelegate {
   audio_state: Entity<AudioState>,
+  favorites: Arc<HashSet<String>>,
 }
 
 impl PickerDelegate for SourcesDelegate {
@@ -411,6 +526,14 @@ impl PickerDelegate for SourcesDelegate {
             };
             Icon::new(icon).size(rems(1.1)).text_color(icon_color)
           })
+          .when(item.is_favorite, |this| {
+            this.child(
+              Icon::new(IconName::StarFilled)
+                .size(rems(0.85))
+                .transform(Transformation::translate(point(px(0.), px(-0.75))))
+                .text_color(rgb(0xD4A017)),
+            )
+          })
           .child(
             h_flex()
               .flex_1()
@@ -451,11 +574,14 @@ impl PickerDelegate for SourcesDelegate {
 
   fn categories(&self) -> Option<Vec<Category<Self::ListItem>>> {
     Some(vec![
+      Category::new("Favorites", |entry: &SourceEntry| {
+        entry.port_available != Some(false) && entry.is_favorite
+      }),
       Category::new("Microphones", |entry: &SourceEntry| {
-        entry.port_available != Some(false) && !entry.is_monitor()
+        entry.port_available != Some(false) && !entry.is_monitor() && !entry.is_favorite
       }),
       Category::new("Monitors", |entry: &SourceEntry| {
-        entry.port_available != Some(false) && entry.is_monitor()
+        entry.port_available != Some(false) && entry.is_monitor() && !entry.is_favorite
       }),
       Category::new("Unavailable", |entry: &SourceEntry| {
         entry.port_available == Some(false)
