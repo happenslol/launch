@@ -1,12 +1,17 @@
 use std::ops::Range;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use gpui::{
   AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, FontStyle, FontWeight,
-  HighlightStyle, Render, ScrollHandle, SharedString, StrikethroughStyle, StyledText, Subscription,
-  Task, Window, div, prelude::*, px, rgb, rgba,
+  HighlightStyle, KeyBinding, Render, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
+  Subscription, Task, Window, actions, div, prelude::*, px, rgb, rgba,
+};
+use nucleo_matcher::{
+  Utf32Str,
+  pattern::{CaseMatching, Normalization, Pattern},
 };
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use rig::agent::MultiTurnStreamItem;
@@ -20,12 +25,18 @@ use crate::{
   icon::IconName,
   input::{self, input, state::InputState},
   launcher::RootItem,
+  matcher::MatcherPool,
+  picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   scrollbar::Scrollbar,
   tokio::TokioExt,
   util::{ResultExt, v_flex},
 };
 
 const MODEL: &str = "google/gemini-2.5-flash";
+const CONTEXT: &str = "llm";
+const CONVERSATION_PICKER_CONTEXT: &str = "llm_conversation_picker";
+
+actions!(llm, [OpenConversationPicker, CloseConversationPicker]);
 
 pub fn get_items() -> Vec<RootItem> {
   vec![RootItem::Panel {
@@ -36,6 +47,79 @@ pub fn get_items() -> Vec<RootItem> {
     terms: vec!["llm".into(), "chat".into(), "ai".into()],
     view: Arc::new(|window, cx| cx.new(|cx| LlmPanel::new(window, cx)).into()),
   }]
+}
+
+#[derive(Clone)]
+struct ConversationEntry {
+  conversation_id: i64,
+  title: SharedString,
+  search_string: String,
+}
+
+struct ConversationPickerDelegate;
+
+impl PickerDelegate for ConversationPickerDelegate {
+  type ListItem = ConversationEntry;
+
+  fn render_list_item(
+    &self,
+    _window: &mut Window,
+    _cx: &mut Context<Picker<Self>>,
+    item: &Self::ListItem,
+    is_selected: bool,
+  ) -> impl IntoElement {
+    div()
+      .w_full()
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
+      .child(item.title.clone())
+  }
+
+  fn update_matches(
+    &mut self,
+    window: &mut Window,
+    cx: &mut Context<Picker<Self>>,
+    query: String,
+    _cancel_flag: Arc<AtomicBool>,
+    search_id: usize,
+    items: Arc<Vec<Self::ListItem>>,
+  ) -> Task<()> {
+    if query.is_empty() {
+      cx.defer_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, None);
+      });
+      return Task::ready(());
+    }
+
+    let matchers = MatcherPool::global(cx);
+    cx.spawn_in(window, async move |picker, cx| {
+      let matches = cx
+        .background_spawn(async move {
+          let mut matcher = matchers.get().await.ok()?;
+          let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+          let mut matches = Vec::new();
+          let mut buf = Vec::new();
+
+          for (index, entry) in items.iter().enumerate() {
+            if let Some(score) =
+              needle.score(Utf32Str::new(&entry.search_string, &mut buf), &mut matcher)
+            {
+              matches.push((index, score));
+            }
+          }
+          Some(matches)
+        })
+        .await;
+
+      picker
+        .update(cx, |picker, cx| {
+          picker.complete_search(cx, search_id, matches);
+        })
+        .log_err();
+    })
+  }
 }
 
 struct ChatMessage {
@@ -50,12 +134,18 @@ struct LlmPanel {
   streaming_text: String,
   scroll_handle: ScrollHandle,
   autoscroll: bool,
+  conversation_picker: Option<Entity<Picker<ConversationPickerDelegate>>>,
   _task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
 
 impl LlmPanel {
   fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    cx.bind_keys([
+      KeyBinding::new("ctrl-p", OpenConversationPicker, Some(CONTEXT)),
+      KeyBinding::new("escape", CloseConversationPicker, Some(CONVERSATION_PICKER_CONTEXT)),
+    ]);
+
     let input_state = cx.new(|cx| InputState::new(window, cx).placeholder("Ask anything..."));
 
     window.focus(&input_state.read(cx).focus_handle(cx), cx);
@@ -74,6 +164,7 @@ impl LlmPanel {
       streaming_text: String::new(),
       scroll_handle: ScrollHandle::new(),
       autoscroll: true,
+      conversation_picker: None,
       _task: None,
       _subscriptions: subscriptions,
     }
@@ -186,6 +277,70 @@ impl LlmPanel {
       let _ = join_handle.await;
     }));
   }
+
+  fn open_conversation_picker(
+    &mut self,
+    _: &OpenConversationPicker,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let conversations = LlmDb::list_conversations();
+
+    let conversation_picker = cx.new(|cx| {
+      let mut picker =
+        Picker::new(ConversationPickerDelegate, Arc::new(conversations), window, cx);
+      picker.placeholder("Search conversations...", cx);
+      picker
+    });
+
+    let subscription =
+      cx.subscribe_in(&conversation_picker, window, |this, _picker, event, window, cx| {
+        if let PickerEvent::Picked(entry) = event {
+          this.load_conversation(entry.conversation_id, window, cx);
+        }
+      });
+
+    cx.focus_view(&conversation_picker.read(cx).search_input.clone(), window);
+    self._subscriptions.push(subscription);
+    self.conversation_picker = Some(conversation_picker);
+  }
+
+  fn close_conversation_picker(
+    &mut self,
+    _: &CloseConversationPicker,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.conversation_picker = None;
+    window.focus(&self.input_state.read(cx).focus_handle(cx), cx);
+    cx.notify();
+  }
+
+  fn load_conversation(
+    &mut self,
+    conversation_id: i64,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let messages = LlmDb::load_conversation(conversation_id);
+
+    self.conversation_id = conversation_id;
+    self.messages = messages
+      .into_iter()
+      .map(|(role, content)| ChatMessage {
+        role: role.into(),
+        content: content.into(),
+      })
+      .collect();
+    self.streaming_text.clear();
+    self._task = None;
+    self.autoscroll = true;
+    self.scroll_handle.scroll_to_bottom();
+
+    self.conversation_picker = None;
+    window.focus(&self.input_state.read(cx).focus_handle(cx), cx);
+    cx.notify();
+  }
 }
 
 struct LlmDb;
@@ -203,6 +358,76 @@ impl LlmDb {
       }
       Err(err) => {
         error!("Failed to prepare LLM save query: {err}");
+      }
+    }
+  }
+
+  fn list_conversations() -> Vec<ConversationEntry> {
+    let conn = DB.lock();
+    let mut stmt = match conn.prepare_cached(
+      "SELECT c.conversation_id, \
+              SUBSTR(first_msg.content, 1, 100) as title, \
+              MAX(c.timestamp) as latest \
+       FROM llm_conversations c \
+       JOIN ( \
+         SELECT conversation_id, content \
+         FROM llm_conversations \
+         WHERE role = 'user' \
+         GROUP BY conversation_id \
+         HAVING id = MIN(id) \
+       ) first_msg ON first_msg.conversation_id = c.conversation_id \
+       GROUP BY c.conversation_id \
+       ORDER BY latest DESC",
+    ) {
+      Ok(stmt) => stmt,
+      Err(err) => {
+        error!("Failed to prepare list conversations query: {err}");
+        return Vec::new();
+      }
+    };
+
+    let result = stmt.query_map([], |row| {
+      let conversation_id: i64 = row.get(0)?;
+      let title: String = row.get(1)?;
+      Ok(ConversationEntry {
+        conversation_id,
+        search_string: title.clone(),
+        title: title.into(),
+      })
+    });
+
+    match result {
+      Ok(rows) => rows.filter_map(|row| row.log_err()).collect(),
+      Err(err) => {
+        error!("Failed to list conversations: {err}");
+        Vec::new()
+      }
+    }
+  }
+
+  fn load_conversation(conversation_id: i64) -> Vec<(String, String)> {
+    let conn = DB.lock();
+    let mut stmt = match conn.prepare_cached(
+      "SELECT role, content FROM llm_conversations \
+       WHERE conversation_id = ?1 \
+       ORDER BY id ASC",
+    ) {
+      Ok(stmt) => stmt,
+      Err(err) => {
+        error!("Failed to prepare load conversation query: {err}");
+        return Vec::new();
+      }
+    };
+
+    let result = stmt.query_map(rusqlite::params![conversation_id], |row| {
+      Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    });
+
+    match result {
+      Ok(rows) => rows.filter_map(|row| row.log_err()).collect(),
+      Err(err) => {
+        error!("Failed to load conversation: {err}");
+        Vec::new()
       }
     }
   }
@@ -452,14 +677,37 @@ fn render_markdown(text: &str) -> Vec<AnyElement> {
 
 impl Focusable for LlmPanel {
   fn focus_handle(&self, cx: &App) -> FocusHandle {
-    self.input_state.read(cx).focus_handle(cx)
+    if let Some(conversation_picker) = &self.conversation_picker {
+      conversation_picker.read(cx).focus_handle(cx)
+    } else {
+      self.input_state.read(cx).focus_handle(cx)
+    }
   }
 }
 
 impl Render for LlmPanel {
   fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
-      .key_context("llm")
+      .key_context(CONTEXT)
+      .size_full()
+      .on_action(cx.listener(Self::open_conversation_picker))
+      .on_action(cx.listener(Self::close_conversation_picker))
+      .child(if let Some(conversation_picker) = &self.conversation_picker {
+        v_flex()
+          .key_context(CONVERSATION_PICKER_CONTEXT)
+          .size_full()
+          .child(picker_input(conversation_picker))
+          .child(picker_results(conversation_picker))
+          .into_any_element()
+      } else {
+        self.render_chat(cx).into_any_element()
+      })
+  }
+}
+
+impl LlmPanel {
+  fn render_chat(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    v_flex()
       .size_full()
       .p_4()
       .gap_3()
