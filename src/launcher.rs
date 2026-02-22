@@ -47,10 +47,10 @@ actions!(launcher, [Quit, GoBack, CopyResult]);
 const CONTEXT: &str = "launcher";
 
 struct ColorResult {
-  text: SharedString,
   copy_text: SharedString,
-  conversion: Option<SharedString>,
+  formatted: SharedString,
   color: gpui::Hsla,
+  contrast_color: gpui::Hsla,
 }
 
 pub struct Launcher {
@@ -176,8 +176,8 @@ impl Launcher {
     }
   }
 
-  fn convert_color(color: &csscolorparser::Color, target: &str) -> Option<String> {
-    match target {
+  fn format_color(color: &csscolorparser::Color, format: &str) -> Option<String> {
+    match format {
       "hex" => Some(color.to_css_hex()),
       "rgb" | "rgba" => Some(color.to_css_rgb()),
       "hsl" | "hsla" => Some(color.to_css_hsl()),
@@ -187,6 +187,28 @@ impl Launcher {
       "lab" => Some(color.to_css_lab()),
       "lch" => Some(color.to_css_lch()),
       _ => None,
+    }
+  }
+
+  /// Detect the CSS color format of the input string.
+  fn detect_color_format(input: &str) -> &'static str {
+    let lower = input.trim_start().to_lowercase();
+    if lower.starts_with("rgb") {
+      "rgb"
+    } else if lower.starts_with("hsl") {
+      "hsl"
+    } else if lower.starts_with("oklch") {
+      "oklch"
+    } else if lower.starts_with("oklab") {
+      "oklab"
+    } else if lower.starts_with("hwb") {
+      "hwb"
+    } else if lower.starts_with("lab") {
+      "lab"
+    } else if lower.starts_with("lch") {
+      "lch"
+    } else {
+      "hex"
     }
   }
 
@@ -206,17 +228,28 @@ impl Launcher {
     let color = csscolorparser::parse(color_str).ok()?;
     let [h, s, l, a] = color.to_hsla();
 
-    let conversion = target_format
+    let format = target_format
       .as_deref()
-      .and_then(|target| Self::convert_color(&color, target));
+      .unwrap_or_else(|| Self::detect_color_format(color_str));
 
-    let copy_text = SharedString::from(conversion.clone().unwrap_or_else(|| color_str.to_string()));
+    let formatted = Self::format_color(&color, format)?;
+    let copy_text = SharedString::from(formatted.clone());
+    let formatted = SharedString::from(formatted);
+
+    // Compute contrast color using W3C relative luminance
+    let [r, g, b, _] = color.to_linear_rgba();
+    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let contrast_color = if luminance > 0.179 {
+      gpui::hsla(0.0, 0.0, 0.0, 1.0)
+    } else {
+      gpui::hsla(0.0, 0.0, 1.0, 1.0)
+    };
 
     Some(ColorResult {
-      text: SharedString::from(color_str.to_string()),
       copy_text,
-      conversion: conversion.map(SharedString::from),
+      formatted,
       color: gpui::hsla(h / 360.0, s, l, a),
+      contrast_color,
     })
   }
 
@@ -380,32 +413,22 @@ impl Render for Launcher {
           .child(picker_input(&self.picker).text_size(px(18.)))
           .when_some(self.color_result.as_ref(), |this, color| {
             this.child(
-              h_flex()
+              v_flex()
                 .items_center()
                 .justify_center()
+                .mx_2()
+                .mt_2()
+                .mb_1()
                 .px_3()
-                .py_4()
-                .gap_4()
-                .border_b_1()
-                .border_color(rgba(0xFFFFFF12))
-                .child(div().size(px(64.)).rounded_md().bg(color.color))
+                .py_12()
+                .gap_1()
+                .rounded_lg()
+                .bg(color.color)
                 .child(
-                  v_flex()
-                    .gap_1()
-                    .child(
-                      div()
-                        .text_color(rgb(0xFFFFFF))
-                        .text_size(px(16.))
-                        .child(color.text.clone()),
-                    )
-                    .when_some(color.conversion.clone(), |this, conversion| {
-                      this.child(
-                        div()
-                          .text_color(rgb(0x888888))
-                          .text_size(px(14.))
-                          .child(conversion),
-                      )
-                    }),
+                  div()
+                    .text_color(color.contrast_color)
+                    .text_size(px(16.))
+                    .child(color.formatted.clone()),
                 ),
             )
           })
@@ -588,16 +611,16 @@ impl PickerDelegate for RootDelegate {
                 ),
               )
           }
-          RootItem::Panel { name, icon, .. } | RootItem::Search { name, icon, .. } => this
-            .child(Icon::new(*icon).size(icon_size))
-            .child(
+          RootItem::Panel { name, icon, .. } | RootItem::Search { name, icon, .. } => {
+            this.child(Icon::new(*icon).size(icon_size)).child(
               v_flex().child(name.clone()).child(
                 div()
                   .text_sm()
                   .text_color(rgb(0x666666))
                   .child(description.clone()),
               ),
-            ),
+            )
+          }
         }
       }))
       .child(
