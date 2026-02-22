@@ -36,7 +36,10 @@ const MODEL: &str = "google/gemini-2.5-flash";
 const CONTEXT: &str = "llm";
 const CONVERSATION_PICKER_CONTEXT: &str = "llm_conversation_picker";
 
-actions!(llm, [OpenConversationPicker, CloseConversationPicker]);
+actions!(
+  llm,
+  [OpenConversationPicker, CloseConversationPicker, DeleteConversation]
+);
 
 pub fn get_items() -> Vec<RootItem> {
   vec![RootItem::Panel {
@@ -144,6 +147,7 @@ impl LlmPanel {
     cx.bind_keys([
       KeyBinding::new("ctrl-p", OpenConversationPicker, Some(CONTEXT)),
       KeyBinding::new("escape", CloseConversationPicker, Some(CONVERSATION_PICKER_CONTEXT)),
+      KeyBinding::new("ctrl-d", DeleteConversation, Some(CONVERSATION_PICKER_CONTEXT)),
     ]);
 
     let input_state = cx.new(|cx| InputState::new(window, cx).placeholder("Ask anything..."));
@@ -316,6 +320,26 @@ impl LlmPanel {
     cx.notify();
   }
 
+  fn delete_conversation(
+    &mut self,
+    _: &DeleteConversation,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let Some(conversation_picker) = &self.conversation_picker else {
+      return;
+    };
+
+    let Some(entry) = conversation_picker.update(cx, |picker, cx| {
+      picker.remove_selected_item(window, cx)
+    }) else {
+      return;
+    };
+
+    LlmDb::delete_conversation(entry.conversation_id);
+    cx.notify();
+  }
+
   fn load_conversation(
     &mut self,
     conversation_id: i64,
@@ -401,6 +425,20 @@ impl LlmDb {
       Err(err) => {
         error!("Failed to list conversations: {err}");
         Vec::new()
+      }
+    }
+  }
+
+  fn delete_conversation(conversation_id: i64) {
+    let conn = DB.lock();
+    match conn.prepare_cached("DELETE FROM llm_conversations WHERE conversation_id = ?1") {
+      Ok(mut stmt) => {
+        if let Err(err) = stmt.execute(rusqlite::params![conversation_id]) {
+          error!("Failed to delete conversation: {err}");
+        }
+      }
+      Err(err) => {
+        error!("Failed to prepare delete conversation query: {err}");
       }
     }
   }
@@ -692,6 +730,7 @@ impl Render for LlmPanel {
       .size_full()
       .on_action(cx.listener(Self::open_conversation_picker))
       .on_action(cx.listener(Self::close_conversation_picker))
+      .on_action(cx.listener(Self::delete_conversation))
       .child(if let Some(conversation_picker) = &self.conversation_picker {
         v_flex()
           .key_context(CONVERSATION_PICKER_CONTEXT)
