@@ -1,11 +1,14 @@
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use gpui::{
-  App, Context, Div, Entity, FocusHandle, Focusable, Render, ScrollHandle, SharedString,
-  Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
+  AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, FontStyle, FontWeight,
+  HighlightStyle, Render, ScrollHandle, SharedString, StrikethroughStyle, StyledText, Subscription,
+  Task, Window, div, prelude::*, px, rgb, rgba,
 };
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
 use rig::providers::openrouter;
@@ -205,6 +208,248 @@ impl LlmDb {
   }
 }
 
+fn render_markdown(text: &str) -> Vec<AnyElement> {
+  let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
+  let parser = Parser::new_ext(text, options);
+
+  let mut elements: Vec<AnyElement> = Vec::new();
+  let mut inline_text = String::new();
+  let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+  let mut style_stack: Vec<HighlightStyle> = Vec::new();
+  let mut list_stack: Vec<Option<u64>> = Vec::new();
+  let mut list_item_index: u64 = 0;
+  let mut heading_level: Option<u8> = None;
+  let mut in_code_block = false;
+  let mut in_blockquote = false;
+
+  let current_style = |stack: &[HighlightStyle]| -> HighlightStyle {
+    let mut combined = HighlightStyle::default();
+    for style in stack {
+      if style.font_weight.is_some() {
+        combined.font_weight = style.font_weight;
+      }
+      if style.font_style.is_some() {
+        combined.font_style = style.font_style;
+      }
+      if style.background_color.is_some() {
+        combined.background_color = style.background_color;
+      }
+      if style.strikethrough.is_some() {
+        combined.strikethrough = style.strikethrough.clone();
+      }
+      if style.color.is_some() {
+        combined.color = style.color;
+      }
+    }
+    combined
+  };
+
+  let flush_block =
+    |inline_text: &mut String,
+     highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
+     elements: &mut Vec<AnyElement>,
+     heading_level: &mut Option<u8>,
+     in_code_block: bool,
+     in_blockquote: bool| {
+      if inline_text.is_empty() {
+        return;
+      }
+
+      let content: SharedString = inline_text.clone().into();
+      let styled = if highlights.is_empty() {
+        StyledText::new(content)
+      } else {
+        StyledText::new(content).with_highlights(highlights.drain(..).collect::<Vec<_>>())
+      };
+
+      let element = if let Some(level) = heading_level.take() {
+        let size = match level {
+          1 => px(24.0),
+          2 => px(20.0),
+          3 => px(18.0),
+          _ => px(16.0),
+        };
+        div()
+          .text_size(size)
+          .font_weight(FontWeight::BOLD)
+          .mb_2()
+          .child(styled)
+      } else if in_code_block {
+        div()
+          .bg(rgba(0xFFFFFF12))
+          .rounded_md()
+          .px_3()
+          .py_2()
+          .mb_2()
+          .font_family("monospace")
+          .text_sm()
+          .child(styled)
+      } else if in_blockquote {
+        div()
+          .border_l_2()
+          .border_color(rgba(0xFFFFFF44))
+          .pl_3()
+          .mb_2()
+          .text_color(rgba(0xFFFFFFAA))
+          .child(styled)
+      } else {
+        div().mb_1().child(styled)
+      };
+
+      elements.push(element.into_any_element());
+      inline_text.clear();
+      highlights.clear();
+    };
+
+  for event in parser {
+    match event {
+      Event::Start(tag) => match tag {
+        Tag::Heading { level, .. } => {
+          heading_level = Some(level as u8);
+        }
+        Tag::CodeBlock(_) => {
+          flush_block(
+            &mut inline_text,
+            &mut highlights,
+            &mut elements,
+            &mut heading_level,
+            in_code_block,
+            in_blockquote,
+          );
+          in_code_block = true;
+        }
+        Tag::BlockQuote(_) => {
+          in_blockquote = true;
+        }
+        Tag::List(start) => {
+          list_stack.push(start);
+          list_item_index = start.unwrap_or(1);
+        }
+        Tag::Item => {
+          flush_block(
+            &mut inline_text,
+            &mut highlights,
+            &mut elements,
+            &mut heading_level,
+            in_code_block,
+            in_blockquote,
+          );
+          let prefix = match list_stack.last() {
+            Some(Some(_)) => {
+              let prefix = format!("{list_item_index}. ");
+              list_item_index += 1;
+              prefix
+            }
+            _ => "• ".to_string(),
+          };
+          inline_text.push_str(&prefix);
+        }
+        Tag::Strong => {
+          style_stack.push(HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+          });
+        }
+        Tag::Emphasis => {
+          style_stack.push(HighlightStyle {
+            font_style: Some(FontStyle::Italic),
+            ..Default::default()
+          });
+        }
+        Tag::Strikethrough => {
+          style_stack.push(HighlightStyle {
+            strikethrough: Some(StrikethroughStyle {
+              thickness: px(1.0),
+              color: None,
+            }),
+            ..Default::default()
+          });
+        }
+        _ => {}
+      },
+
+      Event::End(tag_end) => match tag_end {
+        TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item => {
+          flush_block(
+            &mut inline_text,
+            &mut highlights,
+            &mut elements,
+            &mut heading_level,
+            in_code_block,
+            in_blockquote,
+          );
+        }
+        TagEnd::CodeBlock => {
+          flush_block(
+            &mut inline_text,
+            &mut highlights,
+            &mut elements,
+            &mut heading_level,
+            in_code_block,
+            in_blockquote,
+          );
+          in_code_block = false;
+        }
+        TagEnd::BlockQuote(_) => {
+          in_blockquote = false;
+        }
+        TagEnd::List(_) => {
+          list_stack.pop();
+        }
+        TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
+          style_stack.pop();
+        }
+        _ => {}
+      },
+
+      Event::Text(text) => {
+        let start = inline_text.len();
+        inline_text.push_str(&text);
+        let end = inline_text.len();
+
+        let style = current_style(&style_stack);
+        if style != HighlightStyle::default() {
+          highlights.push((start..end, style));
+        }
+      }
+
+      Event::Code(code) => {
+        let start = inline_text.len();
+        inline_text.push_str(&code);
+        let end = inline_text.len();
+        highlights.push((
+          start..end,
+          HighlightStyle {
+            background_color: Some(rgba(0xFFFFFF18).into()),
+            ..Default::default()
+          },
+        ));
+      }
+
+      Event::SoftBreak => {
+        inline_text.push(' ');
+      }
+
+      Event::HardBreak => {
+        inline_text.push('\n');
+      }
+
+      _ => {}
+    }
+  }
+
+  flush_block(
+    &mut inline_text,
+    &mut highlights,
+    &mut elements,
+    &mut heading_level,
+    in_code_block,
+    in_blockquote,
+  );
+
+  elements
+}
+
 impl Focusable for LlmPanel {
   fn focus_handle(&self, cx: &App) -> FocusHandle {
     self.input_state.read(cx).focus_handle(cx)
@@ -239,6 +484,12 @@ impl Render for LlmPanel {
               .pr(px(10.0))
               .children(self.messages.iter().map(|message| {
                 let is_user = message.role.as_ref() == "user";
+                let content_element = div().text_color(rgb(0xFFFFFF));
+                let content_element = if is_user {
+                  content_element.child(message.content.clone())
+                } else {
+                  content_element.children(render_markdown(&message.content))
+                };
                 div()
                   .flex()
                   .flex_col()
@@ -249,14 +500,10 @@ impl Render for LlmPanel {
                       .text_color(rgba(0xFFFFFF88))
                       .child(if is_user { "You" } else { "Assistant" }),
                   )
-                  .child(
-                    div()
-                      .text_color(rgb(0xFFFFFF))
-                      .child(message.content.clone()),
-                  )
+                  .child(content_element)
               }))
               .when(!self.streaming_text.is_empty(), |this: gpui::Stateful<Div>| {
-                let text: SharedString = self.streaming_text.clone().into();
+                let markdown_elements = render_markdown(&self.streaming_text);
                 this.child(
                   div()
                     .flex()
@@ -268,7 +515,11 @@ impl Render for LlmPanel {
                         .text_color(rgba(0xFFFFFF88))
                         .child("Assistant"),
                     )
-                    .child(div().text_color(rgb(0xFFFFFF)).child(text)),
+                    .child(
+                      div()
+                        .text_color(rgb(0xFFFFFF))
+                        .children(markdown_elements),
+                    ),
                 )
               }),
           )
