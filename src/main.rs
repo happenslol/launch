@@ -14,6 +14,7 @@ mod icon;
 mod input;
 mod instance;
 mod launcher;
+mod llm;
 mod logging;
 mod matcher;
 mod network;

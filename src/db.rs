@@ -43,6 +43,14 @@ impl Db {
           appid TEXT PRIMARY KEY,
           icon_path TEXT
         ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS llm_conversations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_id INTEGER NOT NULL,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          timestamp INTEGER NOT NULL DEFAULT (unixepoch())
+        ) STRICT;
         "#,
       )
       .unwrap();

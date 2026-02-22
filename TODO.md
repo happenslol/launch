@@ -24,6 +24,8 @@
 - [ ] update styling for streams
 - [ ] update styling for inline results
 - [ ] build id
+- [ ] nix search (searchix.ovh)
+- [ ] kdl config
 
 # refactor
 
