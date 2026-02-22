@@ -19,6 +19,7 @@ mod logging;
 mod matcher;
 mod network;
 mod picker;
+mod scrollbar;
 mod tokio;
 mod util;
 mod wayland;

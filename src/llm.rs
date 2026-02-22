@@ -17,6 +17,7 @@ use crate::{
   icon::IconName,
   input::{self, input, state::InputState},
   launcher::RootItem,
+  scrollbar::Scrollbar,
   tokio::TokioExt,
   util::{ResultExt, v_flex},
 };
@@ -219,51 +220,67 @@ impl Render for LlmPanel {
       .gap_3()
       .child(
         div()
-          .id("llm-messages")
+          .relative()
           .flex_grow()
-          .overflow_y_scroll()
-          .track_scroll(&self.scroll_handle)
-          .on_scroll_wheel(cx.listener(|this, _event, _window, _cx| {
-            let offset = this.scroll_handle.offset();
-            let max = this.scroll_handle.max_offset();
-            let distance_from_bottom = max.height + offset.y;
-            this.autoscroll = distance_from_bottom < px(20.0);
-          }))
-          .gap_2()
-          .children(self.messages.iter().map(|message| {
-            let is_user = message.role.as_ref() == "user";
+          .overflow_hidden()
+          .child(
             div()
-              .flex()
-              .flex_col()
-              .gap_1()
-              .child(
+              .id("llm-messages")
+              .size_full()
+              .overflow_y_scroll()
+              .track_scroll(&self.scroll_handle)
+              .on_scroll_wheel(cx.listener(|this, _event, _window, _cx| {
+                let offset = this.scroll_handle.offset();
+                let max = this.scroll_handle.max_offset();
+                let distance_from_bottom = max.height + offset.y;
+                this.autoscroll = distance_from_bottom < px(20.0);
+              }))
+              .gap_2()
+              .pr(px(10.0))
+              .children(self.messages.iter().map(|message| {
+                let is_user = message.role.as_ref() == "user";
                 div()
-                  .text_xs()
-                  .text_color(rgba(0xFFFFFF88))
-                  .child(if is_user { "You" } else { "Assistant" }),
-              )
-              .child(
-                div()
-                  .text_color(rgb(0xFFFFFF))
-                  .child(message.content.clone()),
-              )
-          }))
-          .when(!self.streaming_text.is_empty(), |this: gpui::Stateful<Div>| {
-            let text: SharedString = self.streaming_text.clone().into();
-            this.child(
-              div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
+                  .flex()
+                  .flex_col()
+                  .gap_1()
+                  .child(
+                    div()
+                      .text_xs()
+                      .text_color(rgba(0xFFFFFF88))
+                      .child(if is_user { "You" } else { "Assistant" }),
+                  )
+                  .child(
+                    div()
+                      .text_color(rgb(0xFFFFFF))
+                      .child(message.content.clone()),
+                  )
+              }))
+              .when(!self.streaming_text.is_empty(), |this: gpui::Stateful<Div>| {
+                let text: SharedString = self.streaming_text.clone().into();
+                this.child(
                   div()
-                    .text_xs()
-                    .text_color(rgba(0xFFFFFF88))
-                    .child("Assistant"),
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                      div()
+                        .text_xs()
+                        .text_color(rgba(0xFFFFFF88))
+                        .child("Assistant"),
+                    )
+                    .child(div().text_color(rgb(0xFFFFFF)).child(text)),
                 )
-                .child(div().text_color(rgb(0xFFFFFF)).child(text)),
-            )
-          }),
+              }),
+          )
+          .child(
+            div()
+              .absolute()
+              .top_0()
+              .left_0()
+              .right_0()
+              .bottom_0()
+              .child(Scrollbar::new(&self.scroll_handle)),
+          ),
       )
       .child(
         input(&self.input_state)
