@@ -14,7 +14,7 @@
 - [x] color conversion
 - [x] search providers (google, youtube, kagi, wikipedia)
 - [x] clipboard preview (images, links)
-- [ ] delete from clipboard
+- [x] delete from clipboard
 - [ ] copy calc results
 - [ ] calc result history/panel
 - [ ] process monitor/kill
@@ -22,6 +22,7 @@
 - [ ] lock, hibernate, shutdown
 - [ ] update styling for streams
 - [ ] update styling for inline results
+- [ ] build id
 
 # refactor
 

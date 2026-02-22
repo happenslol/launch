@@ -28,6 +28,7 @@ pub use clipboard::{ClipboardDbReader, ClipboardEntry, ContentType};
 #[derive(Debug)]
 pub enum Command {
   CopyHistoryEntry { id: i64 },
+  DeleteHistoryEntry { id: i64 },
   OfferText { text: String },
 }
 
@@ -102,6 +103,9 @@ impl State {
     match cmd {
       Command::CopyHistoryEntry { id } => {
         self.copy_history_entry(id);
+      }
+      Command::DeleteHistoryEntry { id } => {
+        self.delete_history_entry(id);
       }
       Command::OfferText { text } => {
         self.offer_text(text);

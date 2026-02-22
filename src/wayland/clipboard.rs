@@ -145,6 +145,15 @@ impl ClipboardDbWriter {
     Ok((Self(conn), reader))
   }
 
+  fn delete(&self, id: i64) {
+    if let Err(err) = self.0.execute(
+      "DELETE FROM clipboard_history WHERE id = ?1",
+      rusqlite::params![id],
+    ) {
+      error!(?err, id, "Failed to delete clipboard history entry");
+    }
+  }
+
   fn insert(
     &self,
     mime_types: &[String],
@@ -521,6 +530,12 @@ impl State {
     };
     let qh = qh.clone();
     self.offer(&qh);
+  }
+
+  pub fn delete_history_entry(&mut self, id: i64) {
+    if let Some(writer) = &self.clipboard.db_writer {
+      writer.delete(id);
+    }
   }
 
   pub fn copy_history_entry(&mut self, id: i64) {

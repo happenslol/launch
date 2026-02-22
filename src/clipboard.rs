@@ -3,8 +3,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
   AnyElement, App, Context, Entity, FocusHandle, Focusable, Image, ImageFormat, ImageSource,
-  IntoElement, ObjectFit, Render, SharedString, Styled, Subscription, Task, Window, img,
-  prelude::*, rems, rgb, rgba,
+  IntoElement, KeyBinding, ObjectFit, Render, SharedString, Styled, Subscription, Task, Window,
+  actions, img, prelude::*, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -19,6 +19,8 @@ use crate::{
   util::{ResultExt, h_flex, v_flex},
   wayland::{self, ClipboardDbReader, ClipboardEntry, ContentType},
 };
+
+actions!(clipboard, [DeleteEntry]);
 
 const TEXT_MIME_TYPES: &[&str] = &[
   "text/plain;charset=utf-8",
@@ -120,6 +122,8 @@ impl ClipboardPanel {
         cx.notify();
       }),
     ];
+
+    cx.bind_keys([KeyBinding::new("ctrl-d", DeleteEntry, None)]);
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
@@ -226,6 +230,31 @@ impl ClipboardPanel {
     }));
   }
 
+  fn delete_entry(&mut self, _: &DeleteEntry, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(item) = self.picker.update(cx, |picker, cx| {
+      picker.remove_selected_item(window, cx)
+    }) else {
+      return;
+    };
+
+    // Clear preview if the deleted item was being previewed
+    if self
+      .preview
+      .as_ref()
+      .is_some_and(|preview| preview.item_id == item.id)
+    {
+      self.preview = None;
+      self._preview_task = None;
+    }
+
+    self
+      .connection
+      .read(cx)
+      .send_command(wayland::Command::DeleteHistoryEntry { id: item.id });
+
+    cx.notify();
+  }
+
   fn render_preview(&self) -> AnyElement {
     match &self.preview {
       None => gpui::div()
@@ -293,6 +322,7 @@ impl Render for ClipboardPanel {
 
     v_flex()
       .size_full()
+      .on_action(cx.listener(Self::delete_entry))
       .child(picker_input(&self.picker).show_back_button(true))
       .child(
         h_flex()

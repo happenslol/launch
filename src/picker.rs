@@ -225,6 +225,29 @@ impl<D: PickerDelegate> Picker<D> {
     self.items.get(resolved_ix)
   }
 
+  pub fn remove_selected_item(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<D::ListItem> {
+    let selected_index = self.selected_index?;
+    let resolved_ix = self.resolve_item_index(selected_index)?;
+
+    let items = Arc::make_mut(&mut self.items);
+    if resolved_ix >= items.len() {
+      return None;
+    }
+    let removed = items.remove(resolved_ix);
+
+    // Adjust selected index
+    let item_count = self.visible_item_count();
+    if item_count == 0 {
+      self.selected_index = None;
+    } else if selected_index >= item_count {
+      self.selected_index = Some(item_count - 1);
+    }
+
+    self.update_matches(window, cx);
+    cx.notify();
+    Some(removed)
+  }
+
   fn launch_selected(&mut self, cx: &mut Context<Self>) {
     let Some(ix) = self.selected_index else {
       return;
