@@ -1,6 +1,6 @@
 use std::ops::Range;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
@@ -39,7 +39,11 @@ const CONVERSATION_PICKER_CONTEXT: &str = "llm_conversation_picker";
 
 actions!(
   llm,
-  [OpenConversationPicker, CloseConversationPicker, DeleteConversation]
+  [
+    OpenConversationPicker,
+    CloseConversationPicker,
+    DeleteConversation
+  ]
 );
 
 pub fn get_items() -> Vec<RootItem> {
@@ -148,8 +152,16 @@ impl LlmPanel {
   fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     cx.bind_keys([
       KeyBinding::new("ctrl-p", OpenConversationPicker, Some(CONTEXT)),
-      KeyBinding::new("escape", CloseConversationPicker, Some(CONVERSATION_PICKER_CONTEXT)),
-      KeyBinding::new("ctrl-d", DeleteConversation, Some(CONVERSATION_PICKER_CONTEXT)),
+      KeyBinding::new(
+        "escape",
+        CloseConversationPicker,
+        Some(CONVERSATION_PICKER_CONTEXT),
+      ),
+      KeyBinding::new(
+        "ctrl-d",
+        DeleteConversation,
+        Some(CONVERSATION_PICKER_CONTEXT),
+      ),
     ]);
 
     let input_state = cx.new(|cx| InputState::new(window, cx).placeholder("Ask anything..."));
@@ -257,29 +269,31 @@ impl LlmPanel {
 
     self._task = Some(cx.spawn(async move |this, cx| {
       while let Ok(chunk) = rx.recv_async().await {
-        this.update(cx, |this, cx| {
-          this.streaming_text.push_str(&chunk);
-          if this.autoscroll {
-            this.scroll_handle.scroll_to_bottom();
+        this
+          .update(cx, |this, cx| {
+            this.streaming_text.push_str(&chunk);
+            if this.autoscroll {
+              this.scroll_handle.scroll_to_bottom();
+            }
+            cx.notify();
+          })
+          .log_err();
+      }
+
+      this
+        .update(cx, |this, cx| {
+          if !this.streaming_text.is_empty() {
+            let content: SharedString = this.streaming_text.clone().into();
+            LlmDb::save_turn(conversation_id, "assistant", &content);
+            this.messages.push(ChatMessage {
+              role: "assistant".into(),
+              content,
+            });
+            this.streaming_text.clear();
           }
           cx.notify();
         })
         .log_err();
-      }
-
-      this.update(cx, |this, cx| {
-        if !this.streaming_text.is_empty() {
-          let content: SharedString = this.streaming_text.clone().into();
-          LlmDb::save_turn(conversation_id, "assistant", &content);
-          this.messages.push(ChatMessage {
-            role: "assistant".into(),
-            content,
-          });
-          this.streaming_text.clear();
-        }
-        cx.notify();
-      })
-      .log_err();
 
       let _ = join_handle.await;
     }));
@@ -294,18 +308,25 @@ impl LlmPanel {
     let conversations = LlmDb::list_conversations();
 
     let conversation_picker = cx.new(|cx| {
-      let mut picker =
-        Picker::new(ConversationPickerDelegate, Arc::new(conversations), window, cx);
+      let mut picker = Picker::new(
+        ConversationPickerDelegate,
+        Arc::new(conversations),
+        window,
+        cx,
+      );
       picker.placeholder("Search conversations...", cx);
       picker
     });
 
-    let subscription =
-      cx.subscribe_in(&conversation_picker, window, |this, _picker, event, window, cx| {
+    let subscription = cx.subscribe_in(
+      &conversation_picker,
+      window,
+      |this, _picker, event, window, cx| {
         if let PickerEvent::Picked(entry) = event {
           this.load_conversation(entry.conversation_id, window, cx);
         }
-      });
+      },
+    );
 
     cx.focus_view(&conversation_picker.read(cx).search_input.clone(), window);
     self._subscriptions.push(subscription);
@@ -525,7 +546,7 @@ fn render_markdown(text: &str) -> Vec<AnyElement> {
         combined.background_color = style.background_color;
       }
       if style.strikethrough.is_some() {
-        combined.strikethrough = style.strikethrough.clone();
+        combined.strikethrough = style.strikethrough;
       }
       if style.color.is_some() {
         combined.color = style.color;
@@ -534,62 +555,62 @@ fn render_markdown(text: &str) -> Vec<AnyElement> {
     combined
   };
 
-  let flush_block =
-    |inline_text: &mut String,
-     highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
-     elements: &mut Vec<AnyElement>,
-     heading_level: &mut Option<u8>,
-     in_code_block: bool,
-     in_blockquote: bool| {
-      if inline_text.is_empty() {
-        return;
-      }
+  let flush_block = |inline_text: &mut String,
+                     highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
+                     elements: &mut Vec<AnyElement>,
+                     heading_level: &mut Option<u8>,
+                     in_code_block: bool,
+                     in_blockquote: bool| {
+    if inline_text.is_empty() {
+      return;
+    }
 
-      let content: SharedString = inline_text.clone().into();
-      let styled = if highlights.is_empty() {
-        StyledText::new(content)
-      } else {
-        StyledText::new(content).with_highlights(highlights.drain(..).collect::<Vec<_>>())
-      };
-
-      let element = if let Some(level) = heading_level.take() {
-        let size = match level {
-          1 => px(24.0),
-          2 => px(20.0),
-          3 => px(18.0),
-          _ => px(16.0),
-        };
-        div()
-          .text_size(size)
-          .font_weight(FontWeight::BOLD)
-          .mb_2()
-          .child(styled)
-      } else if in_code_block {
-        div()
-          .bg(rgba(0xFFFFFF12))
-          .rounded_md()
-          .px_3()
-          .py_2()
-          .mb_2()
-          .font_family("monospace")
-          .text_sm()
-          .child(styled)
-      } else if in_blockquote {
-        div()
-          .border_l_2()
-          .border_color(rgba(0xFFFFFF44))
-          .pl_3()
-          .mb_2()
-          .text_color(rgba(0xFFFFFFAA))
-          .child(styled)
-      } else {
-        div().mb_1().child(styled)
-      };
-
-      elements.push(element.into_any_element());
-      inline_text.clear();
-      highlights.clear();
+    let content: SharedString = inline_text.clone().into();
+    let styled = if highlights.is_empty() {
+      StyledText::new(content)
+    } else {
+      StyledText::new(content).with_highlights(std::mem::take(highlights))
     };
+
+    let element = if let Some(level) = heading_level.take() {
+      let size = match level {
+        1 => px(24.0),
+        2 => px(20.0),
+        3 => px(18.0),
+        _ => px(16.0),
+      };
+      div()
+        .text_size(size)
+        .font_weight(FontWeight::BOLD)
+        .mt_3()
+        .mb_2()
+        .child(styled)
+    } else if in_code_block {
+      div()
+        .bg(rgba(0xFFFFFF12))
+        .rounded_md()
+        .px_3()
+        .py_2()
+        .mb_2()
+        .font_family("Iosevka")
+        .text_sm()
+        .child(styled)
+    } else if in_blockquote {
+      div()
+        .border_l_2()
+        .border_color(rgba(0xFFFFFF44))
+        .pl_3()
+        .mb_2()
+        .text_color(rgba(0xFFFFFFAA))
+        .child(styled)
+    } else {
+      div().mb_2().child(styled)
+    };
+
+    elements.push(element.into_any_element());
+    inline_text.clear();
+    highlights.clear();
+  };
 
   for event in parser {
     match event {
@@ -758,20 +779,22 @@ impl Render for LlmPanel {
       .on_action(cx.listener(Self::open_conversation_picker))
       .on_action(cx.listener(Self::close_conversation_picker))
       .on_action(cx.listener(Self::delete_conversation))
-      .child(if let Some(conversation_picker) = &self.conversation_picker {
-        v_flex()
-          .key_context(CONVERSATION_PICKER_CONTEXT)
-          .size_full()
-          .relative()
-          .child(picker_input(conversation_picker))
-          .child(picker_results(conversation_picker))
-          .when_some(self.confirmation_prompt.clone(), |this, prompt| {
-            this.child(render_confirmation_overlay(&prompt))
-          })
-          .into_any_element()
-      } else {
-        self.render_chat(cx).into_any_element()
-      })
+      .child(
+        if let Some(conversation_picker) = &self.conversation_picker {
+          v_flex()
+            .key_context(CONVERSATION_PICKER_CONTEXT)
+            .size_full()
+            .relative()
+            .child(picker_input(conversation_picker))
+            .child(picker_results(conversation_picker))
+            .when_some(self.confirmation_prompt.clone(), |this, prompt| {
+              this.child(render_confirmation_overlay(&prompt))
+            })
+            .into_any_element()
+        } else {
+          self.render_chat(cx).into_any_element()
+        },
+      )
   }
 }
 
@@ -798,13 +821,22 @@ impl LlmPanel {
                 let distance_from_bottom = max.height + offset.y;
                 this.autoscroll = distance_from_bottom < px(20.0);
               }))
-              .gap_2()
+              .flex()
+              .flex_col()
+              .gap_4()
               .pr(px(10.0))
               .children(self.messages.iter().map(|message| {
                 let is_user = message.role.as_ref() == "user";
                 let content_element = div().text_color(rgb(0xFFFFFF));
                 let content_element = if is_user {
-                  content_element.child(message.content.clone())
+                  content_element
+                    .bg(rgba(0xFFFFFF0A))
+                    .border_1()
+                    .border_color(rgba(0xFFFFFF15))
+                    .rounded_lg()
+                    .px_3()
+                    .py_2()
+                    .child(message.content.clone())
                 } else {
                   content_element.children(render_markdown(&message.content))
                 };
@@ -820,26 +852,25 @@ impl LlmPanel {
                   )
                   .child(content_element)
               }))
-              .when(!self.streaming_text.is_empty(), |this: gpui::Stateful<Div>| {
-                let markdown_elements = render_markdown(&self.streaming_text);
-                this.child(
-                  div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                      div()
-                        .text_xs()
-                        .text_color(rgba(0xFFFFFF88))
-                        .child("Assistant"),
-                    )
-                    .child(
-                      div()
-                        .text_color(rgb(0xFFFFFF))
-                        .children(markdown_elements),
-                    ),
-                )
-              }),
+              .when(
+                !self.streaming_text.is_empty(),
+                |this: gpui::Stateful<Div>| {
+                  let markdown_elements = render_markdown(&self.streaming_text);
+                  this.child(
+                    div()
+                      .flex()
+                      .flex_col()
+                      .gap_1()
+                      .child(
+                        div()
+                          .text_xs()
+                          .text_color(rgba(0xFFFFFF88))
+                          .child("Assistant"),
+                      )
+                      .child(div().text_color(rgb(0xFFFFFF)).children(markdown_elements)),
+                  )
+                },
+              ),
           )
           .child(
             div()
