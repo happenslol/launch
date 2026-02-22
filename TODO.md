@@ -17,6 +17,7 @@
 - [x] delete from clipboard
 - [ ] copy calc results
 - [ ] calc result history/panel
+- [ ] submenu experiments
 - [ ] process monitor/kill
 - [ ] alternate actions in clipboard (e.g. open uri)
 - [ ] lock, hibernate, shutdown

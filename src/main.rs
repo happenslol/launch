@@ -18,6 +18,7 @@ mod logging;
 mod matcher;
 mod network;
 mod picker;
+mod tokio;
 mod util;
 mod wayland;
 mod xdg;
@@ -26,11 +27,10 @@ use std::process;
 
 use anyhow::Result;
 use clap::Parser;
+use flume::Receiver;
 use fork::Fork;
 use gpui::{App, Application, QuitMode, prelude::*};
 use tracing::{error, info};
-
-use flume::Receiver;
 
 use crate::{
   assets::{Assets, load_embedded_fonts},
@@ -100,6 +100,7 @@ fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Re
     .with_assets(Assets)
     .with_quit_mode(mode)
     .run(move |cx| {
+      tokio::init(cx);
       wayland::init(cx).unwrap();
       matcher::init(cx);
       dbus::init(cx);
