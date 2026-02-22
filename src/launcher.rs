@@ -11,8 +11,8 @@ use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
-  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString, Size,
-  Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
+  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString,
+  Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -298,9 +298,11 @@ impl Launcher {
   fn copy_result(&mut self, _: &CopyResult, window: &mut Window, cx: &mut Context<Self>) {
     if let Some(color) = &self.color_result {
       let connection = crate::wayland::WaylandConnection::global(cx);
-      connection.read(cx).send_command(crate::wayland::Command::OfferText {
-        text: color.copy_text.to_string(),
-      });
+      connection
+        .read(cx)
+        .send_command(crate::wayland::Command::OfferText {
+          text: color.copy_text.to_string(),
+        });
       window.remove_window();
     }
   }
@@ -359,7 +361,7 @@ impl Render for Launcher {
     v_flex()
       .key_context(CONTEXT)
       .track_focus(&self.focus_handle)
-      .font_family("Noto Sans")
+      .font_family("Iosevka")
       .text_color(rgb(0xFFFFFF))
       .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::go_back))
@@ -567,7 +569,7 @@ impl PickerDelegate for RootDelegate {
       .child(
         h_flex()
           .gap_1()
-          .text_color(rgb(0x888888))
+          .text_color(rgb(0x666666))
           .text_sm()
           .child(item.type_label()),
       )
