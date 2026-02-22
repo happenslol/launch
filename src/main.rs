@@ -8,6 +8,7 @@ mod assets;
 mod audio;
 mod bluetooth;
 mod clipboard;
+mod confirmation;
 mod db;
 mod dbus;
 mod icon;

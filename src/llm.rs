@@ -21,6 +21,7 @@ use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use tracing::{error, info};
 
 use crate::{
+  confirmation::{ConfirmationEvent, ConfirmationPrompt, render_confirmation_overlay},
   db::DB,
   icon::IconName,
   input::{self, input, state::InputState},
@@ -138,6 +139,7 @@ struct LlmPanel {
   scroll_handle: ScrollHandle,
   autoscroll: bool,
   conversation_picker: Option<Entity<Picker<ConversationPickerDelegate>>>,
+  confirmation_prompt: Option<Entity<ConfirmationPrompt>>,
   _task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
@@ -169,6 +171,7 @@ impl LlmPanel {
       scroll_handle: ScrollHandle::new(),
       autoscroll: true,
       conversation_picker: None,
+      confirmation_prompt: None,
       _task: None,
       _subscriptions: subscriptions,
     }
@@ -330,13 +333,37 @@ impl LlmPanel {
       return;
     };
 
-    let Some(entry) = conversation_picker.update(cx, |picker, cx| {
-      picker.remove_selected_item(window, cx)
-    }) else {
+    let Some(entry) = conversation_picker.read(cx).get_selected_item().cloned() else {
       return;
     };
 
-    LlmDb::delete_conversation(entry.conversation_id);
+    let prompt = cx.new(|cx| ConfirmationPrompt::new(window, cx));
+    let conversation_picker = conversation_picker.clone();
+
+    let subscription = cx.subscribe_in(
+      &prompt,
+      window,
+      move |this, _, event: &ConfirmationEvent, window, cx| {
+        match event {
+          ConfirmationEvent::Confirm => {
+            conversation_picker.update(cx, |picker, cx| {
+              picker.remove_selected_item(window, cx);
+            });
+            LlmDb::delete_conversation(entry.conversation_id);
+          }
+          ConfirmationEvent::Dismiss => {}
+        }
+
+        this.confirmation_prompt = None;
+        if let Some(picker) = &this.conversation_picker {
+          cx.focus_view(&picker.read(cx).search_input.clone(), window);
+        }
+        cx.notify();
+      },
+    );
+
+    self._subscriptions.push(subscription);
+    self.confirmation_prompt = Some(prompt);
     cx.notify();
   }
 
@@ -735,8 +762,12 @@ impl Render for LlmPanel {
         v_flex()
           .key_context(CONVERSATION_PICKER_CONTEXT)
           .size_full()
+          .relative()
           .child(picker_input(conversation_picker))
           .child(picker_results(conversation_picker))
+          .when_some(self.confirmation_prompt.clone(), |this, prompt| {
+            this.child(render_confirmation_overlay(&prompt))
+          })
           .into_any_element()
       } else {
         self.render_chat(cx).into_any_element()

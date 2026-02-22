@@ -12,6 +12,7 @@ use nucleo_matcher::{
 };
 
 use crate::{
+  confirmation::{ConfirmationEvent, ConfirmationPrompt, render_confirmation_overlay},
   icon::{Icon, IconName},
   launcher::RootItem,
   matcher::MatcherPool,
@@ -90,6 +91,7 @@ struct ClipboardPanel {
   picker: Entity<Picker<ClipboardDelegate>>,
   connection: Entity<wayland::WaylandConnection>,
   preview: Option<PreviewState>,
+  confirmation_prompt: Option<Entity<ConfirmationPrompt>>,
   _preview_task: Option<Task<()>>,
   _load_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
@@ -133,6 +135,7 @@ impl ClipboardPanel {
       picker,
       connection,
       preview: None,
+      confirmation_prompt: None,
       _preview_task: None,
       _load_task: Some(load_task),
       _subscriptions: subscriptions,
@@ -231,27 +234,45 @@ impl ClipboardPanel {
   }
 
   fn delete_entry(&mut self, _: &DeleteEntry, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(item) = self.picker.update(cx, |picker, cx| {
-      picker.remove_selected_item(window, cx)
-    }) else {
+    let Some(item) = self.picker.read(cx).get_selected_item().cloned() else {
       return;
     };
 
-    // Clear preview if the deleted item was being previewed
-    if self
-      .preview
-      .as_ref()
-      .is_some_and(|preview| preview.item_id == item.id)
-    {
-      self.preview = None;
-      self._preview_task = None;
-    }
+    let prompt = cx.new(|cx| ConfirmationPrompt::new(window, cx));
+    let picker = self.picker.clone();
+    let connection = self.connection.clone();
 
-    self
-      .connection
-      .read(cx)
-      .send_command(wayland::Command::DeleteHistoryEntry { id: item.id });
+    let subscription = cx.subscribe_in(
+      &prompt,
+      window,
+      move |this, _, event: &ConfirmationEvent, window, cx| {
+        if let ConfirmationEvent::Confirm = event {
+          picker.update(cx, |picker, cx| {
+            picker.remove_selected_item(window, cx);
+          });
 
+          if this
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.item_id == item.id)
+          {
+            this.preview = None;
+            this._preview_task = None;
+          }
+
+          connection
+            .read(cx)
+            .send_command(wayland::Command::DeleteHistoryEntry { id: item.id });
+        }
+
+        this.confirmation_prompt = None;
+        cx.focus_view(&this.picker.read(cx).search_input.clone(), window);
+        cx.notify();
+      },
+    );
+
+    self._subscriptions.push(subscription);
+    self.confirmation_prompt = Some(prompt);
     cx.notify();
   }
 
@@ -322,6 +343,7 @@ impl Render for ClipboardPanel {
 
     v_flex()
       .size_full()
+      .relative()
       .on_action(cx.listener(Self::delete_entry))
       .child(picker_input(&self.picker).show_back_button(true))
       .child(
@@ -347,6 +369,9 @@ impl Render for ClipboardPanel {
               .child(self.render_preview()),
           ),
       )
+      .when_some(self.confirmation_prompt.clone(), |this, prompt| {
+        this.child(render_confirmation_overlay(&prompt))
+      })
   }
 }
 
