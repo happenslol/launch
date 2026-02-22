@@ -20,6 +20,7 @@ pub fn get_items() -> Vec<RootItem> {
     RootItem::Panel {
       id: "networks".into(),
       name: "Networks".into(),
+      description: "Manage network connections".into(),
       icon: IconName::Network,
       terms: vec!["net".into(), "network".into(), "ethernet".into()],
       view: Arc::new(|window, cx| cx.new(|cx| NetworkPanel::new(window, cx)).into()),
@@ -28,6 +29,7 @@ pub fn get_items() -> Vec<RootItem> {
       id: "wifi".into(),
       icon: IconName::Wifi,
       name: "Wifi".into(),
+      description: "Connect to wireless networks".into(),
       terms: vec!["wifi".into()],
       view: Arc::new(|window, cx| cx.new(|cx| wifi::WifiPanel::new(window, cx)).into()),
     },

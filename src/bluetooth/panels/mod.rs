@@ -13,6 +13,7 @@ pub fn get_items() -> Vec<RootItem> {
     id: "bluetooth".into(),
     icon: IconName::Bluetooth,
     name: "Bluetooth".into(),
+    description: "Manage Bluetooth devices".into(),
     terms: vec!["bluetooth".into(), "bt".into(), "devices".into()],
     view: Arc::new(|window, cx| cx.new(|cx| BluetoothDevicesPanel::new(window, cx)).into()),
   }]

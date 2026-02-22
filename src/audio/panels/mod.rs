@@ -19,6 +19,7 @@ pub fn get_items() -> Vec<RootItem> {
       id: "sinks".into(),
       icon: IconName::Volume,
       name: "Volume".into(),
+      description: "Manage audio output devices and volume".into(),
       terms: vec!["sinks".into(), "audio".into(), "volume".into()],
       view: Arc::new(|window, cx| cx.new(|cx| AudioSinksPanel::new(window, cx)).into()),
     },
@@ -26,6 +27,7 @@ pub fn get_items() -> Vec<RootItem> {
       id: "sources".into(),
       icon: IconName::Microphone,
       name: "Microphone".into(),
+      description: "Manage audio input devices".into(),
       terms: vec![
         "sources".into(),
         "microphone".into(),
@@ -38,6 +40,7 @@ pub fn get_items() -> Vec<RootItem> {
       id: "streams".into(),
       icon: IconName::Headphones,
       name: "Playback Streams".into(),
+      description: "Manage per-application audio playback".into(),
       terms: vec!["streams".into(), "playback".into(), "applications".into()],
       view: Arc::new(|window, cx| cx.new(|cx| AudioStreamsPanel::new(window, cx)).into()),
     },

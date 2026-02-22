@@ -37,7 +37,7 @@ const X11_METADATA_MIMES: &[&str] = &[
 ];
 
 const SECRET_HINT_MIME: &str = "x-kde-passwordManagerHint";
-const REOFFER_HINT_MIME: &str = "x-launch-reoffer";
+const REOFFER_HINT_MIME: &str = "x-launch";
 
 const MAX_ENTRY_SIZE: usize = 10 * 1024 * 1024;
 
@@ -458,15 +458,17 @@ fn compute_preview(content_type: ContentType, mime_data: &HashMap<String, Vec<u8
   match content_type {
     ContentType::Image => {
       let size = mime_data.values().map(|d| d.len()).max().unwrap_or(0);
-      format!("[Image, {} KiB]", size / 1024)
+      format!("Image ({}) KiB", size / 1024)
     }
     ContentType::File => {
       if let Some(data) = mime_data.get("text/uri-list")
         && let Ok(text) = std::str::from_utf8(data)
+        && let Some(first_line) = text.lines().next()
       {
-        return text.lines().next().unwrap_or("[File]").to_string();
+        return first_line.to_string();
       }
-      "[File]".to_string()
+
+      "File".to_string()
     }
     ContentType::Text | ContentType::Url | ContentType::Code => {
       let text_data = TEXT_MIME_TYPES.iter().find_map(|t| mime_data.get(*t));
@@ -489,7 +491,7 @@ fn compute_preview(content_type: ContentType, mime_data: &HashMap<String, Vec<u8
     ContentType::Other => {
       let best_mime = mime_data.keys().next().unwrap_or(&String::new()).clone();
       let size = mime_data.values().map(|d| d.len()).max().unwrap_or(0);
-      format!("[{best_mime}, {} KiB]", size / 1024)
+      format!("{best_mime} ({} KiB)", size / 1024)
     }
   }
 }
@@ -661,7 +663,10 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Stat
         let mime_types = std::mem::take(&mut state.clipboard.pending_mime_types);
         state.clipboard.pending_offer = None;
 
-        if mime_types.iter().any(|m| m == SECRET_HINT_MIME || m == REOFFER_HINT_MIME) {
+        if mime_types
+          .iter()
+          .any(|m| m == SECRET_HINT_MIME || m == REOFFER_HINT_MIME)
+        {
           debug!("Clipboard offer contains secret or reoffer hint, ignoring");
           offer.destroy();
           return;

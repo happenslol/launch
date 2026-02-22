@@ -13,7 +13,7 @@
 - [x] unix timestamps
 - [x] color conversion
 - [x] search providers (google, youtube, kagi, wikipedia)
-- [ ] clipboard preview (images, links)
+- [x] clipboard preview (images, links)
 - [ ] delete from clipboard
 - [ ] copy calc results
 - [ ] calc result history/panel

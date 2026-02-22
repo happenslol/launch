@@ -468,6 +468,7 @@ pub enum RootItem {
     id: String,
     icon: IconName,
     name: SharedString,
+    description: SharedString,
     terms: Vec<String>,
     view: Arc<PanelView>,
   },
@@ -475,6 +476,7 @@ pub enum RootItem {
     id: &'static str,
     icon: IconName,
     name: SharedString,
+    description: SharedString,
     url_template: &'static str,
   },
 }
@@ -495,6 +497,18 @@ impl RootItem {
       RootItem::Search { .. } => "search",
     }
   }
+
+  pub fn description(&self, locales: &[String]) -> SharedString {
+    match self {
+      RootItem::App { entry, name, .. } => entry
+        .comment(locales)
+        .map(|c| SharedString::from(c.to_string()))
+        .unwrap_or_else(|| format!("Launch {name}").into()),
+      RootItem::Panel { description, .. } | RootItem::Search { description, .. } => {
+        description.clone()
+      }
+    }
+  }
 }
 
 fn search_providers() -> Vec<RootItem> {
@@ -503,24 +517,28 @@ fn search_providers() -> Vec<RootItem> {
       id: "google",
       icon: IconName::BrandGoogle,
       name: "Google".into(),
+      description: "Search the web with Google".into(),
       url_template: "https://www.google.com/search?q={}",
     },
     RootItem::Search {
       id: "youtube",
       icon: IconName::BrandYoutube,
       name: "YouTube".into(),
+      description: "Search for videos on YouTube".into(),
       url_template: "https://www.youtube.com/results?search_query={}",
     },
     RootItem::Search {
       id: "wikipedia",
       icon: IconName::BrandWikipedia,
       name: "Wikipedia".into(),
+      description: "Search articles on Wikipedia".into(),
       url_template: "https://en.wikipedia.org/w/index.php?search={}",
     },
     RootItem::Search {
       id: "kagi",
       icon: IconName::Search,
       name: "Kagi".into(),
+      description: "Search the web with Kagi".into(),
       url_template: "https://kagi.com/search?q={}",
     },
   ]
@@ -538,7 +556,9 @@ impl PickerDelegate for RootDelegate {
   ) -> impl IntoElement {
     let icon_cache = self.icon_cache.read(cx);
 
-    let icon_size = rems(1.125);
+    let icon_size = rems(1.5);
+
+    let description = item.description(&self.xdg_locales);
 
     h_flex()
       .w_full()
@@ -559,11 +579,25 @@ impl PickerDelegate for RootDelegate {
               .when_none(&icon, |this| {
                 this.child(Icon::new(IconName::AppWindow).size(icon_size))
               })
-              .child(name.clone())
+              .child(
+                v_flex().child(name.clone()).child(
+                  div()
+                    .text_sm()
+                    .text_color(rgb(0x666666))
+                    .child(description.clone()),
+                ),
+              )
           }
           RootItem::Panel { name, icon, .. } | RootItem::Search { name, icon, .. } => this
             .child(Icon::new(*icon).size(icon_size))
-            .child(name.clone()),
+            .child(
+              v_flex().child(name.clone()).child(
+                div()
+                  .text_sm()
+                  .text_color(rgb(0x666666))
+                  .child(description.clone()),
+              ),
+            ),
         }
       }))
       .child(

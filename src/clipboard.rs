@@ -33,6 +33,7 @@ pub fn get_items() -> Vec<RootItem> {
     id: "clipboard".into(),
     icon: IconName::Clipboard,
     name: "Clipboard history".into(),
+    description: "Browse and paste from clipboard history".into(),
     terms: vec!["clipboard".into(), "paste".into(), "history".into()],
     view: Arc::new(|window, cx| cx.new(|cx| ClipboardPanel::new(window, cx)).into()),
   }]
@@ -255,15 +256,11 @@ impl ClipboardPanel {
         ..
       }) => gpui::div()
         .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .p_3()
         .child(
           img(ImageSource::Image(image.clone()))
             .object_fit(ObjectFit::Contain)
-            .max_w_full()
-            .max_h_full(),
+            .w_full()
+            .max_h(rems(20.)),
         )
         .into_any_element(),
     }
