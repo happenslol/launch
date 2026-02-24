@@ -41,7 +41,10 @@ impl MarkdownState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
 
-        cx.bind_keys([gpui::KeyBinding::new("ctrl-c", Copy, Some(MARKDOWN_CONTEXT))]);
+        cx.bind_keys([
+            gpui::KeyBinding::new("ctrl-c", Copy, Some(MARKDOWN_CONTEXT)),
+            gpui::KeyBinding::new("ctrl-insert", Copy, Some(MARKDOWN_CONTEXT)),
+        ]);
 
         Self {
             selection: Selection::default(),
@@ -213,6 +216,7 @@ impl Element for MarkdownElement {
                     cx.notify();
                 });
                 window.focus(&focus_handle, cx);
+                window.prevent_default();
             });
         }
 
