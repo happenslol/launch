@@ -15,7 +15,8 @@
 - [x] search providers (google, youtube, kagi, wikipedia)
 - [x] clipboard preview (images, links)
 - [x] delete from clipboard
-- [ ] copy calc results
+- [x] build id
+- [x] copy calc results
 - [ ] calc result history/panel
 - [ ] submenu experiments
 - [ ] process monitor/kill
@@ -23,7 +24,6 @@
 - [ ] lock, hibernate, shutdown
 - [ ] update styling for streams
 - [ ] update styling for inline results
-- [ ] build id
 - [ ] nix search (searchix.ovh)
 - [ ] kdl config
 

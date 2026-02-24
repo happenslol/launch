@@ -17,6 +17,7 @@ mod instance;
 mod launcher;
 mod llm;
 mod logging;
+mod markdown;
 mod matcher;
 mod network;
 mod picker;
@@ -33,7 +34,7 @@ use clap::Parser;
 use flume::Receiver;
 use fork::Fork;
 use gpui::{App, Application, QuitMode, prelude::*};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
   assets::{Assets, load_embedded_fonts},
@@ -52,8 +53,13 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-  logging::init();
+  let _guard = logging::init();
   let args = Args::try_parse()?;
+
+  match buildid::build_id() {
+    Some(id) => debug!(build_id = hex::encode(id)),
+    None => debug!("no build id"),
+  }
 
   if args.no_daemon {
     run_app(args.panel, args.no_keyboard_capture, None);
