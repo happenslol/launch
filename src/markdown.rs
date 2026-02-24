@@ -297,6 +297,11 @@ fn offset_for_position(
         let block_top = bounds.origin.y;
         let block_bottom = block_top + bounds.size.height;
 
+        // Above the first block: return start of document
+        if previous_block_end.is_none() && position.y < block_top {
+            return document_range.start;
+        }
+
         // In the gap between the previous block and this one: snap to
         // the end of the previous block or the start of this one,
         // whichever is closer.
@@ -321,7 +326,7 @@ fn offset_for_position(
         previous_block_end = Some((block_bottom, document_range.end));
     }
 
-    // If position is below all blocks, return end of document
+    // Below all blocks: return end of document
     if let Some((_, last_range)) = blocks.last() {
         return last_range.end;
     }
@@ -361,48 +366,50 @@ fn paint_selection(
 
         // position_for_index returns absolute window coordinates
         let start_pos = layout.position_for_index(local_start);
-        let end_pos = layout.position_for_index(local_end);
 
-        if let (Some(start_pos), Some(end_pos)) = (start_pos, end_pos) {
+        if let Some(start_pos) = start_pos {
             let line_height = layout.line_height();
-            let right_edge = layout_bounds.origin.x + layout_bounds.size.width;
             let left_edge = layout_bounds.origin.x;
 
-            if start_pos.y == end_pos.y {
-                // Single line selection
-                window.paint_quad(fill(
-                    Bounds::from_corners(
-                        start_pos,
-                        point(end_pos.x, end_pos.y + line_height),
-                    ),
-                    selection_color,
-                ));
-            } else {
-                // Multi-line selection: first line, middle, last line
-                window.paint_quad(fill(
-                    Bounds::from_corners(
-                        start_pos,
-                        point(right_edge, start_pos.y + line_height),
-                    ),
-                    selection_color,
-                ));
+            // Paint selection line-by-line to avoid highlighting past the end of text.
+            // Walk through the selected range and group characters by visual line (y position).
+            let mut line_start_x = start_pos.x;
+            let mut line_y = start_pos.y;
+            let mut line_end_x = start_pos.x;
 
-                // Middle lines
-                if end_pos.y > start_pos.y + line_height {
-                    window.paint_quad(fill(
-                        Bounds::from_corners(
-                            point(left_edge, start_pos.y + line_height),
-                            point(right_edge, end_pos.y),
-                        ),
-                        selection_color,
-                    ));
+            for index in local_start..=local_end {
+                let pos = if index == local_end {
+                    // For the end position, use end_pos directly
+                    layout.position_for_index(index)
+                } else {
+                    layout.position_for_index(index)
+                };
+
+                let Some(pos) = pos else { continue };
+
+                if pos.y != line_y {
+                    // We moved to a new line — paint the previous line
+                    if line_end_x > line_start_x {
+                        window.paint_quad(fill(
+                            Bounds::from_corners(
+                                point(line_start_x, line_y),
+                                point(line_end_x, line_y + line_height),
+                            ),
+                            selection_color,
+                        ));
+                    }
+                    line_start_x = left_edge;
+                    line_y = pos.y;
                 }
+                line_end_x = pos.x;
+            }
 
-                // Last line: from left to end
+            // Paint the last (or only) line
+            if line_end_x > line_start_x {
                 window.paint_quad(fill(
                     Bounds::from_corners(
-                        point(left_edge, end_pos.y),
-                        point(end_pos.x, end_pos.y + line_height),
+                        point(line_start_x, line_y),
+                        point(line_end_x, line_y + line_height),
                     ),
                     selection_color,
                 ));
