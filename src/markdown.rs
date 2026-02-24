@@ -127,6 +127,12 @@ impl Element for MarkdownElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let focus_handle = self.state.read(cx).focus_handle.clone();
+        if !focus_handle.is_focused(window) && !self.state.read(cx).selection.range().is_empty() {
+            self.state.update(cx, |state, cx| {
+                state.selection = Selection::default();
+                cx.notify();
+            });
+        }
         window.set_focus_handle(&focus_handle, cx);
         rendered.element.prepaint(window, cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
