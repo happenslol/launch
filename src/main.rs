@@ -26,7 +26,7 @@ mod util;
 mod wayland;
 mod xdg;
 
-use std::process;
+use std::{os::unix::net::UnixListener, process};
 
 use anyhow::Result;
 use clap::Parser;
@@ -38,7 +38,7 @@ use tracing::{error, info};
 use crate::{
   assets::{Assets, load_embedded_fonts},
   input::state::InputState,
-  instance::{Message, Role},
+  instance::{Message, Response, Role},
   launcher::Launcher,
 };
 
@@ -65,31 +65,46 @@ fn main() -> Result<()> {
   match role {
     Role::Client(mut stream) => {
       info!("Sending open message to background process");
-      let message = Message::Open { panel: args.panel };
-      rmp_serde::encode::write(&mut stream, &message)?;
-      return Ok(());
+      let response = instance::send_open(&mut stream, args.panel.clone())?;
+      drop(stream);
+
+      match response {
+        Response::Accepted => {
+          info!("Background process accepted request");
+          return Ok(());
+        }
+        Response::Quitting => {
+          info!("Background process is a different version, taking over");
+          let listener = instance::acquire_after_quit()?;
+          daemonize(listener, args.panel, args.no_keyboard_capture);
+        }
+      }
     }
     Role::Server(listener) => {
       info!("No existing instance, daemonizing");
-      if let Fork::Child = fork::fork()? {
-        if fork::setsid().is_err() {
-          eprintln!("Failed to setsid: {}", std::io::Error::last_os_error());
-          process::exit(1);
-        }
-        if fork::redirect_stdio().is_err() {
-          eprintln!(
-            "Failed to redirect stdio: {}",
-            std::io::Error::last_os_error()
-          );
-        }
-
-        let receiver = instance::listen(listener);
-        run_app(args.panel, args.no_keyboard_capture, Some(receiver));
-      }
+      daemonize(listener, args.panel, args.no_keyboard_capture);
     }
   }
 
   Ok(())
+}
+
+fn daemonize(listener: UnixListener, panel: Option<String>, no_keyboard_capture: bool) {
+  if let Fork::Child = fork::fork().expect("Failed to fork") {
+    if fork::setsid().is_err() {
+      eprintln!("Failed to setsid: {}", std::io::Error::last_os_error());
+      process::exit(1);
+    }
+    if fork::redirect_stdio().is_err() {
+      eprintln!(
+        "Failed to redirect stdio: {}",
+        std::io::Error::last_os_error()
+      );
+    }
+
+    let receiver = instance::listen(listener);
+    run_app(panel, no_keyboard_capture, Some(receiver));
+  }
 }
 
 fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Receiver<Message>>) {

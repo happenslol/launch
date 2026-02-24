@@ -728,6 +728,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "buildid"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "834a85d2478807f41c43251c7ad226e1185bc34feb2133872f796a11b57155ae"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "log",
+ "winapi",
+]
+
+[[package]]
 name = "built"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3140,6 +3152,7 @@ dependencies = [
  "anyhow",
  "async-broadcast",
  "async-process",
+ "buildid",
  "calloop",
  "calloop-wayland-source",
  "chrono",

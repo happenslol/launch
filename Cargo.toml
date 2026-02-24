@@ -66,6 +66,7 @@ pulldown-cmark = "0.13"
 # own http client/async runtime, I'd like to remove tokio.
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
 rig-core = { version = "0.31.0" }
+buildid = "1.0.4"
 
 [dependencies.gpui]
 git = "https://github.com/zed-industries/zed"
