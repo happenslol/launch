@@ -14,7 +14,7 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 const MARKDOWN_CONTEXT: &str = "markdown";
 
-actions!(markdown, [Copy]);
+actions!(markdown, [Copy, CopyRaw]);
 
 #[derive(Clone)]
 enum SelectMode {
@@ -58,6 +58,7 @@ impl MarkdownState {
         cx.bind_keys([
             gpui::KeyBinding::new("ctrl-c", Copy, Some(MARKDOWN_CONTEXT)),
             gpui::KeyBinding::new("ctrl-insert", Copy, Some(MARKDOWN_CONTEXT)),
+            gpui::KeyBinding::new("ctrl-shift-c", CopyRaw, Some(MARKDOWN_CONTEXT)),
         ]);
 
         Self {
@@ -76,12 +77,16 @@ impl Focusable for MarkdownState {
 struct RenderedBlock {
     layout: TextLayout,
     document_range: Range<usize>,
+    // Per-text-run mappings: (document_range, source_range) for each Text/Code event.
+    // Source ranges include surrounding markdown syntax (e.g. `**`, `*`, `` ` ``).
+    source_mappings: Vec<(Range<usize>, Range<usize>)>,
 }
 
 pub struct RenderedMarkdown {
     element: AnyElement,
     blocks: Vec<RenderedBlock>,
     document_text: String,
+    source_text: String,
 }
 
 pub struct MarkdownElement {
@@ -167,7 +172,7 @@ impl Element for MarkdownElement {
         key_context.add(MARKDOWN_CONTEXT);
         window.set_key_context(key_context);
 
-        // Register copy action
+        // Register copy action (rendered text)
         {
             let state = self.state.clone();
             let document_text = rendered.document_text.clone();
@@ -183,6 +188,61 @@ impl Element for MarkdownElement {
                             connection
                                 .read(cx)
                                 .send_command(wayland::Command::OfferText { text });
+                        }
+                    }
+                },
+            );
+        }
+
+        // Register copy-raw action (raw markdown source)
+        {
+            let state = self.state.clone();
+            let source_text = rendered.source_text.clone();
+            let all_source_mappings: Vec<(Range<usize>, Range<usize>)> = rendered
+                .blocks
+                .iter()
+                .flat_map(|b| b.source_mappings.iter().cloned())
+                .collect();
+            window.on_action(
+                TypeId::of::<CopyRaw>(),
+                move |_action, phase, _window, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        let selection = state.read(cx).selection.clone();
+                        let range = selection.range();
+                        if !range.is_empty() {
+                            let mut source_start = usize::MAX;
+                            let mut source_end: usize = 0;
+                            for (doc_range, src_range) in &all_source_mappings {
+                                if range.end <= doc_range.start
+                                    || range.start >= doc_range.end
+                                {
+                                    continue;
+                                }
+                                let overlap_start = range.start.max(doc_range.start);
+                                let overlap_end = range.end.min(doc_range.end);
+
+                                if doc_range.len() == src_range.len() {
+                                    let offset =
+                                        src_range.start.wrapping_sub(doc_range.start);
+                                    source_start =
+                                        source_start.min(overlap_start.wrapping_add(offset));
+                                    source_end =
+                                        source_end.max(overlap_end.wrapping_add(offset));
+                                } else {
+                                    source_start = source_start.min(src_range.start);
+                                    source_end = source_end.max(src_range.end);
+                                }
+                            }
+                            if source_start < source_end {
+                                let text = source_text
+                                    .get(source_start..source_end)
+                                    .unwrap_or("")
+                                    .to_string();
+                                let connection = wayland::WaylandConnection::global(cx);
+                                connection
+                                    .read(cx)
+                                    .send_command(wayland::Command::OfferText { text });
+                            }
                         }
                     }
                 },
@@ -540,7 +600,7 @@ fn paint_selection(
 
 fn build_markdown(text: &str) -> RenderedMarkdown {
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
-    let parser = Parser::new_ext(text, options);
+    let parser = Parser::new_ext(text, options).into_offset_iter();
 
     let mut elements: Vec<AnyElement> = Vec::new();
     let mut blocks: Vec<RenderedBlock> = Vec::new();
@@ -584,8 +644,10 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
                        document_text: &mut String,
                        heading_level: &mut Option<u8>,
                        in_code_block: bool,
-                       in_blockquote: bool| {
+                       in_blockquote: bool,
+                       run_mappings: &mut Vec<(Range<usize>, Range<usize>)>| {
         if inline_text.is_empty() {
+            run_mappings.clear();
             return;
         }
 
@@ -593,6 +655,15 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
         document_text.push_str(inline_text);
         let doc_end = document_text.len();
         document_text.push('\n');
+
+        // Convert inline_text ranges to document_text ranges
+        let source_mappings: Vec<(Range<usize>, Range<usize>)> = run_mappings
+            .drain(..)
+            .map(|(inline_range, source_range)| {
+                let doc_range = (doc_start + inline_range.start)..(doc_start + inline_range.end);
+                (doc_range, source_range)
+            })
+            .collect();
 
         let content: SharedString = inline_text.clone().into();
         let styled = if highlights.is_empty() {
@@ -642,12 +713,16 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
         blocks.push(RenderedBlock {
             layout,
             document_range: doc_start..doc_end,
+            source_mappings,
         });
         inline_text.clear();
         highlights.clear();
     };
 
-    for event in parser {
+    // Per-text-run source mappings: (inline_text_range, source_range)
+    let mut run_mappings: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+
+    for (event, event_range) in parser {
         match event {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
@@ -663,6 +738,7 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
                         &mut heading_level,
                         in_code_block,
                         in_blockquote,
+                        &mut run_mappings,
                     );
                     in_code_block = true;
                 }
@@ -683,6 +759,7 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
                         &mut heading_level,
                         in_code_block,
                         in_blockquote,
+                        &mut run_mappings,
                     );
                     let prefix = match list_stack.last() {
                         Some(Some(_)) => {
@@ -729,6 +806,7 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
                         &mut heading_level,
                         in_code_block,
                         in_blockquote,
+                        &mut run_mappings,
                     );
                 }
                 TagEnd::CodeBlock => {
@@ -741,6 +819,7 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
                         &mut heading_level,
                         in_code_block,
                         in_blockquote,
+                        &mut run_mappings,
                     );
                     in_code_block = false;
                 }
@@ -757,22 +836,28 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
             },
 
             Event::Text(text) => {
-                let start = inline_text.len();
+                let inline_start = inline_text.len();
                 inline_text.push_str(&text);
-                let end = inline_text.len();
+                let inline_end = inline_text.len();
+
+                run_mappings.push((inline_start..inline_end, event_range));
 
                 let style = current_style(&style_stack);
                 if style != HighlightStyle::default() {
-                    highlights.push((start..end, style));
+                    highlights.push((inline_start..inline_end, style));
                 }
             }
 
             Event::Code(code) => {
-                let start = inline_text.len();
+                let inline_start = inline_text.len();
                 inline_text.push_str(&code);
-                let end = inline_text.len();
+                let inline_end = inline_text.len();
+
+                // Code event source range already includes backticks
+                run_mappings.push((inline_start..inline_end, event_range));
+
                 highlights.push((
-                    start..end,
+                    inline_start..inline_end,
                     HighlightStyle {
                         background_color: Some(rgba(0xFFFFFF18).into()),
                         ..Default::default()
@@ -801,6 +886,7 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
         &mut heading_level,
         in_code_block,
         in_blockquote,
+        &mut run_mappings,
     );
 
     let container = div().children(elements).into_any_element();
@@ -809,5 +895,6 @@ fn build_markdown(text: &str) -> RenderedMarkdown {
         element: container,
         blocks,
         document_text,
+        source_text: text.to_string(),
     }
 }
