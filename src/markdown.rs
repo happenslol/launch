@@ -16,11 +16,25 @@ const MARKDOWN_CONTEXT: &str = "markdown";
 
 actions!(markdown, [Copy]);
 
+#[derive(Clone)]
+enum SelectMode {
+    Character,
+    Word { anchor_range: Range<usize> },
+    Line { anchor_range: Range<usize> },
+}
+
+impl Default for SelectMode {
+    fn default() -> Self {
+        SelectMode::Character
+    }
+}
+
 #[derive(Clone, Default)]
 struct Selection {
     start: usize,
     end: usize,
     pending: bool,
+    mode: SelectMode,
 }
 
 impl Selection {
@@ -199,6 +213,7 @@ impl Element for MarkdownElement {
                 .map(|b| (b.layout.clone(), b.document_range.clone()))
                 .collect();
             let hitbox = prepaint.hitbox.clone();
+            let document_text = rendered.document_text.clone();
 
             window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble {
@@ -214,11 +229,30 @@ impl Element for MarkdownElement {
                 let offset = offset_for_position(event.position, &blocks);
                 let focus_handle = state.read(cx).focus_handle.clone();
                 state.update(cx, |state, cx| {
-                    state.selection = Selection {
-                        start: offset,
-                        end: offset,
-                        pending: true,
-                    };
+                    if event.click_count >= 3 {
+                        let range = line_range_at(&document_text, offset);
+                        state.selection = Selection {
+                            start: range.start,
+                            end: range.end,
+                            pending: true,
+                            mode: SelectMode::Line { anchor_range: range },
+                        };
+                    } else if event.click_count == 2 {
+                        let range = word_range_at(&document_text, offset);
+                        state.selection = Selection {
+                            start: range.start,
+                            end: range.end,
+                            pending: true,
+                            mode: SelectMode::Word { anchor_range: range },
+                        };
+                    } else {
+                        state.selection = Selection {
+                            start: offset,
+                            end: offset,
+                            pending: true,
+                            mode: SelectMode::Character,
+                        };
+                    }
                     cx.notify();
                 });
                 window.focus(&focus_handle, cx);
@@ -234,6 +268,7 @@ impl Element for MarkdownElement {
                 .iter()
                 .map(|b| (b.layout.clone(), b.document_range.clone()))
                 .collect();
+            let document_text = rendered.document_text.clone();
 
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
                 if phase != DispatchPhase::Bubble {
@@ -250,7 +285,21 @@ impl Element for MarkdownElement {
 
                 let offset = offset_for_position(event.position, &blocks);
                 state.update(cx, |state, cx| {
-                    state.selection.end = offset;
+                    match &state.selection.mode {
+                        SelectMode::Character => {
+                            state.selection.end = offset;
+                        }
+                        SelectMode::Word { anchor_range } => {
+                            let drag_range = word_range_at(&document_text, offset);
+                            state.selection.start = anchor_range.start.min(drag_range.start);
+                            state.selection.end = anchor_range.end.max(drag_range.end);
+                        }
+                        SelectMode::Line { anchor_range } => {
+                            let drag_range = line_range_at(&document_text, offset);
+                            state.selection.start = anchor_range.start.min(drag_range.start);
+                            state.selection.end = anchor_range.end.max(drag_range.end);
+                        }
+                    }
                     cx.notify();
                 });
             });
@@ -277,6 +326,77 @@ impl Element for MarkdownElement {
             });
         }
     }
+}
+
+fn char_kind(character: char) -> u8 {
+    if character.is_alphanumeric() || character == '_' {
+        0
+    } else if character.is_whitespace() && character != '\n' {
+        1
+    } else {
+        2
+    }
+}
+
+fn word_range_at(text: &str, offset: usize) -> Range<usize> {
+    let offset = offset.min(text.len());
+    if text.is_empty() {
+        return 0..0;
+    }
+
+    // Find the character at offset (or the last character if at end)
+    let anchor_offset = if offset == text.len() {
+        text.len().saturating_sub(1)
+    } else {
+        offset
+    };
+
+    let anchor_char = match text[anchor_offset..].chars().next() {
+        Some(c) => c,
+        None => return offset..offset,
+    };
+
+    if anchor_char == '\n' {
+        return offset..offset + 1;
+    }
+
+    let kind = char_kind(anchor_char);
+
+    // Expand backwards
+    let mut start = anchor_offset;
+    for (byte_index, character) in text[..anchor_offset].char_indices().rev() {
+        if character == '\n' || char_kind(character) != kind {
+            break;
+        }
+        start = byte_index;
+    }
+
+    // Expand forwards
+    let mut end = anchor_offset;
+    for (byte_index, character) in text[anchor_offset..].char_indices() {
+        if character == '\n' || char_kind(character) != kind {
+            break;
+        }
+        end = anchor_offset + byte_index + character.len_utf8();
+    }
+
+    start..end
+}
+
+fn line_range_at(text: &str, offset: usize) -> Range<usize> {
+    let offset = offset.min(text.len());
+
+    let start = text[..offset]
+        .rfind('\n')
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+
+    let end = text[offset..]
+        .find('\n')
+        .map(|pos| offset + pos)
+        .unwrap_or(text.len());
+
+    start..end
 }
 
 fn offset_for_position(
