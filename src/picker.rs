@@ -637,14 +637,18 @@ impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
     let search_input = self.picker.read(cx).search_input.clone();
     let focus_handle = self.picker.read(cx).focus_handle.clone();
 
-    div()
+    let mut element = div()
       .track_focus(&focus_handle)
       .on_action(window.listener_for(&self.picker, Picker::select_next))
       .on_action(window.listener_for(&self.picker, Picker::select_prev))
       .p_3()
       .border_b_1()
       .border_color(rgba(0xFFFFFF12))
-      .when_some(self.text_size, |this, size: Pixels| this.text_size(size))
+      .when_some(self.text_size, |this, size: Pixels| this.text_size(size));
+
+    element.style().refine(&self.style);
+
+    element
       .child(
         div()
           .flex()

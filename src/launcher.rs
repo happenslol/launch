@@ -52,19 +52,9 @@ actions!(
     Quit,
     GoBack,
     CopyResult,
-    DismissSecondary,
-    OpenOverlayPicker,
     OpenModalCenter,
-    OpenModalTop,
-    OpenModalBottom,
-    OpenModalLeft,
-    OpenModalRight,
-    OpenModalTopLeft,
-    OpenModalTopRight,
-    OpenModalBottomLeft,
+    OpenModalCenterBottom,
     OpenModalBottomRight,
-    OpenDropDownPicker,
-    OpenDrawerPicker,
   ]
 );
 const CONTEXT: &str = "launcher";
@@ -72,22 +62,15 @@ const CONTEXT: &str = "launcher";
 #[derive(Clone, Copy)]
 enum DockPosition {
   Center,
-  Top,
-  Bottom,
-  Left,
-  Right,
-  TopLeft,
-  TopRight,
-  BottomLeft,
   BottomRight,
 }
 
 #[derive(Clone, Copy)]
 enum SecondaryPickerVariant {
-  Overlay,
-  Modal(DockPosition),
-  DropDown,
-  Drawer,
+  Modal {
+    position: DockPosition,
+    search_bottom: bool,
+  },
 }
 
 #[derive(Clone)]
@@ -239,18 +222,9 @@ impl Launcher {
       KeyBinding::new("escape", Quit, Some(CONTEXT)),
       KeyBinding::new("shift-escape", GoBack, Some(CONTEXT)),
       KeyBinding::new("ctrl-enter", CopyResult, Some(CONTEXT)),
-      KeyBinding::new("ctrl-1", OpenOverlayPicker, Some(CONTEXT)),
       KeyBinding::new("ctrl-2", OpenModalCenter, Some(CONTEXT)),
-      KeyBinding::new("ctrl-3", OpenModalTop, Some(CONTEXT)),
-      KeyBinding::new("ctrl-4", OpenModalBottom, Some(CONTEXT)),
-      KeyBinding::new("ctrl-5", OpenModalLeft, Some(CONTEXT)),
-      KeyBinding::new("ctrl-6", OpenModalRight, Some(CONTEXT)),
-      KeyBinding::new("ctrl-7", OpenModalTopLeft, Some(CONTEXT)),
-      KeyBinding::new("ctrl-8", OpenModalTopRight, Some(CONTEXT)),
-      KeyBinding::new("ctrl-9", OpenModalBottomLeft, Some(CONTEXT)),
+      KeyBinding::new("ctrl-3", OpenModalCenterBottom, Some(CONTEXT)),
       KeyBinding::new("ctrl-0", OpenModalBottomRight, Some(CONTEXT)),
-      KeyBinding::new("ctrl-d", OpenDropDownPicker, Some(CONTEXT)),
-      KeyBinding::new("ctrl-u", OpenDrawerPicker, Some(CONTEXT)),
     ]);
 
     let launches = Arc::new(DB.get_launches());
@@ -556,7 +530,7 @@ impl Launcher {
 
     let has_animation = matches!(
       self.secondary_variant,
-      Some(SecondaryPickerVariant::Drawer | SecondaryPickerVariant::Modal(_))
+      Some(SecondaryPickerVariant::Modal { .. })
     );
 
     let picker = self.picker.clone();
@@ -588,15 +562,6 @@ impl Launcher {
     }
   }
 
-  fn open_overlay_picker(
-    &mut self,
-    _: &OpenOverlayPicker,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
-    self.open_secondary_picker(SecondaryPickerVariant::Overlay, window, cx);
-  }
-
   fn open_modal_center(
     &mut self,
     _: &OpenModalCenter,
@@ -604,79 +569,26 @@ impl Launcher {
     cx: &mut Context<Self>,
   ) {
     self.open_secondary_picker(
-      SecondaryPickerVariant::Modal(DockPosition::Center),
+      SecondaryPickerVariant::Modal {
+        position: DockPosition::Center,
+        search_bottom: false,
+      },
       window,
       cx,
     );
   }
 
-  fn open_modal_top(&mut self, _: &OpenModalTop, window: &mut Window, cx: &mut Context<Self>) {
-    self.open_secondary_picker(SecondaryPickerVariant::Modal(DockPosition::Top), window, cx);
-  }
-
-  fn open_modal_bottom(
+  fn open_modal_center_bottom(
     &mut self,
-    _: &OpenModalBottom,
+    _: &OpenModalCenterBottom,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
     self.open_secondary_picker(
-      SecondaryPickerVariant::Modal(DockPosition::Bottom),
-      window,
-      cx,
-    );
-  }
-
-  fn open_modal_left(&mut self, _: &OpenModalLeft, window: &mut Window, cx: &mut Context<Self>) {
-    self.open_secondary_picker(
-      SecondaryPickerVariant::Modal(DockPosition::Left),
-      window,
-      cx,
-    );
-  }
-
-  fn open_modal_right(&mut self, _: &OpenModalRight, window: &mut Window, cx: &mut Context<Self>) {
-    self.open_secondary_picker(
-      SecondaryPickerVariant::Modal(DockPosition::Right),
-      window,
-      cx,
-    );
-  }
-
-  fn open_modal_top_left(
-    &mut self,
-    _: &OpenModalTopLeft,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
-    self.open_secondary_picker(
-      SecondaryPickerVariant::Modal(DockPosition::TopLeft),
-      window,
-      cx,
-    );
-  }
-
-  fn open_modal_top_right(
-    &mut self,
-    _: &OpenModalTopRight,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
-    self.open_secondary_picker(
-      SecondaryPickerVariant::Modal(DockPosition::TopRight),
-      window,
-      cx,
-    );
-  }
-
-  fn open_modal_bottom_left(
-    &mut self,
-    _: &OpenModalBottomLeft,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
-    self.open_secondary_picker(
-      SecondaryPickerVariant::Modal(DockPosition::BottomLeft),
+      SecondaryPickerVariant::Modal {
+        position: DockPosition::Center,
+        search_bottom: false,
+      },
       window,
       cx,
     );
@@ -689,28 +601,13 @@ impl Launcher {
     cx: &mut Context<Self>,
   ) {
     self.open_secondary_picker(
-      SecondaryPickerVariant::Modal(DockPosition::BottomRight),
+      SecondaryPickerVariant::Modal {
+        position: DockPosition::BottomRight,
+        search_bottom: true,
+      },
       window,
       cx,
     );
-  }
-
-  fn open_dropdown_picker(
-    &mut self,
-    _: &OpenDropDownPicker,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
-    self.open_secondary_picker(SecondaryPickerVariant::DropDown, window, cx);
-  }
-
-  fn open_drawer_picker(
-    &mut self,
-    _: &OpenDrawerPicker,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
-    self.open_secondary_picker(SecondaryPickerVariant::Drawer, window, cx);
   }
 
   fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
@@ -768,18 +665,9 @@ impl Render for Launcher {
       .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::go_back))
       .on_action(cx.listener(Self::copy_result))
-      .on_action(cx.listener(Self::open_overlay_picker))
       .on_action(cx.listener(Self::open_modal_center))
-      .on_action(cx.listener(Self::open_modal_top))
-      .on_action(cx.listener(Self::open_modal_bottom))
-      .on_action(cx.listener(Self::open_modal_left))
-      .on_action(cx.listener(Self::open_modal_right))
-      .on_action(cx.listener(Self::open_modal_top_left))
-      .on_action(cx.listener(Self::open_modal_top_right))
-      .on_action(cx.listener(Self::open_modal_bottom_left))
+      .on_action(cx.listener(Self::open_modal_center_bottom))
       .on_action(cx.listener(Self::open_modal_bottom_right))
-      .on_action(cx.listener(Self::open_dropdown_picker))
-      .on_action(cx.listener(Self::open_drawer_picker))
       .rounded_xl()
       .size_full()
       .border_1()
@@ -848,61 +736,20 @@ fn render_secondary_picker(
   closing: bool,
 ) -> impl IntoElement {
   match variant {
-    SecondaryPickerVariant::Overlay => render_overlay_picker(picker),
-    SecondaryPickerVariant::Modal(position) => render_modal_picker(picker, position, closing),
-    SecondaryPickerVariant::DropDown => render_dropdown_picker(picker),
-    SecondaryPickerVariant::Drawer => render_drawer_picker(picker, closing),
+    SecondaryPickerVariant::Modal {
+      position,
+      search_bottom,
+    } => render_modal_picker(picker, position, search_bottom, closing),
   }
 }
 
-fn render_backdrop() -> gpui::Stateful<gpui::Div> {
-  div()
-    .id("secondary-backdrop")
-    .occlude()
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-    .rounded_xl()
-    .bg(rgba(0x00000088))
-}
-
-fn render_overlay_picker(picker: &Entity<Picker<DummyDelegate>>) -> gpui::AnyElement {
-  div()
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-    .child(
-      div()
-        .id("overlay-backdrop")
-        .occlude()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .rounded_xl()
-        .bg(rgba(0x000000DD)),
-    )
-    .child(
-      div()
-        .occlude()
-        .absolute()
-        .top(px(60.))
-        .left_0()
-        .right_0()
-        .bottom_0()
-        .flex()
-        .flex_col()
-        .child(picker_input(picker))
-        .child(picker_results(picker).flex_grow().min_h_0()),
-    )
-    .into_any_element()
-}
+const ANIM_ENTER_DURATION: Duration = Duration::from_millis(150);
+const ANIM_EXIT_DURATION: Duration = Duration::from_millis(100);
 
 fn render_modal_picker(
   picker: &Entity<Picker<DummyDelegate>>,
   position: DockPosition,
+  search_bottom: bool,
   closing: bool,
 ) -> gpui::AnyElement {
   let slide_distance = 20.;
@@ -935,13 +782,6 @@ fn render_modal_picker(
     )
     .map(|this| match position {
       DockPosition::Center => this.items_center().justify_center(),
-      DockPosition::Top => this.items_start().justify_center().pt_4(),
-      DockPosition::Bottom => this.items_end().justify_center().pb_4(),
-      DockPosition::Left => this.items_center().justify_start().pl_4(),
-      DockPosition::Right => this.items_center().justify_end().pr_4(),
-      DockPosition::TopLeft => this.items_start().justify_start().pt_4().pl_4(),
-      DockPosition::TopRight => this.items_start().justify_end().pt_4().pr_4(),
-      DockPosition::BottomLeft => this.items_end().justify_start().pb_4().pl_4(),
       DockPosition::BottomRight => this.items_end().justify_end().pb_4().pr_4(),
     })
     .child(
@@ -949,121 +789,69 @@ fn render_modal_picker(
         .id("modal-content")
         .occlude()
         .w(px(400.))
-        .h(px(300.))
-        .bg(rgb(0x1D1D1D))
-        .border_1()
-        .border_color(rgba(0xFFFFFF15))
-        .rounded_lg()
-        .overflow_hidden()
         .flex()
         .flex_col()
-        .child(picker_input(picker))
-        .child(picker_results(picker).flex_grow().min_h_0())
+        .gap_2()
+        .when(matches!(position, DockPosition::BottomRight), |this| {
+          this.child(
+            h_flex()
+              .px_3()
+              .py_2()
+              .gap_3()
+              .items_center()
+              .bg(rgb(0x1D1D1D))
+              .border_1()
+              .border_color(rgba(0xFFFFFF15))
+              .rounded_lg()
+              .child(Icon::new(IconName::Wifi).size(rems(1.5)))
+              .child(div().pt(px(4.)).flex_grow().child("HomeNetwork_5GHz"))
+              .child(
+                div()
+                  .size(px(8.))
+                  .rounded_full()
+                  .bg(rgb(0x22C55E)),
+              ),
+          )
+        })
+        .child(
+          div()
+            .h(px(300.))
+            .bg(rgb(0x1D1D1D))
+            .border_1()
+            .border_color(rgba(0xFFFFFF15))
+            .rounded_lg()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .when(!search_bottom, |this| {
+              this
+                .child(picker_input(picker))
+                .child(picker_results(picker).flex_grow().min_h_0())
+            })
+            .when(search_bottom, |this| {
+              this
+                .child(picker_results(picker).flex_grow().min_h_0())
+                .child(picker_input(picker).border_b_0().border_t_1())
+            }),
+        )
         .with_animation(
           ElementId::NamedInteger("modal-slide".into(), closing as u64),
           Animation::new(ANIM_ENTER_DURATION).with_easing(easing),
           move |this, delta| {
             let progress = if closing { delta } else { 1.0 - delta };
             let opacity = if closing { 1.0 - delta } else { delta };
-            this.mt(px(slide_distance * progress)).opacity(opacity)
-          },
-        ),
-    )
-    .into_any_element()
-}
 
-fn render_dropdown_picker(picker: &Entity<Picker<DummyDelegate>>) -> gpui::AnyElement {
-  div()
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-    .child(render_backdrop())
-    .child(
-      div()
-        .occlude()
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .px(px(40.))
-        .child(
-          div()
-            .h(px(300.))
-            .bg(rgba(0x171717F0))
-            .border_1()
-            .border_color(rgba(0xFFFFFF15))
-            .rounded_b_lg()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(picker_input(picker))
-            .child(picker_results(picker).flex_grow().min_h_0()),
-        ),
-    )
-    .into_any_element()
-}
-
-const ANIM_ENTER_DURATION: Duration = Duration::from_millis(150);
-const ANIM_EXIT_DURATION: Duration = Duration::from_millis(100);
-
-fn render_drawer_picker(picker: &Entity<Picker<DummyDelegate>>, closing: bool) -> gpui::AnyElement {
-  let drawer_height = 300.;
-  let slide_distance = 20.;
-  let easing = |delta: f32| 1.0 - (1.0 - delta).powi(3);
-
-  div()
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-    .child(
-      div()
-        .id("drawer-backdrop")
-        .occlude()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .rounded_xl()
-        .bg(rgba(0x00000088))
-        .with_animation(
-          ElementId::NamedInteger("drawer-backdrop-fade".into(), closing as u64),
-          Animation::new(ANIM_ENTER_DURATION).with_easing(easing),
-          move |this, delta| {
-            let opacity = if closing { 1.0 - delta } else { delta };
-            this.opacity(opacity)
-          },
-        ),
-    )
-    .child(
-      div()
-        .id("drawer-content")
-        .occlude()
-        .absolute()
-        .left_0()
-        .right_0()
-        .px(px(40.))
-        .child(
-          div()
-            .h(px(drawer_height))
-            .bg(rgba(0x171717F0))
-            .border_1()
-            .border_color(rgba(0xFFFFFF15))
-            .rounded_t_lg()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(picker_input(picker))
-            .child(picker_results(picker).flex_grow().min_h_0()),
-        )
-        .with_animation(
-          ElementId::NamedInteger("drawer-slide".into(), closing as u64),
-          Animation::new(ANIM_ENTER_DURATION).with_easing(easing),
-          move |this, delta| {
-            let progress = if closing { delta } else { 1.0 - delta };
-            let opacity = if closing { 1.0 - delta } else { delta };
-            this.bottom(px(-slide_distance * progress)).opacity(opacity)
+            if matches!(position, DockPosition::BottomRight) {
+              let scale = 0.9 + 0.1 * (1.0 - progress);
+              let offset = 15.0 * progress;
+              this
+                .w(px(400. * scale))
+                .mb(px(-offset))
+                .mr(px(-offset))
+                .opacity(opacity)
+            } else {
+              this.mt(px(slide_distance * progress)).opacity(opacity)
+            }
           },
         ),
     )
