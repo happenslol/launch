@@ -804,13 +804,8 @@ fn render_modal_picker(
               .border_color(rgba(0xFFFFFF15))
               .rounded_lg()
               .child(Icon::new(IconName::Wifi).size(rems(1.5)))
-              .child(div().pt(px(4.)).flex_grow().child("HomeNetwork_5GHz"))
-              .child(
-                div()
-                  .size(px(8.))
-                  .rounded_full()
-                  .bg(rgb(0x22C55E)),
-              ),
+              .child(div().flex_grow().child("HomeNetwork_5GHz"))
+              .child(div().size(px(8.)).rounded_full().bg(rgb(0x22C55E))),
           )
         })
         .child(
