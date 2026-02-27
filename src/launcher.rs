@@ -5,14 +5,16 @@ use std::{
     Arc,
     atomic::{AtomicBool, Ordering},
   },
+  time::Duration,
 };
 
 use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
-  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString,
-  Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
+  Animation, AnimationExt, AnyView, App, Bounds, ElementId, Entity, FocusHandle, Focusable,
+  ImageSource, KeyBinding, SharedString, Size, Subscription, Task, Window, WindowBounds,
+  WindowKind, WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -25,9 +27,10 @@ use nucleo_matcher::{
 use tracing::error;
 
 use crate::{
-  audio, bluetooth, clipboard, llm,
+  audio, bluetooth, clipboard,
   db::DB,
   icon::{Icon, IconName},
+  llm,
   matcher::MatcherPool,
   network,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
@@ -43,8 +46,141 @@ impl fend_core::Interrupt for FendInterrupt {
   }
 }
 
-actions!(launcher, [Quit, GoBack, CopyResult]);
+actions!(
+  launcher,
+  [
+    Quit,
+    GoBack,
+    CopyResult,
+    DismissSecondary,
+    OpenOverlayPicker,
+    OpenModalCenter,
+    OpenModalTop,
+    OpenModalBottom,
+    OpenModalLeft,
+    OpenModalRight,
+    OpenModalTopLeft,
+    OpenModalTopRight,
+    OpenModalBottomLeft,
+    OpenModalBottomRight,
+    OpenDropDownPicker,
+    OpenDrawerPicker,
+  ]
+);
 const CONTEXT: &str = "launcher";
+
+#[derive(Clone, Copy)]
+enum DockPosition {
+  Center,
+  Top,
+  Bottom,
+  Left,
+  Right,
+  TopLeft,
+  TopRight,
+  BottomLeft,
+  BottomRight,
+}
+
+#[derive(Clone, Copy)]
+enum SecondaryPickerVariant {
+  Overlay,
+  Modal(DockPosition),
+  DropDown,
+  Drawer,
+}
+
+#[derive(Clone)]
+struct DummyItem {
+  name: SharedString,
+  description: SharedString,
+}
+
+fn dummy_items() -> Arc<Vec<DummyItem>> {
+  Arc::new(vec![
+    DummyItem {
+      name: "Alpha".into(),
+      description: "The first item".into(),
+    },
+    DummyItem {
+      name: "Bravo".into(),
+      description: "The second item".into(),
+    },
+    DummyItem {
+      name: "Charlie".into(),
+      description: "The third item".into(),
+    },
+    DummyItem {
+      name: "Delta".into(),
+      description: "The fourth item".into(),
+    },
+    DummyItem {
+      name: "Echo".into(),
+      description: "The fifth item".into(),
+    },
+  ])
+}
+
+struct DummyDelegate;
+
+impl PickerDelegate for DummyDelegate {
+  type ListItem = DummyItem;
+
+  fn render_list_item(
+    &self,
+    _window: &mut Window,
+    _cx: &mut Context<Picker<Self>>,
+    item: &Self::ListItem,
+    is_selected: bool,
+  ) -> impl IntoElement {
+    h_flex()
+      .w_full()
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
+      .gap_3()
+      .child(
+        v_flex().child(item.name.clone()).child(
+          div()
+            .text_sm()
+            .text_color(rgb(0x666666))
+            .child(item.description.clone()),
+        ),
+      )
+  }
+
+  fn update_matches(
+    &mut self,
+    window: &mut Window,
+    cx: &mut Context<Picker<Self>>,
+    query: String,
+    _cancel_flag: Arc<AtomicBool>,
+    search_id: usize,
+    items: Arc<Vec<Self::ListItem>>,
+  ) -> Task<()> {
+    let matches: Vec<(usize, u32)> = if query.is_empty() {
+      (0..items.len()).map(|i| (i, 0)).collect()
+    } else {
+      let lower_query = query.to_lowercase();
+      items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+          item.name.to_lowercase().contains(&lower_query)
+            || item.description.to_lowercase().contains(&lower_query)
+        })
+        .map(|(i, _)| (i, 1))
+        .collect()
+    };
+
+    cx.defer_in(window, move |picker, _window, cx| {
+      picker.complete_search(cx, search_id, Some(matches));
+    });
+
+    Task::ready(())
+  }
+}
 
 struct ColorResult {
   copy_text: SharedString,
@@ -62,6 +198,10 @@ pub struct Launcher {
   fend_result: Option<SharedString>,
   fend_cancel_flag: Arc<AtomicBool>,
   fend_task: Option<Task<()>>,
+  secondary_picker: Option<Entity<Picker<DummyDelegate>>>,
+  secondary_variant: Option<SecondaryPickerVariant>,
+  secondary_closing: bool,
+  secondary_dismiss_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -99,6 +239,18 @@ impl Launcher {
       KeyBinding::new("escape", Quit, Some(CONTEXT)),
       KeyBinding::new("shift-escape", GoBack, Some(CONTEXT)),
       KeyBinding::new("ctrl-enter", CopyResult, Some(CONTEXT)),
+      KeyBinding::new("ctrl-1", OpenOverlayPicker, Some(CONTEXT)),
+      KeyBinding::new("ctrl-2", OpenModalCenter, Some(CONTEXT)),
+      KeyBinding::new("ctrl-3", OpenModalTop, Some(CONTEXT)),
+      KeyBinding::new("ctrl-4", OpenModalBottom, Some(CONTEXT)),
+      KeyBinding::new("ctrl-5", OpenModalLeft, Some(CONTEXT)),
+      KeyBinding::new("ctrl-6", OpenModalRight, Some(CONTEXT)),
+      KeyBinding::new("ctrl-7", OpenModalTopLeft, Some(CONTEXT)),
+      KeyBinding::new("ctrl-8", OpenModalTopRight, Some(CONTEXT)),
+      KeyBinding::new("ctrl-9", OpenModalBottomLeft, Some(CONTEXT)),
+      KeyBinding::new("ctrl-0", OpenModalBottomRight, Some(CONTEXT)),
+      KeyBinding::new("ctrl-d", OpenDropDownPicker, Some(CONTEXT)),
+      KeyBinding::new("ctrl-u", OpenDrawerPicker, Some(CONTEXT)),
     ]);
 
     let launches = Arc::new(DB.get_launches());
@@ -173,6 +325,10 @@ impl Launcher {
       fend_result: None,
       fend_cancel_flag: Arc::new(AtomicBool::new(false)),
       fend_task: None,
+      secondary_picker: None,
+      secondary_variant: None,
+      secondary_closing: false,
+      secondary_dismiss_task: None,
       _subscriptions: subscriptions,
     }
   }
@@ -325,8 +481,12 @@ impl Launcher {
     }));
   }
 
-  fn quit(&mut self, _: &Quit, window: &mut Window, _cx: &mut Context<Self>) {
-    window.remove_window();
+  fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+    if self.secondary_picker.is_some() {
+      self.dismiss_secondary_picker(window, cx);
+    } else {
+      window.remove_window();
+    }
   }
 
   fn copy_result(&mut self, _: &CopyResult, window: &mut Window, cx: &mut Context<Self>) {
@@ -350,6 +510,207 @@ impl Launcher {
         window.focus(&picker.read(cx).search_input.focus_handle(cx), cx);
       });
     }
+  }
+
+  fn open_secondary_picker(
+    &mut self,
+    variant: SecondaryPickerVariant,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    if self.secondary_closing {
+      // Cancel the pending dismiss and fall through to open a fresh picker
+      self.secondary_dismiss_task = None;
+      self.secondary_picker = None;
+      self.secondary_variant = None;
+      self.secondary_closing = false;
+    } else if self.secondary_picker.is_some() {
+      self.dismiss_secondary_picker(window, cx);
+      return;
+    }
+
+    let picker = cx.new(|cx| Picker::new(DummyDelegate, dummy_items(), window, cx));
+
+    self._subscriptions.push(cx.subscribe_in(
+      &picker,
+      window,
+      |this, _, ev: &PickerEvent<DummyDelegate>, window, cx| {
+        if matches!(ev, PickerEvent::Picked(_)) {
+          this.dismiss_secondary_picker(window, cx);
+        }
+      },
+    ));
+
+    let search_input = picker.read(cx).search_input.clone();
+    window.focus(&search_input.focus_handle(cx), cx);
+
+    self.secondary_picker = Some(picker);
+    self.secondary_variant = Some(variant);
+    cx.notify();
+  }
+
+  fn dismiss_secondary_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.secondary_closing {
+      return;
+    }
+
+    let has_animation = matches!(
+      self.secondary_variant,
+      Some(SecondaryPickerVariant::Drawer | SecondaryPickerVariant::Modal(_))
+    );
+
+    let picker = self.picker.clone();
+    window.defer(cx, move |window, cx| {
+      window.focus(&picker.read(cx).search_input.focus_handle(cx), cx);
+    });
+
+    if has_animation {
+      self.secondary_closing = true;
+      cx.notify();
+
+      self.secondary_dismiss_task = Some(cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(ANIM_EXIT_DURATION).await;
+
+        this
+          .update(cx, |this, cx| {
+            this.secondary_picker = None;
+            this.secondary_variant = None;
+            this.secondary_closing = false;
+            this.secondary_dismiss_task = None;
+            cx.notify();
+          })
+          .log_err();
+      }));
+    } else {
+      self.secondary_picker = None;
+      self.secondary_variant = None;
+      cx.notify();
+    }
+  }
+
+  fn open_overlay_picker(
+    &mut self,
+    _: &OpenOverlayPicker,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_secondary_picker(SecondaryPickerVariant::Overlay, window, cx);
+  }
+
+  fn open_modal_center(
+    &mut self,
+    _: &OpenModalCenter,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_secondary_picker(
+      SecondaryPickerVariant::Modal(DockPosition::Center),
+      window,
+      cx,
+    );
+  }
+
+  fn open_modal_top(&mut self, _: &OpenModalTop, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_secondary_picker(SecondaryPickerVariant::Modal(DockPosition::Top), window, cx);
+  }
+
+  fn open_modal_bottom(
+    &mut self,
+    _: &OpenModalBottom,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_secondary_picker(
+      SecondaryPickerVariant::Modal(DockPosition::Bottom),
+      window,
+      cx,
+    );
+  }
+
+  fn open_modal_left(&mut self, _: &OpenModalLeft, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_secondary_picker(
+      SecondaryPickerVariant::Modal(DockPosition::Left),
+      window,
+      cx,
+    );
+  }
+
+  fn open_modal_right(&mut self, _: &OpenModalRight, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_secondary_picker(
+      SecondaryPickerVariant::Modal(DockPosition::Right),
+      window,
+      cx,
+    );
+  }
+
+  fn open_modal_top_left(
+    &mut self,
+    _: &OpenModalTopLeft,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_secondary_picker(
+      SecondaryPickerVariant::Modal(DockPosition::TopLeft),
+      window,
+      cx,
+    );
+  }
+
+  fn open_modal_top_right(
+    &mut self,
+    _: &OpenModalTopRight,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_secondary_picker(
+      SecondaryPickerVariant::Modal(DockPosition::TopRight),
+      window,
+      cx,
+    );
+  }
+
+  fn open_modal_bottom_left(
+    &mut self,
+    _: &OpenModalBottomLeft,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_secondary_picker(
+      SecondaryPickerVariant::Modal(DockPosition::BottomLeft),
+      window,
+      cx,
+    );
+  }
+
+  fn open_modal_bottom_right(
+    &mut self,
+    _: &OpenModalBottomRight,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_secondary_picker(
+      SecondaryPickerVariant::Modal(DockPosition::BottomRight),
+      window,
+      cx,
+    );
+  }
+
+  fn open_dropdown_picker(
+    &mut self,
+    _: &OpenDropDownPicker,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_secondary_picker(SecondaryPickerVariant::DropDown, window, cx);
+  }
+
+  fn open_drawer_picker(
+    &mut self,
+    _: &OpenDrawerPicker,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_secondary_picker(SecondaryPickerVariant::Drawer, window, cx);
   }
 
   fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
@@ -392,6 +753,13 @@ impl Focusable for Launcher {
 
 impl Render for Launcher {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let secondary_closing = self.secondary_closing;
+    let secondary = self
+      .secondary_picker
+      .as_ref()
+      .zip(self.secondary_variant)
+      .map(|(picker, variant)| (picker.clone(), variant));
+
     v_flex()
       .key_context(CONTEXT)
       .track_focus(&self.focus_handle)
@@ -400,6 +768,18 @@ impl Render for Launcher {
       .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::go_back))
       .on_action(cx.listener(Self::copy_result))
+      .on_action(cx.listener(Self::open_overlay_picker))
+      .on_action(cx.listener(Self::open_modal_center))
+      .on_action(cx.listener(Self::open_modal_top))
+      .on_action(cx.listener(Self::open_modal_bottom))
+      .on_action(cx.listener(Self::open_modal_left))
+      .on_action(cx.listener(Self::open_modal_right))
+      .on_action(cx.listener(Self::open_modal_top_left))
+      .on_action(cx.listener(Self::open_modal_top_right))
+      .on_action(cx.listener(Self::open_modal_bottom_left))
+      .on_action(cx.listener(Self::open_modal_bottom_right))
+      .on_action(cx.listener(Self::open_dropdown_picker))
+      .on_action(cx.listener(Self::open_drawer_picker))
       .rounded_xl()
       .size_full()
       .border_1()
@@ -456,7 +836,238 @@ impl Render for Launcher {
           })
           .child(picker_results(&self.picker))
       })
+      .when_some(secondary, |this, (picker, variant)| {
+        this.child(render_secondary_picker(&picker, variant, secondary_closing))
+      })
   }
+}
+
+fn render_secondary_picker(
+  picker: &Entity<Picker<DummyDelegate>>,
+  variant: SecondaryPickerVariant,
+  closing: bool,
+) -> impl IntoElement {
+  match variant {
+    SecondaryPickerVariant::Overlay => render_overlay_picker(picker),
+    SecondaryPickerVariant::Modal(position) => render_modal_picker(picker, position, closing),
+    SecondaryPickerVariant::DropDown => render_dropdown_picker(picker),
+    SecondaryPickerVariant::Drawer => render_drawer_picker(picker, closing),
+  }
+}
+
+fn render_backdrop() -> gpui::Stateful<gpui::Div> {
+  div()
+    .id("secondary-backdrop")
+    .occlude()
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .rounded_xl()
+    .bg(rgba(0x00000088))
+}
+
+fn render_overlay_picker(picker: &Entity<Picker<DummyDelegate>>) -> gpui::AnyElement {
+  div()
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .child(
+      div()
+        .id("overlay-backdrop")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .rounded_xl()
+        .bg(rgba(0x000000DD)),
+    )
+    .child(
+      div()
+        .occlude()
+        .absolute()
+        .top(px(60.))
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .flex()
+        .flex_col()
+        .child(picker_input(picker))
+        .child(picker_results(picker).flex_grow().min_h_0()),
+    )
+    .into_any_element()
+}
+
+fn render_modal_picker(
+  picker: &Entity<Picker<DummyDelegate>>,
+  position: DockPosition,
+  closing: bool,
+) -> gpui::AnyElement {
+  let slide_distance = 20.;
+  let easing = |delta: f32| 1.0 - (1.0 - delta).powi(3);
+
+  div()
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .flex()
+    .child(
+      div()
+        .id("modal-backdrop")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .rounded_xl()
+        .bg(rgba(0x00000088))
+        .with_animation(
+          ElementId::NamedInteger("modal-backdrop-fade".into(), closing as u64),
+          Animation::new(ANIM_ENTER_DURATION).with_easing(easing),
+          move |this, delta| {
+            let opacity = if closing { 1.0 - delta } else { delta };
+            this.opacity(opacity)
+          },
+        ),
+    )
+    .map(|this| match position {
+      DockPosition::Center => this.items_center().justify_center(),
+      DockPosition::Top => this.items_start().justify_center().pt_4(),
+      DockPosition::Bottom => this.items_end().justify_center().pb_4(),
+      DockPosition::Left => this.items_center().justify_start().pl_4(),
+      DockPosition::Right => this.items_center().justify_end().pr_4(),
+      DockPosition::TopLeft => this.items_start().justify_start().pt_4().pl_4(),
+      DockPosition::TopRight => this.items_start().justify_end().pt_4().pr_4(),
+      DockPosition::BottomLeft => this.items_end().justify_start().pb_4().pl_4(),
+      DockPosition::BottomRight => this.items_end().justify_end().pb_4().pr_4(),
+    })
+    .child(
+      div()
+        .id("modal-content")
+        .occlude()
+        .w(px(400.))
+        .h(px(300.))
+        .bg(rgb(0x1D1D1D))
+        .border_1()
+        .border_color(rgba(0xFFFFFF15))
+        .rounded_lg()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .child(picker_input(picker))
+        .child(picker_results(picker).flex_grow().min_h_0())
+        .with_animation(
+          ElementId::NamedInteger("modal-slide".into(), closing as u64),
+          Animation::new(ANIM_ENTER_DURATION).with_easing(easing),
+          move |this, delta| {
+            let progress = if closing { delta } else { 1.0 - delta };
+            let opacity = if closing { 1.0 - delta } else { delta };
+            this.mt(px(slide_distance * progress)).opacity(opacity)
+          },
+        ),
+    )
+    .into_any_element()
+}
+
+fn render_dropdown_picker(picker: &Entity<Picker<DummyDelegate>>) -> gpui::AnyElement {
+  div()
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .child(render_backdrop())
+    .child(
+      div()
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .px(px(40.))
+        .child(
+          div()
+            .h(px(300.))
+            .bg(rgba(0x171717F0))
+            .border_1()
+            .border_color(rgba(0xFFFFFF15))
+            .rounded_b_lg()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(picker_input(picker))
+            .child(picker_results(picker).flex_grow().min_h_0()),
+        ),
+    )
+    .into_any_element()
+}
+
+const ANIM_ENTER_DURATION: Duration = Duration::from_millis(150);
+const ANIM_EXIT_DURATION: Duration = Duration::from_millis(100);
+
+fn render_drawer_picker(picker: &Entity<Picker<DummyDelegate>>, closing: bool) -> gpui::AnyElement {
+  let drawer_height = 300.;
+  let slide_distance = 20.;
+  let easing = |delta: f32| 1.0 - (1.0 - delta).powi(3);
+
+  div()
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .child(
+      div()
+        .id("drawer-backdrop")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .rounded_xl()
+        .bg(rgba(0x00000088))
+        .with_animation(
+          ElementId::NamedInteger("drawer-backdrop-fade".into(), closing as u64),
+          Animation::new(ANIM_ENTER_DURATION).with_easing(easing),
+          move |this, delta| {
+            let opacity = if closing { 1.0 - delta } else { delta };
+            this.opacity(opacity)
+          },
+        ),
+    )
+    .child(
+      div()
+        .id("drawer-content")
+        .occlude()
+        .absolute()
+        .left_0()
+        .right_0()
+        .px(px(40.))
+        .child(
+          div()
+            .h(px(drawer_height))
+            .bg(rgba(0x171717F0))
+            .border_1()
+            .border_color(rgba(0xFFFFFF15))
+            .rounded_t_lg()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(picker_input(picker))
+            .child(picker_results(picker).flex_grow().min_h_0()),
+        )
+        .with_animation(
+          ElementId::NamedInteger("drawer-slide".into(), closing as u64),
+          Animation::new(ANIM_ENTER_DURATION).with_easing(easing),
+          move |this, delta| {
+            let progress = if closing { delta } else { 1.0 - delta };
+            let opacity = if closing { 1.0 - delta } else { delta };
+            this.bottom(px(-slide_distance * progress)).opacity(opacity)
+          },
+        ),
+    )
+    .into_any_element()
 }
 
 struct RootDelegate {
