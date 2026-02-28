@@ -25,12 +25,14 @@ use nucleo_matcher::{
 use tracing::error;
 
 use crate::{
-  audio, bluetooth, clipboard, llm,
+  audio, bluetooth, clipboard,
   db::DB,
   icon::{Icon, IconName},
+  llm,
   matcher::MatcherPool,
   network,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
+  submenu::{SubMenu, SubMenuEvent},
   util::{ResultExt, h_flex, v_flex},
   xdg::{self, XdgIconCache, open_url},
 };
@@ -43,8 +45,103 @@ impl fend_core::Interrupt for FendInterrupt {
   }
 }
 
-actions!(launcher, [Quit, GoBack, CopyResult]);
+actions!(
+  launcher,
+  [Quit, GoBack, CopyResult, OpenModalBottomRight,]
+);
 const CONTEXT: &str = "launcher";
+
+#[derive(Clone)]
+struct DummyItem {
+  name: SharedString,
+  description: SharedString,
+}
+
+fn dummy_items() -> Arc<Vec<DummyItem>> {
+  Arc::new(vec![
+    DummyItem {
+      name: "Alpha".into(),
+      description: "The first item".into(),
+    },
+    DummyItem {
+      name: "Bravo".into(),
+      description: "The second item".into(),
+    },
+    DummyItem {
+      name: "Charlie".into(),
+      description: "The third item".into(),
+    },
+    DummyItem {
+      name: "Delta".into(),
+      description: "The fourth item".into(),
+    },
+    DummyItem {
+      name: "Echo".into(),
+      description: "The fifth item".into(),
+    },
+  ])
+}
+
+struct DummyDelegate;
+
+impl PickerDelegate for DummyDelegate {
+  type ListItem = DummyItem;
+
+  fn render_list_item(
+    &self,
+    _window: &mut Window,
+    _cx: &mut Context<Picker<Self>>,
+    item: &Self::ListItem,
+    is_selected: bool,
+  ) -> impl IntoElement {
+    h_flex()
+      .w_full()
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
+      .gap_3()
+      .child(
+        v_flex().child(item.name.clone()).child(
+          div()
+            .text_sm()
+            .text_color(rgb(0x666666))
+            .child(item.description.clone()),
+        ),
+      )
+  }
+
+  fn update_matches(
+    &mut self,
+    window: &mut Window,
+    cx: &mut Context<Picker<Self>>,
+    query: String,
+    _cancel_flag: Arc<AtomicBool>,
+    search_id: usize,
+    items: Arc<Vec<Self::ListItem>>,
+  ) -> Task<()> {
+    let matches: Vec<(usize, u32)> = if query.is_empty() {
+      (0..items.len()).map(|i| (i, 0)).collect()
+    } else {
+      let lower_query = query.to_lowercase();
+      items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+          item.name.to_lowercase().contains(&lower_query)
+            || item.description.to_lowercase().contains(&lower_query)
+        })
+        .map(|(i, _)| (i, 1))
+        .collect()
+    };
+
+    cx.defer_in(window, move |picker, _window, cx| {
+      picker.complete_search(cx, search_id, Some(matches));
+    });
+
+    Task::ready(())
+  }
+}
 
 struct ColorResult {
   copy_text: SharedString,
@@ -62,6 +159,7 @@ pub struct Launcher {
   fend_result: Option<SharedString>,
   fend_cancel_flag: Arc<AtomicBool>,
   fend_task: Option<Task<()>>,
+  secondary_submenu: Option<Entity<SubMenu<DummyDelegate>>>,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -99,6 +197,7 @@ impl Launcher {
       KeyBinding::new("escape", Quit, Some(CONTEXT)),
       KeyBinding::new("shift-escape", GoBack, Some(CONTEXT)),
       KeyBinding::new("ctrl-enter", CopyResult, Some(CONTEXT)),
+      KeyBinding::new("ctrl-0", OpenModalBottomRight, Some(CONTEXT)),
     ]);
 
     let launches = Arc::new(DB.get_launches());
@@ -173,6 +272,7 @@ impl Launcher {
       fend_result: None,
       fend_cancel_flag: Arc::new(AtomicBool::new(false)),
       fend_task: None,
+      secondary_submenu: None,
       _subscriptions: subscriptions,
     }
   }
@@ -352,6 +452,54 @@ impl Launcher {
     }
   }
 
+  fn open_modal_bottom_right(
+    &mut self,
+    _: &OpenModalBottomRight,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    if let Some(submenu) = &self.secondary_submenu {
+      submenu.update(cx, |sub, cx| sub.dismiss(cx));
+      return;
+    }
+
+    let picker = cx.new(|cx| Picker::new(DummyDelegate, dummy_items(), window, cx));
+
+    let submenu = cx.new(|cx| {
+      SubMenu::new(picker, window, cx).header(|_window, _cx| {
+        h_flex()
+          .px_3()
+          .py_2()
+          .gap_3()
+          .items_center()
+          .bg(rgb(0x1D1D1D))
+          .border_1()
+          .border_color(rgba(0xFFFFFF15))
+          .rounded_lg()
+          .child(Icon::new(IconName::Wifi).size(rems(1.5)))
+          .child(div().flex_grow().child("HomeNetwork_5GHz"))
+          .child(div().size(px(8.)).rounded_full().bg(rgb(0x22C55E)))
+          .into_any_element()
+      })
+    });
+
+    self._subscriptions.push(cx.subscribe_in(
+      &submenu,
+      window,
+      |this, _, _ev: &SubMenuEvent, window, cx| {
+        this.secondary_submenu = None;
+        let picker = this.picker.clone();
+        window.defer(cx, move |window, cx| {
+          window.focus(&picker.read(cx).search_input.focus_handle(cx), cx);
+        });
+        cx.notify();
+      },
+    ));
+
+    self.secondary_submenu = Some(submenu);
+    cx.notify();
+  }
+
   fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
     DB.record_launch(&item.id());
 
@@ -392,6 +540,8 @@ impl Focusable for Launcher {
 
 impl Render for Launcher {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let secondary_submenu = self.secondary_submenu.clone();
+
     v_flex()
       .key_context(CONTEXT)
       .track_focus(&self.focus_handle)
@@ -400,6 +550,7 @@ impl Render for Launcher {
       .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::go_back))
       .on_action(cx.listener(Self::copy_result))
+      .on_action(cx.listener(Self::open_modal_bottom_right))
       .rounded_xl()
       .size_full()
       .border_1()
@@ -456,6 +607,7 @@ impl Render for Launcher {
           })
           .child(picker_results(&self.picker))
       })
+      .when_some(secondary_submenu, |this, submenu| this.child(submenu))
   }
 }
 

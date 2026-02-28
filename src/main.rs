@@ -22,6 +22,7 @@ mod matcher;
 mod network;
 mod picker;
 mod scrollbar;
+mod submenu;
 mod tokio;
 mod util;
 mod wayland;

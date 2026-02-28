@@ -2,8 +2,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
   App, AppContext, Context, Entity, FocusHandle, Focusable, ImageSource, IntoElement, KeyBinding,
-  Render, SharedString, Styled, Subscription, Task, Window, actions, div, img, prelude::*, rgb,
-  rgba,
+  Render, Resource, SharedString, Styled, Subscription, Task, Window, actions, div, img,
+  prelude::*, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -21,6 +21,7 @@ use crate::{
   },
   matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
+  submenu::{SubMenu, SubMenuEvent},
   util::{ResultExt, h_flex, v_flex},
   xdg::XdgIconCache,
 };
@@ -130,7 +131,7 @@ impl SinkInputEntryInner {
 
 pub struct AudioStreamsPanel {
   picker: Entity<Picker<StreamsDelegate>>,
-  sink_picker: Option<(SinkInputId, Entity<Picker<SinkPickerDelegate>>)>,
+  sink_submenu: Option<(SinkInputId, Entity<SubMenu<SinkPickerDelegate>>)>,
   audio_state: Entity<AudioState>,
   sink_inputs: Vec<StreamEntry>,
   sinks: Vec<SinkInfo>,
@@ -141,9 +142,8 @@ pub struct AudioStreamsPanel {
 }
 
 const CONTEXT: &str = "streams";
-const SINK_PICKER_CONTEXT: &str = "streams_sink_picker";
 
-actions!(streams, [VolumeUp, VolumeDown, Mute, CloseSinkPicker]);
+actions!(streams, [VolumeUp, VolumeDown, Mute]);
 
 impl AudioStreamsPanel {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -153,7 +153,6 @@ impl AudioStreamsPanel {
       KeyBinding::new("ctrl-up", VolumeUp, Some(CONTEXT)),
       KeyBinding::new("ctrl-down", VolumeDown, Some(CONTEXT)),
       KeyBinding::new("ctrl-m", Mute, Some(CONTEXT)),
-      KeyBinding::new("escape", CloseSinkPicker, Some(SINK_PICKER_CONTEXT)),
     ]);
 
     let audio_state = AudioState::global(cx);
@@ -288,7 +287,7 @@ impl AudioStreamsPanel {
 
     Self {
       picker,
-      sink_picker: None,
+      sink_submenu: None,
       audio_state,
       sink_inputs: Vec::new(),
       sinks: Vec::new(),
@@ -308,22 +307,67 @@ impl AudioStreamsPanel {
   ) {
     let delegate = SinkPickerDelegate { current_sink_id };
 
-    let sink_picker = cx.new(|cx| {
+    let picker = cx.new(|cx| {
       let mut picker = Picker::new(delegate, Arc::new(self.sinks.clone()), window, cx);
       picker.placeholder("Search audio outputs...", cx);
       picker
     });
 
-    // Subscribe to sink picker selection
-    let subscription = cx.subscribe_in(
-      &sink_picker,
+    // Build header from stream info
+    let stream_entry = self.sink_inputs.iter().find(|e| e.id == input_id);
+    let (display_name, icon): (SharedString, Option<Resource>) =
+      stream_entry.map_or(("Unknown Stream".into(), None), |entry| {
+        let inner = entry.entry.read(cx);
+        let sink_input = &inner.sink_input;
+        let app_name = sink_input.application_name.clone();
+        let media_name = sink_input.name.clone();
+        let display_name = match (app_name.as_ref(), media_name) {
+          (Some(app), Some(media)) => format!("{} \u{2022} {}", app, media).into(),
+          (Some(app), None) => app.clone(),
+          (None, Some(media)) => media,
+          (None, None) => "Unknown Stream".into(),
+        };
+        let icon_cache = XdgIconCache::global(cx);
+        let icon = app_name
+          .as_ref()
+          .and_then(|name| icon_cache.read(cx).get(&name.to_lowercase()).cloned());
+        (display_name, icon)
+      });
+
+    let submenu = cx.new(|cx| {
+      SubMenu::new(picker, window, cx).header(move |_window, _cx| {
+        h_flex()
+          .px_3()
+          .py_2()
+          .gap_3()
+          .items_center()
+          .overflow_x_hidden()
+          .bg(rgb(0x1D1D1D))
+          .border_1()
+          .border_color(rgba(0xFFFFFF15))
+          .rounded_lg()
+          .when_some(icon.clone(), |this, icon| {
+            this.child(img(ImageSource::Resource(icon)).size_5())
+          })
+          .child(
+            div()
+              .flex_1()
+              .text_ellipsis()
+              .overflow_x_hidden()
+              .child(display_name.clone()),
+          )
+          .into_any_element()
+      })
+    });
+
+    self._subscriptions.push(cx.subscribe_in(
+      &submenu,
       window,
-      move |this, _picker, ev, window, cx| {
+      move |this, _submenu, ev: &PickerEvent<SinkPickerDelegate>, _window, cx| {
         if let PickerEvent::Picked(sink) = ev {
           let sink_id = sink.id;
           this.audio_state.read(cx).move_sink_input(input_id, sink_id);
 
-          // Update the entry's sink description
           if let Some(stream_entry) = this.sink_inputs.iter().find(|e| e.id == input_id) {
             stream_entry.entry.update(cx, |inner, cx| {
               inner.sink_input.sink_id = sink_id;
@@ -331,21 +375,21 @@ impl AudioStreamsPanel {
               cx.notify();
             });
           }
-
-          this.close_sink_picker(window, cx);
         }
       },
-    );
+    ));
 
-    cx.focus_view(&sink_picker.read(cx).search_input.clone(), window);
-    self._subscriptions.push(subscription);
-    self.sink_picker = Some((input_id, sink_picker));
-  }
+    self._subscriptions.push(cx.subscribe_in(
+      &submenu,
+      window,
+      |this, _submenu, _ev: &SubMenuEvent, window, cx| {
+        this.sink_submenu = None;
+        cx.focus_view(&this.picker.read(cx).search_input.clone(), window);
+        cx.notify();
+      },
+    ));
 
-  fn close_sink_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.sink_picker = None;
-    cx.focus_view(&self.picker.read(cx).search_input.clone(), window);
-    cx.notify();
+    self.sink_submenu = Some((input_id, submenu));
   }
 
   fn get_selected_id(&self, cx: &mut Context<Self>) -> Option<SinkInputId> {
@@ -389,20 +433,12 @@ impl AudioStreamsPanel {
       .set_sink_input_mute(selected_id, SetMute::Toggle)
   }
 
-  fn close_sink_picker_action(
-    &mut self,
-    _: &CloseSinkPicker,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
-    self.close_sink_picker(window, cx);
-  }
 }
 
 impl Focusable for AudioStreamsPanel {
   fn focus_handle(&self, cx: &App) -> FocusHandle {
-    if let Some((_, sink_picker)) = &self.sink_picker {
-      sink_picker.read(cx).focus_handle(cx)
+    if let Some((_, submenu)) = &self.sink_submenu {
+      submenu.read(cx).focus_handle(cx)
     } else {
       self.picker.read(cx).focus_handle(cx)
     }
@@ -411,27 +447,17 @@ impl Focusable for AudioStreamsPanel {
 
 impl Render for AudioStreamsPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let sink_submenu = self.sink_submenu.as_ref().map(|(_, s)| s.clone());
+
     v_flex()
       .key_context(CONTEXT)
       .size_full()
       .on_action(cx.listener(Self::volume_up))
       .on_action(cx.listener(Self::volume_down))
       .on_action(cx.listener(Self::mute))
-      .on_action(cx.listener(Self::close_sink_picker_action))
-      .child(if let Some((_, sink_picker)) = &self.sink_picker {
-        v_flex()
-          .key_context(SINK_PICKER_CONTEXT)
-          .size_full()
-          .child(picker_input(sink_picker))
-          .child(picker_results(sink_picker))
-          .into_any_element()
-      } else {
-        v_flex()
-          .size_full()
-          .child(picker_input(&self.picker))
-          .child(picker_results(&self.picker))
-          .into_any_element()
-      })
+      .child(picker_input(&self.picker))
+      .child(picker_results(&self.picker))
+      .when_some(sink_submenu, |this, submenu| this.child(submenu))
   }
 }
 
@@ -575,13 +601,13 @@ impl PickerDelegate for SinkPickerDelegate {
       .py_2()
       .rounded_md()
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
+      .when(is_current, |this| this.opacity(0.5))
       .gap_2()
       .child(
         h_flex()
           .flex_1()
           .text_ellipsis()
           .overflow_x_hidden()
-          .when(is_current, |div| div.child("* "))
           .child(
             item
               .description
