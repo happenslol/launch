@@ -1,11 +1,14 @@
 mod api;
 
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, time::Duration};
 
+use anyhow::anyhow;
 use futures::{Stream, StreamExt, stream::FuturesUnordered, try_join};
-use gpui::SharedString;
+use gpui::{BackgroundExecutor, SharedString};
 use zbus::Result;
 use zvariant::{ObjectPath, OwnedObjectPath};
+
+const CONNECTION_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +127,55 @@ impl NetworkManager {
         &ObjectPath::try_from(ap_path.as_str())?,
       )
       .await
+  }
+
+  /// Waits for an active connection to reach the Activated or Deactivated state.
+  /// Returns `Ok(())` on activation, or an error on deactivation/timeout.
+  pub async fn wait_for_connection_active(
+    &self,
+    active_connection_path: &OwnedObjectPath,
+    executor: &BackgroundExecutor,
+  ) -> anyhow::Result<()> {
+    let active_proxy = api::ActiveProxy::builder(&self.conn)
+      .path(active_connection_path.as_str())?
+      .build()
+      .await?;
+
+    let current_state = active_proxy.state().await?;
+    // 2 = Activated
+    if current_state == 2 {
+      return Ok(());
+    }
+    // 4 = Deactivated
+    if current_state == 4 {
+      return Err(anyhow!("Connection failed"));
+    }
+
+    let mut state_stream = active_proxy.receive_state_changed_signal().await?;
+    let timeout = executor.timer(CONNECTION_ACTIVATION_TIMEOUT);
+    futures::pin_mut!(timeout);
+
+    loop {
+      let next_signal = state_stream.next();
+      futures::pin_mut!(next_signal);
+
+      match futures::future::select(next_signal, &mut timeout).await {
+        futures::future::Either::Left((Some(signal), _)) => {
+          let args = signal.args()?;
+          match args.state {
+            2 => return Ok(()),
+            4 => return Err(anyhow!("Connection failed")),
+            _ => continue,
+          }
+        }
+        futures::future::Either::Left((None, _)) => {
+          return Err(anyhow!("Connection state stream ended unexpectedly"));
+        }
+        futures::future::Either::Right(_) => {
+          return Err(anyhow!("Connection activation timed out"));
+        }
+      }
+    }
   }
 
   pub async fn delete_connection(&self, connection_path: &OwnedObjectPath) -> Result<()> {

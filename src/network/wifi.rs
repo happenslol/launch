@@ -1074,11 +1074,14 @@ impl WifiPanel {
       let entry = entry.clone();
       let ssid = access_point.ssid.clone();
       async move |_this, cx| {
+        let executor = cx.background_executor().clone();
         let ap_path = access_point.path.clone();
         let device_path = device.device_path().clone();
         let result = cx
           .background_spawn(async move {
-            nm.activate_connection(&conn_path, &device_path, &ap_path)
+            let active_path =
+              nm.activate_connection(&conn_path, &device_path, &ap_path).await?;
+            nm.wait_for_connection_active(&active_path, &executor)
               .await?;
             Ok::<(), anyhow::Error>(())
           })
@@ -1133,11 +1136,14 @@ impl WifiPanel {
       let entry = entry.clone();
       let ssid = access_point.ssid.clone();
       async move |this, cx| {
+        let executor = cx.background_executor().clone();
         let ap_path = access_point.path.clone();
         let device_path = device.device_path().clone();
         let result = cx
           .background_spawn(async move {
-            nm.add_and_activate_connection(&device_path, &ap_path)
+            let (_connection_path, active_path) =
+              nm.add_and_activate_connection(&device_path, &ap_path).await?;
+            nm.wait_for_connection_active(&active_path, &executor)
               .await?;
             Ok::<(), anyhow::Error>(())
           })
@@ -1207,12 +1213,20 @@ impl WifiPanel {
     cx.spawn_in(window, {
       let entry = entry.clone();
       async move |this, cx| {
+        let executor = cx.background_executor().clone();
         let device_path = device.device_path().clone();
         let result = cx
           .background_spawn(async move {
-            nm.add_and_activate_connection_with_password(&device_path, &ap_path, &password)
+            let (connection_path, active_path) = nm
+              .add_and_activate_connection_with_password(&device_path, &ap_path, &password)
               .await?;
-            Ok::<(), anyhow::Error>(())
+            match nm.wait_for_connection_active(&active_path, &executor).await {
+              Ok(()) => Ok(()),
+              Err(error) => {
+                nm.delete_connection(&connection_path).await.log_err();
+                Err(error)
+              }
+            }
           })
           .await;
 
