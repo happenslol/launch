@@ -1,9 +1,12 @@
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+  collections::HashSet,
+  sync::{Arc, atomic::AtomicBool},
+};
 
 use gpui::{
-  App, AppContext, Context, Entity, FocusHandle, Focusable, ImageSource, IntoElement, KeyBinding,
-  Render, Resource, SharedString, Styled, Subscription, Task, Window, actions, div, img,
-  prelude::*, rgb, rgba,
+  App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, ImageSource, IntoElement,
+  KeyBinding, Render, Resource, SharedString, Styled, Subscription, Task, Transformation, Window,
+  actions, div, img, point, prelude::*, px, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -19,6 +22,7 @@ use crate::{
       SinkListEvent,
     },
   },
+  icon::{Icon, IconName},
   matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   submenu::{SubMenu, SubMenuEvent},
@@ -26,7 +30,7 @@ use crate::{
   xdg::XdgIconCache,
 };
 
-use super::VolumeBar;
+use super::{VolumeBar, sinks::SinkFavoritesDb};
 
 #[derive(Clone)]
 pub struct StreamEntry {
@@ -305,10 +309,23 @@ impl AudioStreamsPanel {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    let delegate = SinkPickerDelegate { current_sink_id };
+    let sinks: Vec<SinkInfo> = self
+      .sinks
+      .iter()
+      .filter(|s| s.port_available != Some(false))
+      .cloned()
+      .collect();
+
+    let favorites = SinkFavoritesDb::get_favorites();
+    let default_sink_id = self.audio_state.read(cx).default_sink;
+    let delegate = SinkPickerDelegate {
+      current_sink_id,
+      default_sink_id,
+      favorites,
+    };
 
     let picker = cx.new(|cx| {
-      let mut picker = Picker::new(delegate, Arc::new(self.sinks.clone()), window, cx);
+      let mut picker = Picker::new(delegate, Arc::new(sinks), window, cx);
       picker.placeholder("Search audio outputs...", cx);
       picker
     });
@@ -455,7 +472,7 @@ impl Render for AudioStreamsPanel {
       .on_action(cx.listener(Self::volume_up))
       .on_action(cx.listener(Self::volume_down))
       .on_action(cx.listener(Self::mute))
-      .child(picker_input(&self.picker))
+      .child(picker_input(&self.picker).show_back_button(true))
       .child(picker_results(&self.picker))
       .when_some(sink_submenu, |this, submenu| this.child(submenu))
   }
@@ -512,30 +529,42 @@ impl PickerDelegate for StreamsDelegate {
       .child(
         h_flex()
           .w_full()
-          .gap_2()
+          .items_center()
+          .pl_1()
+          .gap_3()
+          .when_some(icon, |this, icon| {
+            this.child(img(ImageSource::Resource(icon.clone())).size_5())
+          })
+          .when_none(&icon, |this| this.child(div().size_5()))
           .child(
-            h_flex()
+            v_flex()
               .flex_1()
-              .gap_2()
-              .items_center()
-              .when_some(icon, |this, icon| {
-                this.child(img(ImageSource::Resource(icon.clone())).size_5())
-              })
-              .when_none(&icon, |this| this.child(div().size_5()))
+              .min_w_0()
               .child(
-                h_flex()
-                  .flex_1()
+                div()
                   .text_ellipsis()
                   .overflow_x_hidden()
-                  .when(sink_input.mute, |div| div.child("MUTE "))
+                  .when(sink_input.mute, |div| div.opacity(0.5))
                   .child(display_name),
-              ),
+              )
+              .when_some(sink_description, |this, desc| {
+                this.child(div().text_sm().text_color(rgb(0x888888)).child(desc))
+              }),
           )
-          .child(div().child(format!("{}%", volume_percent))),
+          .child(
+            div()
+              .text_xs()
+              .text_color(rgb(0x888888))
+              .when(sink_input.mute, |div| {
+                div.text_color(rgb(0x666666)).font_weight(FontWeight::BOLD)
+              })
+              .child(if sink_input.mute {
+                "MUTE".to_string()
+              } else {
+                format!("{}%", volume_percent)
+              }),
+          ),
       )
-      .when_some(sink_description, |this, desc| {
-        this.child(div().text_sm().text_color(rgb(0x888888)).child(desc))
-      })
   }
 
   fn update_matches(
@@ -581,6 +610,8 @@ impl PickerDelegate for StreamsDelegate {
 // Delegate for the sink picker used when reassigning a stream
 struct SinkPickerDelegate {
   current_sink_id: SinkId,
+  default_sink_id: Option<SinkId>,
+  favorites: HashSet<String>,
 }
 
 impl PickerDelegate for SinkPickerDelegate {
@@ -594,6 +625,12 @@ impl PickerDelegate for SinkPickerDelegate {
     is_selected: bool,
   ) -> impl IntoElement {
     let is_current = item.id == self.current_sink_id;
+    let is_default = self.default_sink_id == Some(item.id);
+    let is_favorite = item
+      .name
+      .as_ref()
+      .map(|n| self.favorites.contains(n.as_ref()))
+      .unwrap_or(false);
 
     h_flex()
       .w_full()
@@ -603,9 +640,19 @@ impl PickerDelegate for SinkPickerDelegate {
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .when(is_current, |this| this.opacity(0.5))
       .gap_2()
+      .overflow_x_hidden()
+      .when(is_favorite, |this| {
+        this.child(
+          Icon::new(IconName::StarFilled)
+            .size(rems(0.85))
+            .transform(Transformation::translate(point(px(0.), px(-0.75))))
+            .text_color(rgb(0xD4A017)),
+        )
+      })
       .child(
-        h_flex()
+        div()
           .flex_1()
+          .min_w_0()
           .text_ellipsis()
           .overflow_x_hidden()
           .child(
@@ -615,6 +662,24 @@ impl PickerDelegate for SinkPickerDelegate {
               .unwrap_or_else(|| item.name.clone().unwrap_or_default()),
           ),
       )
+      .when(is_default, |this| {
+        this.child(div().flex_none().size_2().rounded_full().bg(rgb(0xD4A017)))
+      })
+  }
+
+  fn sort_items(&self, _cx: &App, items: &[Self::ListItem], matches: &mut [(usize, u32)]) {
+    matches.sort_by_key(|(index, score)| {
+      let sink = &items[*index];
+      let is_current = sink.id == self.current_sink_id;
+      let is_favorite = !is_current
+        && sink
+          .name
+          .as_ref()
+          .map(|n| self.favorites.contains(n.as_ref()))
+          .unwrap_or(false);
+      let description = sink.description.clone().unwrap_or_default();
+      (std::cmp::Reverse(*score), is_current, !is_favorite, description)
+    });
   }
 
   fn update_matches(

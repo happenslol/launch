@@ -26,7 +26,7 @@ use crate::{
   util::{ResultExt, h_flex, v_flex},
 };
 
-struct SinkFavoritesDb;
+pub(crate) struct SinkFavoritesDb;
 
 impl SinkFavoritesDb {
   fn ensure_table() {
@@ -58,7 +58,7 @@ impl SinkFavoritesDb {
     }
   }
 
-  fn get_favorites() -> HashSet<String> {
+  pub(crate) fn get_favorites() -> HashSet<String> {
     let conn = DB.lock();
     let Ok(mut stmt) = conn.prepare_cached("SELECT sink_name FROM sink_favorites") else {
       return HashSet::new();
