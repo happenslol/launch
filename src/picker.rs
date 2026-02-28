@@ -103,6 +103,7 @@ pub struct Picker<D: PickerDelegate> {
 
 pub enum PickerEvent<D: PickerDelegate> {
   Picked(D::ListItem),
+  SecondaryPicked(D::ListItem),
   QueryChanged(String),
 }
 
@@ -150,7 +151,7 @@ impl<D: PickerDelegate> Picker<D> {
       &search_input,
       window,
       move |this, search_input, ev, window, cx| match *ev {
-        InputEvent::PressEnter { .. } => this.launch_selected(cx),
+        InputEvent::PressEnter { secondary } => this.launch_selected(secondary, cx),
         InputEvent::Change => {
           let new_value = &search_input.read(cx).value();
           if &this.current_query == new_value {
@@ -248,7 +249,7 @@ impl<D: PickerDelegate> Picker<D> {
     Some(removed)
   }
 
-  fn launch_selected(&mut self, cx: &mut Context<Self>) {
+  fn launch_selected(&mut self, secondary: bool, cx: &mut Context<Self>) {
     let Some(ix) = self.selected_index else {
       return;
     };
@@ -260,7 +261,11 @@ impl<D: PickerDelegate> Picker<D> {
       return;
     };
 
-    cx.emit(PickerEvent::Picked(item.clone()));
+    if secondary {
+      cx.emit(PickerEvent::SecondaryPicked(item.clone()));
+    } else {
+      cx.emit(PickerEvent::Picked(item.clone()));
+    }
   }
 
   fn update_matches(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use gpui::{
   Animation, AnimationExt, AnyElement, App, Context, ElementId, Entity, EventEmitter, FocusHandle,
-  Focusable, IntoElement, KeyBinding, Render, Subscription, Task, Window, actions, div, prelude::*,
-  px, rgb, rgba,
+  Focusable, IntoElement, KeyBinding, Pixels, Render, Subscription, Task, Window, actions, div,
+  prelude::*, px, rgb, rgba,
 };
 
 use crate::{
@@ -23,9 +23,12 @@ pub enum SubMenuEvent {
 
 type HeaderFn = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
+const DEFAULT_HEIGHT: Pixels = px(300.);
+
 pub struct SubMenu<D: PickerDelegate> {
   picker: Entity<Picker<D>>,
   header: Option<HeaderFn>,
+  height: Pixels,
   closing: bool,
   dismiss_task: Option<Task<()>>,
   _picker_subscription: Subscription,
@@ -55,10 +58,16 @@ impl<D: PickerDelegate> SubMenu<D> {
     Self {
       picker,
       header: None,
+      height: DEFAULT_HEIGHT,
       closing: false,
       dismiss_task: None,
       _picker_subscription: picker_subscription,
     }
+  }
+
+  pub fn height(mut self, height: Pixels) -> Self {
+    self.height = height;
+    self
   }
 
   pub fn header(
@@ -112,6 +121,7 @@ impl<D: PickerDelegate> Render for SubMenu<D> {
     let easing = |delta: f32| 1.0 - (1.0 - delta).powi(3);
 
     let header_element = self.header.as_ref().map(|f| f(window, cx));
+    let height = self.height;
 
     div()
       .absolute()
@@ -155,7 +165,7 @@ impl<D: PickerDelegate> Render for SubMenu<D> {
           .when_some(header_element, |this, header| this.child(header))
           .child(
             div()
-              .h(px(300.))
+              .h(height)
               .bg(rgb(0x1D1D1D))
               .border_1()
               .border_color(rgba(0xFFFFFF15))

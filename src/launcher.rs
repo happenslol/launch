@@ -257,6 +257,7 @@ impl Launcher {
       window,
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
         PickerEvent::Picked(item) => this.launch(item.clone(), window, cx),
+        PickerEvent::SecondaryPicked(_) => {}
         PickerEvent::QueryChanged(query) => {
           this.update_inline_results(query.clone(), window, cx);
         }

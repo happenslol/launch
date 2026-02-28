@@ -25,6 +25,7 @@ use crate::{
   },
   matcher::MatcherPool,
   picker::{Category, Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
+  submenu::{SubMenu, SubMenuEvent},
   util::{ResultExt, v_flex},
 };
 
@@ -107,6 +108,81 @@ impl Render for PasswordPopup {
 }
 
 impl gpui::EventEmitter<PasswordPopupEvent> for PasswordPopup {}
+
+#[derive(Clone)]
+struct WifiAction {
+  id: &'static str,
+  label: SharedString,
+  icon: IconName,
+  search_string: String,
+}
+
+struct WifiActionDelegate;
+
+impl PickerDelegate for WifiActionDelegate {
+  type ListItem = WifiAction;
+
+  fn render_list_item(
+    &self,
+    _window: &mut Window,
+    _cx: &mut Context<Picker<Self>>,
+    item: &Self::ListItem,
+    is_selected: bool,
+  ) -> impl IntoElement {
+    div()
+      .w_full()
+      .px_2()
+      .py_2()
+      .rounded_md()
+      .flex()
+      .flex_row()
+      .items_center()
+      .gap_2()
+      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
+      .child(Icon::new(item.icon).size(rems(1.0)).text_color(rgb(0x888888)))
+      .child(item.label.clone())
+  }
+
+  fn update_matches(
+    &mut self,
+    window: &mut Window,
+    cx: &mut Context<Picker<Self>>,
+    query: String,
+    _cancel_flag: Arc<AtomicBool>,
+    search_id: usize,
+    items: Arc<Vec<Self::ListItem>>,
+  ) -> Task<()> {
+    if query.is_empty() {
+      cx.defer_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, None);
+      });
+
+      return Task::ready(());
+    }
+
+    let matchers = MatcherPool::global(cx);
+    cx.spawn_in(window, async move |cx, window| {
+      let mut matcher = matchers.get().await.log_err();
+      let Some(ref mut matcher) = matcher else { return };
+      let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+      let mut matches = Vec::new();
+      let mut buf = Vec::new();
+
+      for (index, item) in items.iter().enumerate() {
+        if let Some(score) =
+          needle.score(Utf32Str::new(&item.search_string, &mut buf), matcher)
+        {
+          matches.push((index, score));
+        }
+      }
+
+      cx.update_in(window, move |picker, _window, cx| {
+        picker.complete_search(cx, search_id, Some(matches));
+      })
+      .log_err();
+    })
+  }
+}
 
 #[derive(Clone)]
 pub struct WifiEntry {
@@ -251,6 +327,7 @@ pub struct WifiPanel {
   entries: Vec<WifiEntry>,
   is_scanning: bool,
   password_popup: Option<(Entity<PasswordPopup>, Entity<WifiEntryInner>)>,
+  action_submenu: Option<(Entity<SubMenu<WifiActionDelegate>>, WifiEntry)>,
   _scan_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
@@ -271,26 +348,32 @@ impl WifiPanel {
 
     let subscriptions = vec![
       cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
-        if let PickerEvent::Picked(wifi_entry) = ev {
-          let (access_point, is_connected, is_known, connection_path) = {
-            let entry = wifi_entry.entry.read(cx);
-            (
-              entry.access_point.clone(),
-              entry.is_connected,
-              entry.is_known,
-              entry.connection_path.clone(),
-            )
-          };
+        match ev {
+          PickerEvent::Picked(wifi_entry) => {
+            let (access_point, is_connected, is_known, connection_path) = {
+              let entry = wifi_entry.entry.read(cx);
+              (
+                entry.access_point.clone(),
+                entry.is_connected,
+                entry.is_known,
+                entry.connection_path.clone(),
+              )
+            };
 
-          if is_connected {
-            this.disconnect(&wifi_entry.entry, window, cx);
-          } else if is_known {
-            this.connect_known(&wifi_entry.entry, access_point, connection_path, cx);
-          } else if access_point.security.is_secured() {
-            this.show_password_popup(&wifi_entry.entry, &access_point, window, cx);
-          } else {
-            this.connect_open(&wifi_entry.entry, access_point, window, cx);
+            if is_connected {
+              this.disconnect(&wifi_entry.entry, window, cx);
+            } else if is_known {
+              this.connect_known(&wifi_entry.entry, access_point, connection_path, cx);
+            } else if access_point.security.is_secured() {
+              this.show_password_popup(&wifi_entry.entry, &access_point, window, cx);
+            } else {
+              this.connect_open(&wifi_entry.entry, access_point, window, cx);
+            }
           }
+          PickerEvent::SecondaryPicked(wifi_entry) => {
+            this.open_action_submenu(wifi_entry.clone(), window, cx);
+          }
+          _ => {}
         }
       }),
       cx.observe_global_in::<GlobalDbusConnection>(window, |this, window, cx| {
@@ -311,6 +394,7 @@ impl WifiPanel {
       entries: Vec::new(),
       is_scanning: false,
       password_popup: None,
+      action_submenu: None,
       _scan_task: None,
       _subscriptions: subscriptions,
     };
@@ -672,6 +756,142 @@ impl WifiPanel {
     window.focus(&input_focus, cx);
   }
 
+  fn open_action_submenu(
+    &mut self,
+    wifi_entry: WifiEntry,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let (is_connected, is_known, ssid) = {
+      let entry_inner = wifi_entry.entry.read(cx);
+      (
+        entry_inner.is_connected,
+        entry_inner.is_known,
+        entry_inner.access_point.ssid.clone(),
+      )
+    };
+
+    let mut actions = Vec::new();
+
+    actions.push(WifiAction {
+      id: "connect",
+      label: if is_connected {
+        "Disconnect".into()
+      } else {
+        "Connect".into()
+      },
+      icon: if is_connected {
+        IconName::PlugOff
+      } else {
+        IconName::PlugConnected
+      },
+      search_string: if is_connected {
+        "disconnect".into()
+      } else {
+        "connect".into()
+      },
+    });
+
+    if is_known {
+      actions.push(WifiAction {
+        id: "forget",
+        label: "Forget Network".into(),
+        icon: IconName::Trash,
+        search_string: "forget network".into(),
+      });
+    }
+
+    let picker = cx.new(|cx| {
+      Picker::new(WifiActionDelegate, Arc::new(actions), window, cx)
+    });
+
+    let submenu = cx.new(|cx| {
+      SubMenu::new(picker, window, cx).height(px(154.)).header(move |_window, _cx| {
+        div()
+          .flex()
+          .flex_row()
+          .items_center()
+          .gap_3()
+          .px_3()
+          .py_2()
+          .overflow_x_hidden()
+          .bg(rgb(0x1D1D1D))
+          .border_1()
+          .border_color(rgba(0xFFFFFF15))
+          .rounded_lg()
+          .child(Icon::new(IconName::Wifi).size(rems(1.0)).text_color(rgb(0x888888)))
+          .child(
+            div()
+              .flex_1()
+              .text_ellipsis()
+              .overflow_x_hidden()
+              .child(ssid.clone()),
+          )
+          .into_any_element()
+      })
+    });
+
+    let wifi_entry_clone = wifi_entry.clone();
+    self._subscriptions.push(cx.subscribe_in(
+      &submenu,
+      window,
+      move |this, _submenu, ev: &PickerEvent<WifiActionDelegate>, window, cx| {
+        if let PickerEvent::Picked(action) = ev {
+          match action.id {
+            "connect" => {
+              let (access_point, is_connected, is_known, connection_path) = {
+                let entry = wifi_entry_clone.entry.read(cx);
+                (
+                  entry.access_point.clone(),
+                  entry.is_connected,
+                  entry.is_known,
+                  entry.connection_path.clone(),
+                )
+              };
+
+              if is_connected {
+                this.disconnect(&wifi_entry_clone.entry, window, cx);
+              } else if is_known {
+                this.connect_known(
+                  &wifi_entry_clone.entry,
+                  access_point,
+                  connection_path,
+                  cx,
+                );
+              } else if access_point.security.is_secured() {
+                this.show_password_popup(
+                  &wifi_entry_clone.entry,
+                  &access_point,
+                  window,
+                  cx,
+                );
+              } else {
+                this.connect_open(&wifi_entry_clone.entry, access_point, window, cx);
+              }
+            }
+            "forget" => {
+              this.forget_selected_entry(&wifi_entry_clone, window, cx);
+            }
+            _ => {}
+          }
+        }
+      },
+    ));
+
+    self._subscriptions.push(cx.subscribe_in(
+      &submenu,
+      window,
+      |this, _submenu, _ev: &SubMenuEvent, window, cx| {
+        this.action_submenu = None;
+        cx.focus_view(&this.picker.read(cx).search_input.clone(), window);
+        cx.notify();
+      },
+    ));
+
+    self.action_submenu = Some((submenu, wifi_entry));
+    cx.notify();
+  }
+
   fn disconnect(
     &mut self,
     entry: &Entity<WifiEntryInner>,
@@ -727,6 +947,15 @@ impl WifiPanel {
       return;
     };
 
+    self.forget_selected_entry(&selected, window, cx);
+  }
+
+  fn forget_selected_entry(
+    &mut self,
+    selected: &WifiEntry,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
     if !selected.is_known {
       return;
     }
@@ -747,6 +976,7 @@ impl WifiPanel {
     tracing::info!(%ssid, "Forgetting wifi network");
 
     let entry = selected.entry.clone();
+    let selected_id = selected.id.clone();
     let picker = self.picker.clone();
 
     cx.spawn_in(window, {
@@ -770,7 +1000,7 @@ impl WifiPanel {
                 cx.notify();
               });
               for wifi_entry in &mut this.entries {
-                if wifi_entry.id == selected.id {
+                if wifi_entry.id == selected_id {
                   wifi_entry.is_known = false;
                 }
               }
@@ -995,13 +1225,18 @@ impl WifiPanel {
 
 impl Focusable for WifiPanel {
   fn focus_handle(&self, cx: &App) -> FocusHandle {
-    self.picker.read(cx).focus_handle(cx)
+    if let Some((submenu, _)) = &self.action_submenu {
+      submenu.read(cx).focus_handle(cx)
+    } else {
+      self.picker.read(cx).focus_handle(cx)
+    }
   }
 }
 
 impl Render for WifiPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let password_popup = self.password_popup.as_ref().map(|(popup, _)| popup.clone());
+    let action_submenu = self.action_submenu.as_ref().map(|(submenu, _)| submenu.clone());
     let dismiss_backdrop = cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
       this.password_popup = None;
       let search_input = this.picker.read(cx).search_input.clone();
@@ -1046,6 +1281,7 @@ impl Render for WifiPanel {
             .child(div().occlude().child(popup)),
         )
       })
+      .when_some(action_submenu, |this, submenu| this.child(submenu))
   }
 }
 
