@@ -5,14 +5,16 @@ use std::{
     Arc,
     atomic::{AtomicBool, Ordering},
   },
+  time::Duration,
 };
 
 use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
-  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString,
-  Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
+  Animation, AnimationExt, AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource,
+  KeyBinding, SharedString, Size, Subscription, Task, Window, WindowBounds, WindowKind,
+  WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -609,6 +611,12 @@ impl Render for Launcher {
           .child(picker_results(&self.picker))
       })
       .when_some(secondary_submenu, |this, submenu| this.child(submenu))
+      .with_animation(
+        "launcher-fade-in",
+        Animation::new(Duration::from_millis(80))
+          .with_easing(|t| 1.0 - (1.0 - t) * (1.0 - t)),
+        |this, delta| this.opacity(delta),
+      )
   }
 }
 

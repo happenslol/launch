@@ -2,10 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, atomic::AtomicBool};
 
 use futures::StreamExt;
+use std::time::Duration;
+
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
-  ParentElement, SharedString, Styled, Subscription, Task, Window, actions, div, hsla, prelude::*,
-  px, relative, rems, rgb, rgba,
+  Animation, AnimationExt, App, Context, ElementId, Entity, FocusHandle, Focusable,
+  InteractiveElement, IntoElement, KeyBinding, ParentElement, SharedString, Styled, Subscription,
+  Task, Window, actions, div, hsla, prelude::*, px, relative, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -33,14 +35,19 @@ actions!(wifi, [Refresh, DismissPasswordPopup, ForgetNetwork]);
 
 const CONTEXT: &str = "wifi";
 const PASSWORD_POPUP_CONTEXT: &str = "wifi_password_popup";
+const PASSWORD_ANIM_ENTER: Duration = Duration::from_millis(150);
+const PASSWORD_ANIM_EXIT: Duration = Duration::from_millis(100);
 
 struct PasswordPopup {
   input: Entity<InputState>,
   focus_handle: FocusHandle,
+  closing: bool,
+  _dismiss_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
 
 enum PasswordPopupEvent {
+  Closing,
   Dismiss,
   Submit(SharedString),
 }
@@ -74,8 +81,30 @@ impl PasswordPopup {
     Self {
       input,
       focus_handle,
+      closing: false,
+      _dismiss_task: None,
       _subscriptions: subscriptions,
     }
+  }
+
+  fn dismiss(&mut self, cx: &mut Context<Self>) {
+    if self.closing {
+      return;
+    }
+
+    self.closing = true;
+    cx.emit(PasswordPopupEvent::Closing);
+    cx.notify();
+
+    self._dismiss_task = Some(cx.spawn(async move |this, cx| {
+      cx.background_executor().timer(PASSWORD_ANIM_EXIT).await;
+
+      this
+        .update(cx, |_this, cx| {
+          cx.emit(PasswordPopupEvent::Dismiss);
+        })
+        .log_err();
+    }));
   }
 }
 
@@ -90,11 +119,11 @@ impl Render for PasswordPopup {
     div()
       .track_focus(&self.focus_handle)
       .key_context(PASSWORD_POPUP_CONTEXT)
-      .on_action(cx.listener(|_, _: &DismissPasswordPopup, _, cx| {
-        cx.emit(PasswordPopupEvent::Dismiss);
+      .on_action(cx.listener(|this, _: &DismissPasswordPopup, _, cx| {
+        this.dismiss(cx);
       }))
-      .on_mouse_down_out(cx.listener(|_, _, _, cx| {
-        cx.emit(PasswordPopupEvent::Dismiss);
+      .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+        this.dismiss(cx);
       }))
       .w(px(300.))
       .p_2()
@@ -727,21 +756,20 @@ impl WifiPanel {
     cx.subscribe_in(
       &popup,
       window,
-      move |this, _, event: &PasswordPopupEvent, window, cx| {
-        let dismiss = |this: &mut WifiPanel, window: &mut Window, cx: &mut Context<WifiPanel>| {
-          this.password_popup = None;
-          cx.focus_view(&search_input, window);
-          cx.notify();
-        };
-
+      move |this, popup, event: &PasswordPopupEvent, window, cx| {
         match event {
+          PasswordPopupEvent::Closing => {
+            cx.focus_view(&search_input, window);
+            cx.notify();
+          }
           PasswordPopupEvent::Dismiss => {
             tracing::debug!(ssid = %access_point.ssid, "Password popup dismissed");
-            dismiss(this, window, cx);
+            this.password_popup = None;
+            cx.notify();
           }
           PasswordPopupEvent::Submit(password) => {
             this.connect_with_password(&entry_handle, &access_point, password, window, cx);
-            dismiss(this, window, cx);
+            popup.update(cx, |popup, cx| popup.dismiss(cx));
           }
         }
       },
@@ -1225,6 +1253,11 @@ impl WifiPanel {
 
 impl Focusable for WifiPanel {
   fn focus_handle(&self, cx: &App) -> FocusHandle {
+    if let Some((popup, _)) = &self.password_popup {
+      if !popup.read(cx).closing {
+        return popup.read(cx).focus_handle(cx);
+      }
+    }
     if let Some((submenu, _)) = &self.action_submenu {
       submenu.read(cx).focus_handle(cx)
     } else {
@@ -1236,12 +1269,15 @@ impl Focusable for WifiPanel {
 impl Render for WifiPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let password_popup = self.password_popup.as_ref().map(|(popup, _)| popup.clone());
+    let password_closing = self
+      .password_popup
+      .as_ref()
+      .is_some_and(|(popup, _)| popup.read(cx).closing);
     let action_submenu = self.action_submenu.as_ref().map(|(submenu, _)| submenu.clone());
-    let dismiss_backdrop = cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-      this.password_popup = None;
-      let search_input = this.picker.read(cx).search_input.clone();
-      cx.focus_view(&search_input, window);
-      cx.notify();
+    let dismiss_backdrop = cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+      if let Some((popup, _)) = &this.password_popup {
+        popup.update(cx, |popup, cx| popup.dismiss(cx));
+      }
     });
 
     v_flex()
@@ -1257,6 +1293,9 @@ impl Render for WifiPanel {
       )
       .child(picker_results(&self.picker))
       .when_some(password_popup, |this, popup| {
+        let closing = password_closing;
+        let easing = |delta: f32| 1.0 - (1.0 - delta).powi(3);
+
         this.child(
           div()
             .absolute()
@@ -1276,9 +1315,40 @@ impl Render for WifiPanel {
                 .size_full()
                 .rounded_xl()
                 .bg(rgba(0x00000088))
-                .on_click(dismiss_backdrop),
+                .on_click(dismiss_backdrop)
+                .with_animation(
+                  ElementId::NamedInteger("password-backdrop-fade".into(), closing as u64),
+                  Animation::new(if closing {
+                    PASSWORD_ANIM_EXIT
+                  } else {
+                    PASSWORD_ANIM_ENTER
+                  })
+                  .with_easing(easing),
+                  move |this, delta| {
+                    let opacity = if closing { 1.0 - delta } else { delta };
+                    this.opacity(opacity)
+                  },
+                ),
             )
-            .child(div().occlude().child(popup)),
+            .child(
+              div()
+                .id("password-popup-content")
+                .occlude()
+                .child(popup)
+                .with_animation(
+                  ElementId::NamedInteger("password-popup-fade".into(), closing as u64),
+                  Animation::new(if closing {
+                    PASSWORD_ANIM_EXIT
+                  } else {
+                    PASSWORD_ANIM_ENTER
+                  })
+                  .with_easing(easing),
+                  move |this, delta| {
+                    let opacity = if closing { 1.0 - delta } else { delta };
+                    this.opacity(opacity)
+                  },
+                ),
+            ),
         )
       })
       .when_some(action_submenu, |this, submenu| this.child(submenu))
