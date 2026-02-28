@@ -329,6 +329,15 @@ impl Launcher {
       })
       .unwrap_or((trimmed, None));
 
+    // Reject plain hex digits without a '#' prefix — require explicit hex notation
+    if color_str
+      .trim()
+      .chars()
+      .all(|c| c.is_ascii_hexdigit())
+    {
+      return None;
+    }
+
     let color = csscolorparser::parse(color_str).ok()?;
     let [h, s, l, a] = color.to_hsla();
 
