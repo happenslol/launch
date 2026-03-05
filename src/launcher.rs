@@ -761,39 +761,54 @@ impl PickerDelegate for RootDelegate {
       .rounded_md()
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .justify_between()
-      .child(h_flex().gap_3().items_center().map(|this| {
-        match item {
-          RootItem::App { entry, name } => {
-            let icon = entry.icon().and_then(|icon| icon_cache.get(icon));
+      .child(
+        h_flex()
+          .gap_3()
+          .items_center()
+          .overflow_hidden()
+          .min_w_0()
+          .map(|this| match item {
+            RootItem::App { entry, name } => {
+              let icon = entry.icon().and_then(|icon| icon_cache.get(icon));
 
-            this
-              .when_some(icon, |this, icon| {
-                this.child(img(ImageSource::Resource(icon.clone())).size(icon_size))
-              })
-              .when_none(&icon, |this| {
-                this.child(Icon::new(IconName::AppWindow).size(icon_size))
-              })
-              .child(
-                v_flex().child(name.clone()).child(
-                  div()
-                    .text_sm()
-                    .text_color(rgb(0x666666))
-                    .child(description.clone()),
-                ),
+              this
+                .when_some(icon, |this, icon| {
+                  this.child(img(ImageSource::Resource(icon.clone())).size(icon_size))
+                })
+                .when_none(&icon, |this| {
+                  this.child(Icon::new(IconName::AppWindow).size(icon_size))
+                })
+                .child(
+                  v_flex()
+                    .overflow_hidden()
+                    .min_w_0()
+                    .child(div().truncate().child(name.clone()))
+                    .child(
+                      div()
+                        .truncate()
+                        .text_sm()
+                        .text_color(rgb(0x666666))
+                        .child(description.clone()),
+                    ),
+                )
+            }
+            RootItem::Panel { name, icon, .. } | RootItem::Search { name, icon, .. } => {
+              this.child(Icon::new(*icon).size(icon_size)).child(
+                v_flex()
+                  .overflow_hidden()
+                  .min_w_0()
+                  .child(div().truncate().child(name.clone()))
+                  .child(
+                    div()
+                      .truncate()
+                      .text_sm()
+                      .text_color(rgb(0x666666))
+                      .child(description.clone()),
+                  ),
               )
-          }
-          RootItem::Panel { name, icon, .. } | RootItem::Search { name, icon, .. } => {
-            this.child(Icon::new(*icon).size(icon_size)).child(
-              v_flex().child(name.clone()).child(
-                div()
-                  .text_sm()
-                  .text_color(rgb(0x666666))
-                  .child(description.clone()),
-              ),
-            )
-          }
-        }
-      }))
+            }
+          }),
+      )
       .child(
         h_flex()
           .gap_1()
