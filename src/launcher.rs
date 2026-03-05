@@ -184,7 +184,7 @@ impl Launcher {
       kind: WindowKind::LayerShell(LayerShellOptions {
         namespace: "launch".to_string(),
         layer: Layer::Overlay,
-        anchor: Anchor::all(),
+        anchor: Anchor::empty(),
         exclusive_zone: None,
         exclusive_edge: None,
         margin: None,
