@@ -63,9 +63,8 @@ fn main() -> Result<()> {
     None => debug!("no build id"),
   }
 
-  // FIXME: The following are broken in this mode:
-  // - Copying, since we'll quit and stop offering content when the window closes.
-  // - Suspend/Reboot/Power Off, since the launcher closes before the suspend goes through.
+  // FIXME: Copying is broken in this mode, since we'll quit and stop offering content when the
+  // window closes. We could fix this by forking a thread that holds the offer until it is accepted.
   if args.no_daemon {
     run_app(args.panel, args.no_keyboard_capture, None);
     return Ok(());

@@ -26,13 +26,14 @@ pub fn get_items() -> Vec<RootItem> {
           cx,
           |window: &mut Window, cx: &mut App| {
             let conn_task = GlobalDbusConnection::system(cx);
-            cx.spawn(async move |_| {
+            let window = window.window_handle();
+            cx.spawn(async move |cx| {
               if let Some(conn) = conn_task.await {
                 Logind::reboot(&conn).await.log_err();
+                let _ = cx.update_window(window, |_, window, _| window.remove_window());
               }
             })
             .detach();
-            window.remove_window();
           },
         );
       }),
@@ -51,13 +52,14 @@ pub fn get_items() -> Vec<RootItem> {
           cx,
           |window: &mut Window, cx: &mut App| {
             let conn_task = GlobalDbusConnection::system(cx);
-            cx.spawn(async move |_| {
+            let window = window.window_handle();
+            cx.spawn(async move |cx| {
               if let Some(conn) = conn_task.await {
                 Logind::power_off(&conn).await.log_err();
+                let _ = cx.update_window(window, |_, window, _| window.remove_window());
               }
             })
             .detach();
-            window.remove_window();
           },
         );
       }),
@@ -70,13 +72,13 @@ pub fn get_items() -> Vec<RootItem> {
       terms: vec!["sleep".into(), "suspend".into()],
       action: Arc::new(|_launcher, window, cx| {
         let conn_task = GlobalDbusConnection::system(cx);
-        cx.spawn(async move |_, _cx| {
+        cx.spawn_in(window, async move |_, cx| {
           if let Some(conn) = conn_task.await {
             Logind::suspend(&conn).await.log_err();
+            let _ = cx.update(|window, _| window.remove_window());
           }
         })
         .detach();
-        window.remove_window();
       }),
     },
   ]
