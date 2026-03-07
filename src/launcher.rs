@@ -364,14 +364,13 @@ impl Launcher {
     }
   }
 
-  pub fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.action_overlay = None;
+  pub fn focus_picker(&self, window: &mut Window, cx: &mut Context<Self>) {
     let picker = self.picker.clone();
     window.defer(cx, move |window, cx| {
       window.focus(&picker.read(cx).search_input.focus_handle(cx), cx);
     });
-    cx.notify();
   }
+
 
   fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
     DB.record_launch(&item.id());
@@ -481,7 +480,7 @@ impl Render for Launcher {
           .child(picker_results(&self.picker))
       })
       .when_some(self.action_overlay.clone(), |this, overlay| {
-        this.child(render_action_overlay(overlay))
+        this.child(overlay)
       })
   }
 }
@@ -571,29 +570,6 @@ impl RootItem {
       | RootItem::Action { description, .. } => description.clone(),
     }
   }
-}
-
-fn render_action_overlay(view: AnyView) -> impl IntoElement {
-  div()
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-    .flex()
-    .items_center()
-    .justify_center()
-    .child(
-      div()
-        .id("action-overlay-backdrop")
-        .occlude()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .rounded_xl()
-        .bg(rgba(0x00000088)),
-    )
-    .child(div().occlude().child(view))
 }
 
 fn search_providers() -> Vec<RootItem> {

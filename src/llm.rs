@@ -368,22 +368,24 @@ impl LlmPanel {
     let subscription = cx.subscribe_in(
       &prompt,
       window,
-      move |this, _, event: &ConfirmationEvent, window, cx| {
-        match event {
-          ConfirmationEvent::Confirm => {
-            conversation_picker.update(cx, |picker, cx| {
-              picker.remove_selected_item(window, cx);
-            });
-            LlmDb::delete_conversation(entry.conversation_id);
+      move |this, _, event: &ConfirmationEvent, window, cx| match event {
+        ConfirmationEvent::Closing => {
+          if let Some(picker) = &this.conversation_picker {
+            cx.focus_view(&picker.read(cx).search_input.clone(), window);
           }
-          ConfirmationEvent::Dismiss => {}
         }
-
-        this.confirmation_prompt = None;
-        if let Some(picker) = &this.conversation_picker {
-          cx.focus_view(&picker.read(cx).search_input.clone(), window);
+        ConfirmationEvent::Confirm => {
+          conversation_picker.update(cx, |picker, cx| {
+            picker.remove_selected_item(window, cx);
+          });
+          LlmDb::delete_conversation(entry.conversation_id);
+          this.confirmation_prompt = None;
+          cx.notify();
         }
-        cx.notify();
+        ConfirmationEvent::Dismiss => {
+          this.confirmation_prompt = None;
+          cx.notify();
+        }
       },
     );
 

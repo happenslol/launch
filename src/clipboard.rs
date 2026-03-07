@@ -250,8 +250,11 @@ impl ClipboardPanel {
     let subscription = cx.subscribe_in(
       &prompt,
       window,
-      move |this, _, event: &ConfirmationEvent, window, cx| {
-        if let ConfirmationEvent::Confirm = event {
+      move |this, _, event: &ConfirmationEvent, window, cx| match event {
+        ConfirmationEvent::Closing => {
+          cx.focus_view(&this.picker.read(cx).search_input.clone(), window);
+        }
+        ConfirmationEvent::Confirm => {
           picker.update(cx, |picker, cx| {
             picker.remove_selected_item(window, cx);
           });
@@ -268,11 +271,14 @@ impl ClipboardPanel {
           connection
             .read(cx)
             .send_command(wayland::Command::DeleteHistoryEntry { id: item.id });
-        }
 
-        this.confirmation_prompt = None;
-        cx.focus_view(&this.picker.read(cx).search_input.clone(), window);
-        cx.notify();
+          this.confirmation_prompt = None;
+          cx.notify();
+        }
+        ConfirmationEvent::Dismiss => {
+          this.confirmation_prompt = None;
+          cx.notify();
+        }
       },
     );
 

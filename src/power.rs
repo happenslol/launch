@@ -96,11 +96,17 @@ fn show_confirmation(
     &prompt,
     window,
     move |launcher, _, event: &ConfirmationEvent, window, cx| match event {
+      ConfirmationEvent::Closing => {
+        launcher.focus_picker(window, cx);
+      }
       ConfirmationEvent::Dismiss => {
-        launcher.dismiss_overlay(window, cx);
+        launcher.action_overlay = None;
+        cx.notify();
       }
       ConfirmationEvent::Confirm => {
+        launcher.action_overlay = None;
         on_confirm(window, cx);
+        cx.notify();
       }
     },
   );
