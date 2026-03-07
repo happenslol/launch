@@ -379,8 +379,10 @@ impl WifiPanel {
       picker
     });
 
-    let subscriptions = vec![
-      cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| match ev {
+    let subscriptions = vec![cx.subscribe_in(
+      &picker,
+      window,
+      |this, _picker, ev, window, cx| match ev {
         PickerEvent::Picked(wifi_entry) => {
           let (access_point, is_connected, is_known, connection_path) = {
             let entry = wifi_entry.entry.read(cx);
@@ -406,19 +408,24 @@ impl WifiPanel {
           this.open_action_submenu(wifi_entry.clone(), window, cx);
         }
         _ => {}
-      }),
-      cx.observe_global_in::<GlobalDbusConnection>(window, |this, window, cx| {
-        if this.network_manager.is_none()
-          && let Some(conn) = GlobalDbusConnection::system(cx)
-        {
-          this.initialize(window, cx, &conn);
-        }
-      }),
-    ];
+      },
+    )];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
-    let mut panel = Self {
+    let conn_task = GlobalDbusConnection::system(cx);
+    cx.spawn_in(window, async move |this, cx| {
+      if let Some(conn) = conn_task.await {
+        this
+          .update_in(cx, |this, window, cx| {
+            this.initialize(window, cx, &conn);
+          })
+          .log_err();
+      }
+    })
+    .detach();
+
+    Self {
       picker,
       network_manager: None,
       device: None,
@@ -428,13 +435,7 @@ impl WifiPanel {
       action_submenu: None,
       _scan_task: None,
       _subscriptions: subscriptions,
-    };
-
-    if let Some(conn) = GlobalDbusConnection::system(cx) {
-      panel.initialize(window, cx, &conn);
     }
-
-    panel
   }
 
   fn initialize(&mut self, window: &mut Window, cx: &mut Context<Self>, conn: &zbus::Connection) {

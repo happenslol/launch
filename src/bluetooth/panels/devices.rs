@@ -231,25 +231,28 @@ impl BluetoothDevicesPanel {
       picker
     });
 
-    let subscriptions = vec![
-      cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
-        if let PickerEvent::Picked(bluetooth_entry) = ev {
-          let device = bluetooth_entry.entry.read(cx).device.clone();
-          this.handle_device_picked(device, window, cx);
-        }
-      }),
-      cx.observe_global_in::<GlobalDbusConnection>(window, |this, window, cx| {
-        if this.bluez.is_none()
-          && let Some(conn) = GlobalDbusConnection::system(cx)
-        {
-          this.initialize(window, cx, &conn);
-        }
-      }),
-    ];
+    let subscriptions = vec![cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
+      if let PickerEvent::Picked(bluetooth_entry) = ev {
+        let device = bluetooth_entry.entry.read(cx).device.clone();
+        this.handle_device_picked(device, window, cx);
+      }
+    })];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
-    let mut panel = Self {
+    let conn_task = GlobalDbusConnection::system(cx);
+    cx.spawn_in(window, async move |this, cx| {
+      if let Some(conn) = conn_task.await {
+        this
+          .update_in(cx, |this, window, cx| {
+            this.initialize(window, cx, &conn);
+          })
+          .log_err();
+      }
+    })
+    .detach();
+
+    Self {
       picker,
       bluez: None,
       adapter: None,
@@ -260,13 +263,7 @@ impl BluetoothDevicesPanel {
       _discovering_listener: None,
       _powered_listener: None,
       _subscriptions: subscriptions,
-    };
-
-    if let Some(conn) = GlobalDbusConnection::system(cx) {
-      panel.initialize(window, cx, &conn);
     }
-
-    panel
   }
 
   fn subscribe_to_device_entry(
