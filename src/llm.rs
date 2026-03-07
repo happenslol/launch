@@ -165,7 +165,7 @@ impl LlmPanel {
     ]);
 
     let input_state = cx.new(|cx| InputState::new(window, cx).placeholder("Ask anything..."));
-    let streaming_markdown_state = cx.new(|cx| MarkdownState::new(cx));
+    let streaming_markdown_state = cx.new(MarkdownState::new);
 
     window.focus(&input_state.read(cx).focus_handle(cx), cx);
 
@@ -250,14 +250,13 @@ impl LlmPanel {
 
       while let Some(chunk) = stream.next().await {
         match chunk {
-          Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
-            StreamedAssistantContent::Text(text) => {
-              if tx.send(text.text).is_err() {
-                break;
-              }
+          Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
+            if let StreamedAssistantContent::Text(text) = content
+              && tx.send(text.text).is_err()
+            {
+              break;
             }
-            _ => {}
-          },
+          }
           Ok(MultiTurnStreamItem::FinalResponse(_)) => {}
           Ok(_) => {}
           Err(err) => {
@@ -288,7 +287,7 @@ impl LlmPanel {
           if !this.streaming_text.is_empty() {
             let content: SharedString = this.streaming_text.clone().into();
             LlmDb::save_turn(conversation_id, "assistant", &content);
-            let markdown_state = cx.new(|cx| MarkdownState::new(cx));
+            let markdown_state = cx.new(MarkdownState::new);
             this.messages.push(ChatMessage {
               role: "assistant".into(),
               content,
@@ -363,7 +362,7 @@ impl LlmPanel {
       return;
     };
 
-    let prompt = cx.new(|cx| ConfirmationPrompt::new(window, cx));
+    let prompt = cx.new(|cx| ConfirmationPrompt::new("Delete entry?", window, cx));
     let conversation_picker = conversation_picker.clone();
 
     let subscription = cx.subscribe_in(
@@ -406,7 +405,7 @@ impl LlmPanel {
       .into_iter()
       .map(|(role, content)| {
         let markdown_state = if role == "assistant" {
-          Some(cx.new(|cx| MarkdownState::new(cx)))
+          Some(cx.new(MarkdownState::new))
         } else {
           None
         };
@@ -532,7 +531,6 @@ impl LlmDb {
   }
 }
 
-
 impl Focusable for LlmPanel {
   fn focus_handle(&self, cx: &App) -> FocusHandle {
     if let Some(conversation_picker) = &self.conversation_picker {
@@ -610,8 +608,10 @@ impl LlmPanel {
                     .py_2()
                     .child(message.content.clone())
                 } else if let Some(markdown_state) = &message.markdown_state {
-                  content_element
-                    .child(MarkdownElement::new(markdown_state.clone(), message.content.clone()))
+                  content_element.child(MarkdownElement::new(
+                    markdown_state.clone(),
+                    message.content.clone(),
+                  ))
                 } else {
                   content_element.child(message.content.clone())
                 };
@@ -642,14 +642,10 @@ impl LlmPanel {
                           .text_color(rgba(0xFFFFFF88))
                           .child("Assistant"),
                       )
-                      .child(
-                        div()
-                          .text_color(rgb(0xFFFFFF))
-                          .child(MarkdownElement::new(
-                            self.streaming_markdown_state.clone(),
-                            streaming_content,
-                          )),
-                      ),
+                      .child(div().text_color(rgb(0xFFFFFF)).child(MarkdownElement::new(
+                        self.streaming_markdown_state.clone(),
+                        streaming_content,
+                      ))),
                   )
                 },
               ),

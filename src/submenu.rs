@@ -36,11 +36,7 @@ pub struct SubMenu<D: PickerDelegate> {
 
 impl<D: PickerDelegate> SubMenu<D> {
   pub fn new(picker: Entity<Picker<D>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-    cx.bind_keys([KeyBinding::new(
-      "escape",
-      DismissSubMenu,
-      Some(CONTEXT),
-    )]);
+    cx.bind_keys([KeyBinding::new("escape", DismissSubMenu, Some(CONTEXT))]);
 
     window.focus(&picker.read(cx).search_input.focus_handle(cx), cx);
 
@@ -70,10 +66,7 @@ impl<D: PickerDelegate> SubMenu<D> {
     self
   }
 
-  pub fn header(
-    mut self,
-    header: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
-  ) -> Self {
+  pub fn header(mut self, header: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
     self.header = Some(Box::new(header));
     self
   }

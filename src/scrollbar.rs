@@ -159,9 +159,7 @@ impl Element for Scrollbar {
       None
     };
 
-    let thumb_height = thumb_bounds
-      .map(|b| b.size.height)
-      .unwrap_or(px(0.0));
+    let thumb_height = thumb_bounds.map(|b| b.size.height).unwrap_or(px(0.0));
 
     ScrollbarPrepaintState {
       hitbox,
@@ -217,9 +215,7 @@ impl Element for Scrollbar {
       }),
       |window| {
         window.paint_layer(prepaint.hitbox.bounds, |window| {
-          window.paint_quad(
-            fill(thumb_bounds, thumb_color).corner_radii(THUMB_RADIUS),
-          );
+          window.paint_quad(fill(thumb_bounds, thumb_color).corner_radii(THUMB_RADIUS));
         });
 
         window.on_mouse_event({
@@ -274,8 +270,7 @@ impl Element for Scrollbar {
               let track_space = viewport_height - thumb_height;
               if track_space > px(0.0) {
                 let offset_delta = delta_y / track_space * scrollable;
-                let new_y = (inner.drag_start_offset - offset_delta)
-                  .clamp(-scrollable, px(0.0));
+                let new_y = (inner.drag_start_offset - offset_delta).clamp(-scrollable, px(0.0));
                 scroll_handle.set_offset(point(scroll_handle.offset().x, new_y));
               }
 

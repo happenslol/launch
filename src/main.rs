@@ -21,6 +21,7 @@ mod markdown;
 mod matcher;
 mod network;
 mod picker;
+mod power;
 mod scrollbar;
 mod submenu;
 mod tokio;

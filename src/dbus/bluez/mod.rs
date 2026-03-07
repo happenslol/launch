@@ -243,9 +243,7 @@ impl Device {
     Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
   }
 
-  pub async fn listen_rssi_changed(
-    &self,
-  ) -> Result<impl Stream<Item = Option<i16>> + use<>> {
+  pub async fn listen_rssi_changed(&self) -> Result<impl Stream<Item = Option<i16>> + use<>> {
     use zbus::fdo;
 
     let properties_proxy = fdo::PropertiesProxy::builder(&self.conn)

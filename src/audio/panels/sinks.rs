@@ -515,15 +515,35 @@ pub fn sink_icon(icon_name: Option<&str>, muted: bool) -> IconName {
   };
 
   if icon_name.contains("headphone") {
-    if muted { IconName::HeadphonesOff } else { IconName::Headphones }
+    if muted {
+      IconName::HeadphonesOff
+    } else {
+      IconName::Headphones
+    }
   } else if icon_name.contains("headset") {
-    if muted { IconName::HeadsetOff } else { IconName::Headset }
+    if muted {
+      IconName::HeadsetOff
+    } else {
+      IconName::Headset
+    }
   } else if icon_name.contains("speaker") {
-    if muted { IconName::DeviceSpeakerOff } else { IconName::DeviceSpeaker }
+    if muted {
+      IconName::DeviceSpeakerOff
+    } else {
+      IconName::DeviceSpeaker
+    }
   } else if icon_name.contains("card") {
-    if muted { IconName::VolumeOff } else { IconName::Volume }
+    if muted {
+      IconName::VolumeOff
+    } else {
+      IconName::Volume
+    }
   } else {
-    if muted { IconName::DeviceSpeakerOff } else { IconName::DeviceSpeaker }
+    if muted {
+      IconName::DeviceSpeakerOff
+    } else {
+      IconName::DeviceSpeaker
+    }
   }
 }
 

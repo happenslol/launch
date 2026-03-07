@@ -31,7 +31,11 @@ pub fn init() -> Guard {
       )
       // Hide warnings when invalid SVGs are parsed
       .add_directive("usvg=error".parse().expect("Failed to parse log directive"))
-      .add_directive("resvg=error".parse().expect("Failed to parse log directive"))
+      .add_directive(
+        "resvg=error"
+          .parse()
+          .expect("Failed to parse log directive"),
+      )
       // Hide irrelevant warnings from vulkan
       .add_directive(
         "wgpu_hal::vulkan::instance=error"

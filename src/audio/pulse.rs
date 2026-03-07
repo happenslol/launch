@@ -764,13 +764,14 @@ impl PulseState {
       .get_str("device.icon_name")
       .map(|s| SharedString::from(s.to_string()));
 
-    let port_available = info.active_port.as_ref().and_then(|port| {
-      match port.available {
+    let port_available = info
+      .active_port
+      .as_ref()
+      .and_then(|port| match port.available {
         def::PortAvailable::Unknown => None,
         def::PortAvailable::No => Some(false),
         def::PortAvailable::Yes => Some(true),
-      }
-    });
+      });
 
     if let Some(sink) = this.sinks.get_mut(&info.index) {
       if sink.volume != info.volume {
@@ -855,11 +856,14 @@ impl PulseState {
       .get_str("device.class")
       .map(|s| SharedString::from(s.to_string()));
 
-    let port_available = info.active_port.as_ref().and_then(|port| match port.available {
-      def::PortAvailable::Unknown => None,
-      def::PortAvailable::No => Some(false),
-      def::PortAvailable::Yes => Some(true),
-    });
+    let port_available = info
+      .active_port
+      .as_ref()
+      .and_then(|port| match port.available {
+        def::PortAvailable::Unknown => None,
+        def::PortAvailable::No => Some(false),
+        def::PortAvailable::Yes => Some(true),
+      });
 
     // Collect events to send after releasing the source borrow
     let mut events_to_send: Vec<SourceEvent> = Vec::new();

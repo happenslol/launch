@@ -1,4 +1,5 @@
 pub mod bluez;
+pub mod logind;
 pub mod networkmanager;
 
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -168,7 +168,11 @@ impl PickerDelegate for WifiActionDelegate {
       .items_center()
       .gap_2()
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
-      .child(Icon::new(item.icon).size(rems(1.0)).text_color(rgb(0x888888)))
+      .child(
+        Icon::new(item.icon)
+          .size(rems(1.0))
+          .text_color(rgb(0x888888)),
+      )
       .child(item.label.clone())
   }
 
@@ -192,15 +196,15 @@ impl PickerDelegate for WifiActionDelegate {
     let matchers = MatcherPool::global(cx);
     cx.spawn_in(window, async move |cx, window| {
       let mut matcher = matchers.get().await.log_err();
-      let Some(ref mut matcher) = matcher else { return };
+      let Some(ref mut matcher) = matcher else {
+        return;
+      };
       let needle = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
       let mut matches = Vec::new();
       let mut buf = Vec::new();
 
       for (index, item) in items.iter().enumerate() {
-        if let Some(score) =
-          needle.score(Utf32Str::new(&item.search_string, &mut buf), matcher)
-        {
+        if let Some(score) = needle.score(Utf32Str::new(&item.search_string, &mut buf), matcher) {
           matches.push((index, score));
         }
       }
@@ -376,34 +380,32 @@ impl WifiPanel {
     });
 
     let subscriptions = vec![
-      cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
-        match ev {
-          PickerEvent::Picked(wifi_entry) => {
-            let (access_point, is_connected, is_known, connection_path) = {
-              let entry = wifi_entry.entry.read(cx);
-              (
-                entry.access_point.clone(),
-                entry.is_connected,
-                entry.is_known,
-                entry.connection_path.clone(),
-              )
-            };
+      cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| match ev {
+        PickerEvent::Picked(wifi_entry) => {
+          let (access_point, is_connected, is_known, connection_path) = {
+            let entry = wifi_entry.entry.read(cx);
+            (
+              entry.access_point.clone(),
+              entry.is_connected,
+              entry.is_known,
+              entry.connection_path.clone(),
+            )
+          };
 
-            if is_connected {
-              this.disconnect(&wifi_entry.entry, window, cx);
-            } else if is_known {
-              this.connect_known(&wifi_entry.entry, access_point, connection_path, cx);
-            } else if access_point.security.is_secured() {
-              this.show_password_popup(&wifi_entry.entry, &access_point, window, cx);
-            } else {
-              this.connect_open(&wifi_entry.entry, access_point, window, cx);
-            }
+          if is_connected {
+            this.disconnect(&wifi_entry.entry, window, cx);
+          } else if is_known {
+            this.connect_known(&wifi_entry.entry, access_point, connection_path, cx);
+          } else if access_point.security.is_secured() {
+            this.show_password_popup(&wifi_entry.entry, &access_point, window, cx);
+          } else {
+            this.connect_open(&wifi_entry.entry, access_point, window, cx);
           }
-          PickerEvent::SecondaryPicked(wifi_entry) => {
-            this.open_action_submenu(wifi_entry.clone(), window, cx);
-          }
-          _ => {}
         }
+        PickerEvent::SecondaryPicked(wifi_entry) => {
+          this.open_action_submenu(wifi_entry.clone(), window, cx);
+        }
+        _ => {}
       }),
       cx.observe_global_in::<GlobalDbusConnection>(window, |this, window, cx| {
         if this.network_manager.is_none()
@@ -756,21 +758,19 @@ impl WifiPanel {
     cx.subscribe_in(
       &popup,
       window,
-      move |this, popup, event: &PasswordPopupEvent, window, cx| {
-        match event {
-          PasswordPopupEvent::Closing => {
-            cx.focus_view(&search_input, window);
-            cx.notify();
-          }
-          PasswordPopupEvent::Dismiss => {
-            tracing::debug!(ssid = %access_point.ssid, "Password popup dismissed");
-            this.password_popup = None;
-            cx.notify();
-          }
-          PasswordPopupEvent::Submit(password) => {
-            this.connect_with_password(&entry_handle, &access_point, password, window, cx);
-            popup.update(cx, |popup, cx| popup.dismiss(cx));
-          }
+      move |this, popup, event: &PasswordPopupEvent, window, cx| match event {
+        PasswordPopupEvent::Closing => {
+          cx.focus_view(&search_input, window);
+          cx.notify();
+        }
+        PasswordPopupEvent::Dismiss => {
+          tracing::debug!(ssid = %access_point.ssid, "Password popup dismissed");
+          this.password_popup = None;
+          cx.notify();
+        }
+        PasswordPopupEvent::Submit(password) => {
+          this.connect_with_password(&entry_handle, &access_point, password, window, cx);
+          popup.update(cx, |popup, cx| popup.dismiss(cx));
         }
       },
     )
@@ -829,34 +829,38 @@ impl WifiPanel {
       });
     }
 
-    let picker = cx.new(|cx| {
-      Picker::new(WifiActionDelegate, Arc::new(actions), window, cx)
-    });
+    let picker = cx.new(|cx| Picker::new(WifiActionDelegate, Arc::new(actions), window, cx));
 
     let submenu = cx.new(|cx| {
-      SubMenu::new(picker, window, cx).height(px(154.)).header(move |_window, _cx| {
-        div()
-          .flex()
-          .flex_row()
-          .items_center()
-          .gap_3()
-          .px_3()
-          .py_2()
-          .overflow_x_hidden()
-          .bg(rgb(0x1D1D1D))
-          .border_1()
-          .border_color(rgba(0xFFFFFF15))
-          .rounded_lg()
-          .child(Icon::new(IconName::Wifi).size(rems(1.0)).text_color(rgb(0x888888)))
-          .child(
-            div()
-              .flex_1()
-              .text_ellipsis()
-              .overflow_x_hidden()
-              .child(ssid.clone()),
-          )
-          .into_any_element()
-      })
+      SubMenu::new(picker, window, cx)
+        .height(px(154.))
+        .header(move |_window, _cx| {
+          div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .overflow_x_hidden()
+            .bg(rgb(0x1D1D1D))
+            .border_1()
+            .border_color(rgba(0xFFFFFF15))
+            .rounded_lg()
+            .child(
+              Icon::new(IconName::Wifi)
+                .size(rems(1.0))
+                .text_color(rgb(0x888888)),
+            )
+            .child(
+              div()
+                .flex_1()
+                .text_ellipsis()
+                .overflow_x_hidden()
+                .child(ssid.clone()),
+            )
+            .into_any_element()
+        })
     });
 
     let wifi_entry_clone = wifi_entry.clone();
@@ -880,19 +884,9 @@ impl WifiPanel {
               if is_connected {
                 this.disconnect(&wifi_entry_clone.entry, window, cx);
               } else if is_known {
-                this.connect_known(
-                  &wifi_entry_clone.entry,
-                  access_point,
-                  connection_path,
-                  cx,
-                );
+                this.connect_known(&wifi_entry_clone.entry, access_point, connection_path, cx);
               } else if access_point.security.is_secured() {
-                this.show_password_popup(
-                  &wifi_entry_clone.entry,
-                  &access_point,
-                  window,
-                  cx,
-                );
+                this.show_password_popup(&wifi_entry_clone.entry, &access_point, window, cx);
               } else {
                 this.connect_open(&wifi_entry_clone.entry, access_point, window, cx);
               }
@@ -1079,8 +1073,9 @@ impl WifiPanel {
         let device_path = device.device_path().clone();
         let result = cx
           .background_spawn(async move {
-            let active_path =
-              nm.activate_connection(&conn_path, &device_path, &ap_path).await?;
+            let active_path = nm
+              .activate_connection(&conn_path, &device_path, &ap_path)
+              .await?;
             nm.wait_for_connection_active(&active_path, &executor)
               .await?;
             Ok::<(), anyhow::Error>(())
@@ -1141,8 +1136,9 @@ impl WifiPanel {
         let device_path = device.device_path().clone();
         let result = cx
           .background_spawn(async move {
-            let (_connection_path, active_path) =
-              nm.add_and_activate_connection(&device_path, &ap_path).await?;
+            let (_connection_path, active_path) = nm
+              .add_and_activate_connection(&device_path, &ap_path)
+              .await?;
             nm.wait_for_connection_active(&active_path, &executor)
               .await?;
             Ok::<(), anyhow::Error>(())
@@ -1287,7 +1283,10 @@ impl Render for WifiPanel {
       .password_popup
       .as_ref()
       .is_some_and(|(popup, _)| popup.read(cx).closing);
-    let action_submenu = self.action_submenu.as_ref().map(|(submenu, _)| submenu.clone());
+    let action_submenu = self
+      .action_submenu
+      .as_ref()
+      .map(|(submenu, _)| submenu.clone());
     let dismiss_backdrop = cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
       if let Some((popup, _)) = &this.password_popup {
         popup.update(cx, |popup, cx| popup.dismiss(cx));

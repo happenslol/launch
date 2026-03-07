@@ -1,6 +1,6 @@
 use gpui::{
-  AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Styled, Window,
-  actions, div, prelude::*, rgba,
+  AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString,
+  Styled, Window, actions, div, prelude::*, rgba,
 };
 
 use crate::util::{h_flex, v_flex};
@@ -26,10 +26,15 @@ pub enum ConfirmationEvent {
 pub struct ConfirmationPrompt {
   focus_handle: FocusHandle,
   selected: SelectedButton,
+  message: SharedString,
 }
 
 impl ConfirmationPrompt {
-  pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+  pub fn new(
+    message: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Self {
     cx.bind_keys([
       gpui::KeyBinding::new("escape", Dismiss, Some(CONTEXT)),
       gpui::KeyBinding::new("enter", Confirm, Some(CONTEXT)),
@@ -46,6 +51,7 @@ impl ConfirmationPrompt {
     Self {
       focus_handle,
       selected: SelectedButton::Yes,
+      message: message.into(),
     }
   }
 
@@ -115,17 +121,25 @@ impl Render for ConfirmationPrompt {
             div()
               .text_sm()
               .text_color(rgba(0xFFFFFFCC))
-              .child("Delete entry?"),
+              .child(self.message.clone()),
           )
           .child(
             h_flex()
               .gap_2()
-              .child(render_button("Cancel", cancel_selected, cx.listener(|_, _, _, cx| {
-                cx.emit(ConfirmationEvent::Dismiss);
-              })))
-              .child(render_button("Yes", yes_selected, cx.listener(|_, _, _, cx| {
-                cx.emit(ConfirmationEvent::Confirm);
-              }))),
+              .child(render_button(
+                "Cancel",
+                cancel_selected,
+                cx.listener(|_, _, _, cx| {
+                  cx.emit(ConfirmationEvent::Dismiss);
+                }),
+              ))
+              .child(render_button(
+                "Yes",
+                yes_selected,
+                cx.listener(|_, _, _, cx| {
+                  cx.emit(ConfirmationEvent::Confirm);
+                }),
+              )),
           ),
       )
   }

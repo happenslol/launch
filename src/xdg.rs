@@ -45,9 +45,7 @@ impl XdgIconCache {
     self.refresh_task = Some(cx.spawn(async move |this, cx| {
       let (db_entries, cache_entries) = cx
         .background_spawn(async move {
-          let entries: Vec<_> = Iter::new(default_paths())
-            .entries(Some(&locales))
-            .collect();
+          let entries: Vec<_> = Iter::new(default_paths()).entries(Some(&locales)).collect();
 
           let mut db_entries = HashMap::new();
           let mut cache_entries = HashMap::new();

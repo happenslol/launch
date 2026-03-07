@@ -226,7 +226,11 @@ impl<D: PickerDelegate> Picker<D> {
     self.items.get(resolved_ix)
   }
 
-  pub fn remove_selected_item(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<D::ListItem> {
+  pub fn remove_selected_item(
+    &mut self,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Option<D::ListItem> {
     let selected_index = self.selected_index?;
     let resolved_ix = self.resolve_item_index(selected_index)?;
 
@@ -653,37 +657,36 @@ impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
 
     element.style().refine(&self.style);
 
-    element
-      .child(
-        div()
-          .flex()
-          .flex_row()
-          .items_center()
-          .gap_2()
-          .h(rems(1.5))
-          .when(self.show_back_button, |this| {
-            this.child(
-              div()
-                .id("back-button")
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .bg(rgba(0xFFFFFF0F))
-                .p_1()
-                .cursor_pointer()
-                .on_click(|_event, window, cx| {
-                  window.dispatch_action(GoBack.boxed_clone(), cx);
-                })
-                .child(Icon::new(IconName::ArrowLeft).text_color(rgb(0xCCCCCC))),
-            )
-          })
-          .child(input(&search_input).flex_grow())
-          .when(self.is_loading, |this| {
-            this.child(Spinner::new().color(rgb(0x888888).into()))
-          })
-          .when_some(self.suffix, |this, suffix| this.child(suffix)),
-      )
+    element.child(
+      div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .h(rems(1.5))
+        .when(self.show_back_button, |this| {
+          this.child(
+            div()
+              .id("back-button")
+              .flex()
+              .items_center()
+              .justify_center()
+              .rounded_md()
+              .bg(rgba(0xFFFFFF0F))
+              .p_1()
+              .cursor_pointer()
+              .on_click(|_event, window, cx| {
+                window.dispatch_action(GoBack.boxed_clone(), cx);
+              })
+              .child(Icon::new(IconName::ArrowLeft).text_color(rgb(0xCCCCCC))),
+          )
+        })
+        .child(input(&search_input).flex_grow())
+        .when(self.is_loading, |this| {
+          this.child(Spinner::new().color(rgb(0x888888).into()))
+        })
+        .when_some(self.suffix, |this, suffix| this.child(suffix)),
+    )
   }
 }
 

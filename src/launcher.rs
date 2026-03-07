@@ -5,16 +5,14 @@ use std::{
     Arc,
     atomic::{AtomicBool, Ordering},
   },
-  time::Duration,
 };
 
 use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
-  Animation, AnimationExt, AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource,
-  KeyBinding, SharedString, Size, Subscription, Task, Window, WindowBounds, WindowKind,
-  WindowOptions, actions, div, img,
+  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString,
+  Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -34,7 +32,7 @@ use crate::{
   matcher::MatcherPool,
   network,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
-  submenu::{SubMenu, SubMenuEvent},
+  power,
   util::{ResultExt, h_flex, v_flex},
   xdg::{self, XdgIconCache, open_url},
 };
@@ -47,103 +45,8 @@ impl fend_core::Interrupt for FendInterrupt {
   }
 }
 
-actions!(
-  launcher,
-  [Quit, GoBack, CopyResult, OpenModalBottomRight,]
-);
+actions!(launcher, [Quit, GoBack, CopyResult, OpenModalBottomRight,]);
 const CONTEXT: &str = "launcher";
-
-#[derive(Clone)]
-struct DummyItem {
-  name: SharedString,
-  description: SharedString,
-}
-
-fn dummy_items() -> Arc<Vec<DummyItem>> {
-  Arc::new(vec![
-    DummyItem {
-      name: "Alpha".into(),
-      description: "The first item".into(),
-    },
-    DummyItem {
-      name: "Bravo".into(),
-      description: "The second item".into(),
-    },
-    DummyItem {
-      name: "Charlie".into(),
-      description: "The third item".into(),
-    },
-    DummyItem {
-      name: "Delta".into(),
-      description: "The fourth item".into(),
-    },
-    DummyItem {
-      name: "Echo".into(),
-      description: "The fifth item".into(),
-    },
-  ])
-}
-
-struct DummyDelegate;
-
-impl PickerDelegate for DummyDelegate {
-  type ListItem = DummyItem;
-
-  fn render_list_item(
-    &self,
-    _window: &mut Window,
-    _cx: &mut Context<Picker<Self>>,
-    item: &Self::ListItem,
-    is_selected: bool,
-  ) -> impl IntoElement {
-    h_flex()
-      .w_full()
-      .px_2()
-      .py_2()
-      .rounded_md()
-      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
-      .gap_3()
-      .child(
-        v_flex().child(item.name.clone()).child(
-          div()
-            .text_sm()
-            .text_color(rgb(0x666666))
-            .child(item.description.clone()),
-        ),
-      )
-  }
-
-  fn update_matches(
-    &mut self,
-    window: &mut Window,
-    cx: &mut Context<Picker<Self>>,
-    query: String,
-    _cancel_flag: Arc<AtomicBool>,
-    search_id: usize,
-    items: Arc<Vec<Self::ListItem>>,
-  ) -> Task<()> {
-    let matches: Vec<(usize, u32)> = if query.is_empty() {
-      (0..items.len()).map(|i| (i, 0)).collect()
-    } else {
-      let lower_query = query.to_lowercase();
-      items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| {
-          item.name.to_lowercase().contains(&lower_query)
-            || item.description.to_lowercase().contains(&lower_query)
-        })
-        .map(|(i, _)| (i, 1))
-        .collect()
-    };
-
-    cx.defer_in(window, move |picker, _window, cx| {
-      picker.complete_search(cx, search_id, Some(matches));
-    });
-
-    Task::ready(())
-  }
-}
 
 struct ColorResult {
   copy_text: SharedString,
@@ -156,13 +59,13 @@ pub struct Launcher {
   focus_handle: FocusHandle,
   picker: Entity<Picker<RootDelegate>>,
   active_panel: Option<AnyView>,
+  pub(crate) action_overlay: Option<AnyView>,
   color_result: Option<ColorResult>,
   timestamp_result: Option<SharedString>,
   fend_result: Option<SharedString>,
   fend_cancel_flag: Arc<AtomicBool>,
   fend_task: Option<Task<()>>,
-  secondary_submenu: Option<Entity<SubMenu<DummyDelegate>>>,
-  _subscriptions: Vec<Subscription>,
+  pub(crate) _subscriptions: Vec<Subscription>,
 }
 
 impl Launcher {
@@ -220,6 +123,7 @@ impl Launcher {
     items.extend(bluetooth::get_items());
     items.extend(clipboard::get_items());
     items.extend(llm::get_items());
+    items.extend(power::get_items());
     items.extend(search_providers());
 
     let items = Arc::new(items);
@@ -270,12 +174,12 @@ impl Launcher {
       focus_handle: cx.focus_handle(),
       picker,
       active_panel,
+      action_overlay: None,
       color_result: None,
       timestamp_result: None,
       fend_result: None,
       fend_cancel_flag: Arc::new(AtomicBool::new(false)),
       fend_task: None,
-      secondary_submenu: None,
       _subscriptions: subscriptions,
     }
   }
@@ -330,11 +234,7 @@ impl Launcher {
       .unwrap_or((trimmed, None));
 
     // Reject plain hex digits without a '#' prefix — require explicit hex notation
-    if color_str
-      .trim()
-      .chars()
-      .all(|c| c.is_ascii_hexdigit())
-    {
+    if color_str.trim().chars().all(|c| c.is_ascii_hexdigit()) {
       return None;
     }
 
@@ -464,51 +364,12 @@ impl Launcher {
     }
   }
 
-  fn open_modal_bottom_right(
-    &mut self,
-    _: &OpenModalBottomRight,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
-    if let Some(submenu) = &self.secondary_submenu {
-      submenu.update(cx, |sub, cx| sub.dismiss(cx));
-      return;
-    }
-
-    let picker = cx.new(|cx| Picker::new(DummyDelegate, dummy_items(), window, cx));
-
-    let submenu = cx.new(|cx| {
-      SubMenu::new(picker, window, cx).header(|_window, _cx| {
-        h_flex()
-          .px_3()
-          .py_2()
-          .gap_3()
-          .items_center()
-          .bg(rgb(0x1D1D1D))
-          .border_1()
-          .border_color(rgba(0xFFFFFF15))
-          .rounded_lg()
-          .child(Icon::new(IconName::Wifi).size(rems(1.5)))
-          .child(div().flex_grow().child("HomeNetwork_5GHz"))
-          .child(div().size(px(8.)).rounded_full().bg(rgb(0x22C55E)))
-          .into_any_element()
-      })
+  pub fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.action_overlay = None;
+    let picker = self.picker.clone();
+    window.defer(cx, move |window, cx| {
+      window.focus(&picker.read(cx).search_input.focus_handle(cx), cx);
     });
-
-    self._subscriptions.push(cx.subscribe_in(
-      &submenu,
-      window,
-      |this, _, _ev: &SubMenuEvent, window, cx| {
-        this.secondary_submenu = None;
-        let picker = this.picker.clone();
-        window.defer(cx, move |window, cx| {
-          window.focus(&picker.read(cx).search_input.focus_handle(cx), cx);
-        });
-        cx.notify();
-      },
-    ));
-
-    self.secondary_submenu = Some(submenu);
     cx.notify();
   }
 
@@ -540,6 +401,9 @@ impl Launcher {
           Err(err) => error!(?err, "Failed to open search URL"),
         }
       }
+      RootItem::Action { action, .. } => {
+        action(self, window, cx);
+      }
     }
   }
 }
@@ -552,8 +416,6 @@ impl Focusable for Launcher {
 
 impl Render for Launcher {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let secondary_submenu = self.secondary_submenu.clone();
-
     v_flex()
       .key_context(CONTEXT)
       .track_focus(&self.focus_handle)
@@ -562,7 +424,6 @@ impl Render for Launcher {
       .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::go_back))
       .on_action(cx.listener(Self::copy_result))
-      .on_action(cx.listener(Self::open_modal_bottom_right))
       .rounded_xl()
       .size_full()
       .border_1()
@@ -619,13 +480,9 @@ impl Render for Launcher {
           })
           .child(picker_results(&self.picker))
       })
-      .when_some(secondary_submenu, |this, submenu| this.child(submenu))
-      .with_animation(
-        "launcher-fade-in",
-        Animation::new(Duration::from_millis(80))
-          .with_easing(|t| 1.0 - (1.0 - t) * (1.0 - t)),
-        |this, delta| this.opacity(delta),
-      )
+      .when_some(self.action_overlay.clone(), |this, overlay| {
+        this.child(render_action_overlay(overlay))
+      })
   }
 }
 
@@ -650,6 +507,7 @@ impl RootDelegate {
 }
 
 type PanelView = dyn Fn(&mut Window, &mut App) -> AnyView + Send + Sync;
+type Action = dyn Fn(&mut Launcher, &mut Window, &mut Context<Launcher>) + Send + Sync;
 
 // TODO: Maybe we can put terms in contiguous memory?
 #[derive(Clone)]
@@ -673,6 +531,14 @@ pub enum RootItem {
     description: SharedString,
     url_template: &'static str,
   },
+  Action {
+    id: &'static str,
+    icon: IconName,
+    name: SharedString,
+    description: SharedString,
+    terms: Vec<String>,
+    action: Arc<Action>,
+  },
 }
 
 impl RootItem {
@@ -681,6 +547,7 @@ impl RootItem {
       RootItem::App { entry, .. } => format!("app:{}", entry.appid),
       RootItem::Panel { id, .. } => format!("panel:{}", id),
       RootItem::Search { id, .. } => format!("search:{}", id),
+      RootItem::Action { id, .. } => format!("action:{}", id),
     }
   }
 
@@ -689,6 +556,7 @@ impl RootItem {
       RootItem::App { .. } => "app",
       RootItem::Panel { .. } => "panel",
       RootItem::Search { .. } => "search",
+      RootItem::Action { .. } => "action",
     }
   }
 
@@ -698,11 +566,34 @@ impl RootItem {
         .comment(locales)
         .map(|c| SharedString::from(c.to_string()))
         .unwrap_or_else(|| format!("Launch {name}").into()),
-      RootItem::Panel { description, .. } | RootItem::Search { description, .. } => {
-        description.clone()
-      }
+      RootItem::Panel { description, .. }
+      | RootItem::Search { description, .. }
+      | RootItem::Action { description, .. } => description.clone(),
     }
   }
+}
+
+fn render_action_overlay(view: AnyView) -> impl IntoElement {
+  div()
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .flex()
+    .items_center()
+    .justify_center()
+    .child(
+      div()
+        .id("action-overlay-backdrop")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .rounded_xl()
+        .bg(rgba(0x00000088)),
+    )
+    .child(div().occlude().child(view))
 }
 
 fn search_providers() -> Vec<RootItem> {
@@ -792,7 +683,9 @@ impl PickerDelegate for RootDelegate {
                     ),
                 )
             }
-            RootItem::Panel { name, icon, .. } | RootItem::Search { name, icon, .. } => {
+            RootItem::Panel { name, icon, .. }
+            | RootItem::Search { name, icon, .. }
+            | RootItem::Action { name, icon, .. } => {
               this.child(Icon::new(*icon).size(icon_size)).child(
                 v_flex()
                   .overflow_hidden()
@@ -898,7 +791,7 @@ impl PickerDelegate for RootDelegate {
                   }
                 }
               }
-              RootItem::Panel { name, terms, .. } => {
+              RootItem::Panel { name, terms, .. } | RootItem::Action { name, terms, .. } => {
                 do_match(name);
                 for term in terms {
                   do_match(term);

@@ -449,7 +449,6 @@ impl AudioStreamsPanel {
       .read(cx)
       .set_sink_input_mute(selected_id, SetMute::Toggle)
   }
-
 }
 
 impl Focusable for AudioStreamsPanel {
@@ -678,7 +677,12 @@ impl PickerDelegate for SinkPickerDelegate {
           .map(|n| self.favorites.contains(n.as_ref()))
           .unwrap_or(false);
       let description = sink.description.clone().unwrap_or_default();
-      (std::cmp::Reverse(*score), is_current, !is_favorite, description)
+      (
+        std::cmp::Reverse(*score),
+        is_current,
+        !is_favorite,
+        description,
+      )
     });
   }
 

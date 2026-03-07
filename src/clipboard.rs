@@ -117,9 +117,13 @@ impl ClipboardPanel {
           window.remove_window();
         }
       }),
-      cx.subscribe_in(&connection, window, |this, _connection, _event, window, cx| {
-        this._load_task = Some(Self::load_entries(&this.picker, window, cx));
-      }),
+      cx.subscribe_in(
+        &connection,
+        window,
+        |this, _connection, _event, window, cx| {
+          this._load_task = Some(Self::load_entries(&this.picker, window, cx));
+        },
+      ),
       cx.observe(&picker, |_this, _picker, cx| {
         cx.notify();
       }),
@@ -185,8 +189,9 @@ impl ClipboardPanel {
         return;
       };
 
-      let mime_data: anyhow::Result<HashMap<String, Vec<u8>>> =
-        cx.background_spawn(async move { reader.get_mime_data_by_id(item_id) }).await;
+      let mime_data: anyhow::Result<HashMap<String, Vec<u8>>> = cx
+        .background_spawn(async move { reader.get_mime_data_by_id(item_id) })
+        .await;
 
       let Ok(mime_data) = mime_data else {
         return;
@@ -238,7 +243,7 @@ impl ClipboardPanel {
       return;
     };
 
-    let prompt = cx.new(|cx| ConfirmationPrompt::new(window, cx));
+    let prompt = cx.new(|cx| ConfirmationPrompt::new("Delete entry?", window, cx));
     let picker = self.picker.clone();
     let connection = self.connection.clone();
 
