@@ -193,10 +193,10 @@ impl PickerDelegate for WindowsDelegate {
       .items_center()
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .when_some(icon, |this, icon| {
-        this.child(img(ImageSource::Resource(icon.clone())).size(icon_size))
+        this.child(img(ImageSource::Resource(icon.clone())).size(icon_size).flex_shrink_0())
       })
       .when_none(&icon, |this| {
-        this.child(Icon::new(IconName::AppWindow).size(icon_size))
+        this.child(Icon::new(IconName::AppWindow).size(icon_size).flex_shrink_0())
       })
       .child(
         h_flex()
