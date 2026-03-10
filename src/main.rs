@@ -20,6 +20,7 @@ mod logging;
 mod markdown;
 mod matcher;
 mod network;
+mod niri;
 mod picker;
 mod power;
 mod scrollbar;

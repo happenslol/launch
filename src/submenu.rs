@@ -90,10 +90,6 @@ impl<D: PickerDelegate> SubMenu<D> {
     }));
   }
 
-  pub fn picker(&self) -> &Entity<Picker<D>> {
-    &self.picker
-  }
-
   fn dismiss_action(&mut self, _: &DismissSubMenu, _window: &mut Window, cx: &mut Context<Self>) {
     self.dismiss(cx);
   }

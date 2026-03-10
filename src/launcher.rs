@@ -25,7 +25,7 @@ use nucleo_matcher::{
 use tracing::error;
 
 use crate::{
-  audio, bluetooth, clipboard,
+  audio, bluetooth, clipboard, niri,
   db::DB,
   icon::{Icon, IconName},
   llm,
@@ -123,6 +123,7 @@ impl Launcher {
     items.extend(bluetooth::get_items());
     items.extend(clipboard::get_items());
     items.extend(llm::get_items());
+    items.extend(niri::get_items());
     items.extend(power::get_items());
     items.extend(search_providers());
 
