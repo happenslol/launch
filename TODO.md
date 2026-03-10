@@ -17,15 +17,18 @@
 - [x] delete from clipboard
 - [x] build id
 - [x] copy calc results
+- [x] lock, hibernate, shutdown
+- [x] update styling for streams
+- [x] submenu experiments
 - [ ] calc result history/panel
-- [ ] submenu experiments
 - [ ] process monitor/kill
 - [ ] alternate actions in clipboard (e.g. open uri)
-- [ ] lock, hibernate, shutdown
-- [ ] update styling for streams
 - [ ] update styling for inline results
 - [ ] nix search (searchix.ovh)
 - [ ] kdl config
+- [ ] make windows panel dependant on detected window manager/compositor
+- [ ] open existing instance for application if found
+- [ ] tray host
 
 # refactor
 
