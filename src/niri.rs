@@ -1,8 +1,8 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, IntoElement, SharedString, Subscription, Task,
-  Window, prelude::*, rems, rgb, rgba,
+  App, Context, Entity, FocusHandle, Focusable, ImageSource, IntoElement, SharedString,
+  Subscription, Task, Window, img, prelude::*, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -15,6 +15,7 @@ use crate::{
   matcher::MatcherPool,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
+  xdg::XdgIconCache,
 };
 
 pub fn get_items() -> Vec<RootItem> {
@@ -45,8 +46,10 @@ struct WindowsPanel {
 
 impl WindowsPanel {
   fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let icon_cache = XdgIconCache::global(cx);
     let picker = cx.new(|cx| {
-      let mut picker = Picker::new(WindowsDelegate, Arc::new(vec![]), window, cx);
+      let delegate = WindowsDelegate { icon_cache };
+      let mut picker = Picker::new(delegate, Arc::new(vec![]), window, cx);
       picker.placeholder("Search windows...", cx);
       picker
     });
@@ -163,7 +166,9 @@ impl Render for WindowsPanel {
   }
 }
 
-struct WindowsDelegate;
+struct WindowsDelegate {
+  icon_cache: Entity<XdgIconCache>,
+}
 
 impl PickerDelegate for WindowsDelegate {
   type ListItem = WindowItem;
@@ -171,10 +176,14 @@ impl PickerDelegate for WindowsDelegate {
   fn render_list_item(
     &self,
     _window: &mut Window,
-    _cx: &mut Context<Picker<Self>>,
+    cx: &mut Context<Picker<Self>>,
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
+    let icon_cache = self.icon_cache.read(cx);
+    let icon = icon_cache.get(&item.app_id.to_lowercase());
+    let icon_size = rems(1.2);
+
     h_flex()
       .w_full()
       .px_2()
@@ -183,11 +192,12 @@ impl PickerDelegate for WindowsDelegate {
       .gap_3()
       .items_center()
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
-      .child(
-        Icon::new(IconName::AppWindow)
-          .size(rems(0.85))
-          .text_color(rgb(0x666666)),
-      )
+      .when_some(icon, |this, icon| {
+        this.child(img(ImageSource::Resource(icon.clone())).size(icon_size))
+      })
+      .when_none(&icon, |this| {
+        this.child(Icon::new(IconName::AppWindow).size(icon_size))
+      })
       .child(
         h_flex()
           .flex_grow()
