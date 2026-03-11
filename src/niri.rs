@@ -48,11 +48,12 @@ impl NiriState {
     self
       .windows
       .iter()
-      .find(|w| {
+      .filter(|w| {
         w.app_id
           .as_deref()
           .is_some_and(|id| id.eq_ignore_ascii_case(app_id))
       })
+      .max_by_key(|w| w.focus_timestamp.map(|t| (t.secs, t.nanos)))
       .map(|w| w.id)
   }
 
@@ -74,6 +75,14 @@ impl NiriState {
       niri_ipc::Event::WindowFocusChanged { id } => {
         for window in &mut self.windows {
           window.is_focused = Some(window.id) == id;
+        }
+      }
+      niri_ipc::Event::WindowFocusTimestampChanged {
+        id,
+        focus_timestamp,
+      } => {
+        if let Some(window) = self.windows.iter_mut().find(|w| w.id == id) {
+          window.focus_timestamp = focus_timestamp;
         }
       }
       _ => {}
