@@ -9,7 +9,8 @@
       "Bash(cargo clippy:*)",
       "WebFetch(domain:docs.rs)",
       "WebSearch",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(cargo tree:*)"
     ],
     "additionalDirectories": [
       "/home/happens/code/zed",

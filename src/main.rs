@@ -135,6 +135,7 @@ fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Re
       dbus::init(cx);
       audio::init(cx);
       xdg::init(cx);
+      niri::init(cx);
       InputState::init(cx);
       load_embedded_fonts(cx).unwrap();
 

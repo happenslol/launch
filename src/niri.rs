@@ -1,8 +1,8 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
-  App, Context, Entity, FocusHandle, Focusable, ImageSource, IntoElement, SharedString,
-  Subscription, Task, Window, img, prelude::*, rems, rgb, rgba,
+  App, Context, Entity, EventEmitter, FocusHandle, Focusable, Global, ImageSource, IntoElement,
+  SharedString, Subscription, Task, Window, img, prelude::*, rems, rgb, rgba,
 };
 use nucleo_matcher::{
   Utf32Str,
@@ -18,7 +18,145 @@ use crate::{
   xdg::XdgIconCache,
 };
 
-pub fn get_items() -> Vec<RootItem> {
+pub struct NiriState {
+  windows: Vec<niri_ipc::Window>,
+}
+
+struct GlobalNiriState(Entity<NiriState>);
+impl Global for GlobalNiriState {}
+
+#[derive(Debug, Clone)]
+pub enum NiriEvent {
+  WindowsChanged,
+}
+
+impl EventEmitter<NiriEvent> for NiriState {}
+
+impl NiriState {
+  pub fn global(cx: &App) -> Entity<Self> {
+    cx.global::<GlobalNiriState>().0.clone()
+  }
+
+  pub fn windows(&self) -> &[niri_ipc::Window] {
+    &self.windows
+  }
+
+  pub fn find_window_by_app_id(&self, app_id: &str) -> Option<u64> {
+    self.windows
+      .iter()
+      .find(|w| w.app_id.as_deref() == Some(app_id))
+      .map(|w| w.id)
+  }
+
+  fn apply_event(&mut self, event: niri_ipc::Event) {
+    match event {
+      niri_ipc::Event::WindowsChanged { windows } => {
+        self.windows = windows;
+      }
+      niri_ipc::Event::WindowOpenedOrChanged { window } => {
+        if let Some(existing) = self.windows.iter_mut().find(|w| w.id == window.id) {
+          *existing = window;
+        } else {
+          self.windows.push(window);
+        }
+      }
+      niri_ipc::Event::WindowClosed { id } => {
+        self.windows.retain(|w| w.id != id);
+      }
+      niri_ipc::Event::WindowFocusChanged { id } => {
+        for window in &mut self.windows {
+          window.is_focused = Some(window.id) == id;
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
+pub fn init(cx: &mut App) {
+  if std::env::var_os("NIRI_SOCKET").is_none() {
+    return;
+  }
+
+  let (event_tx, event_rx) = flume::unbounded::<niri_ipc::Event>();
+
+  std::thread::spawn(move || {
+    if let Err(error) = run_event_stream(event_tx) {
+      tracing::error!(?error, "Niri event stream ended");
+    }
+  });
+
+  let state = cx.new(|_| NiriState {
+    windows: Vec::new(),
+  });
+  cx.set_global(GlobalNiriState(state.clone()));
+
+  cx.spawn({
+    let state = state.clone();
+    async move |cx| {
+      while let Ok(event) = event_rx.recv_async().await {
+        state.update(cx, |state, cx| {
+          state.apply_event(event);
+          cx.emit(NiriEvent::WindowsChanged);
+          cx.notify();
+        });
+      }
+    }
+  })
+  .detach();
+}
+
+fn run_event_stream(event_tx: flume::Sender<niri_ipc::Event>) -> anyhow::Result<()> {
+  let mut socket = niri_ipc::socket::Socket::connect()?;
+  let reply = socket.send(niri_ipc::Request::EventStream)?;
+  if let Err(message) = reply {
+    anyhow::bail!("Niri rejected EventStream request: {message}");
+  }
+
+  let mut read_event = socket.read_events();
+  loop {
+    let event = read_event()?;
+    if event_tx.send(event).is_err() {
+      break;
+    }
+  }
+
+  Ok(())
+}
+
+pub fn find_window_by_app_id(app_id: &str, cx: &App) -> Option<u64> {
+  let state = cx.try_global::<GlobalNiriState>()?;
+  state.0.read(cx).find_window_by_app_id(app_id)
+}
+
+pub fn focus_niri_window(window_id: u64, window: &mut Window, cx: &App) {
+  window
+    .spawn(cx, async move |cx| {
+      cx.background_spawn(async move {
+        let mut socket = niri_ipc::socket::Socket::connect()?;
+        let action = niri_ipc::Action::FocusWindow { id: window_id };
+        let reply = socket.send(niri_ipc::Request::Action(action))?;
+        if let Err(message) = reply {
+          anyhow::bail!("Niri error: {message}");
+        }
+        anyhow::Ok(())
+      })
+      .await
+      .log_err();
+
+      cx.update(|window, _cx| {
+        window.remove_window();
+      })
+      .log_err();
+    })
+    .detach();
+}
+
+pub fn get_items(cx: &App) -> Vec<RootItem> {
+  if cx.try_global::<GlobalNiriState>().is_none() {
+    return vec![];
+  }
+
   vec![RootItem::Panel {
     id: "windows".into(),
     icon: IconName::AppWindow,
@@ -38,116 +176,84 @@ struct WindowItem {
   search_string: String,
 }
 
+fn windows_to_items(windows: &[niri_ipc::Window]) -> Vec<WindowItem> {
+  windows
+    .iter()
+    .map(|window| {
+      let title: SharedString = window
+        .title
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .unwrap_or("(untitled)")
+        .to_string()
+        .into();
+      let app_id: SharedString = window
+        .app_id
+        .clone()
+        .unwrap_or_default()
+        .into();
+      let search_string = format!("{title} {app_id}");
+
+      WindowItem {
+        id: window.id,
+        title,
+        app_id,
+        is_focused: window.is_focused,
+        search_string,
+      }
+    })
+    .collect()
+}
+
 struct WindowsPanel {
   picker: Entity<Picker<WindowsDelegate>>,
-  _load_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
 
 impl WindowsPanel {
   fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     let icon_cache = XdgIconCache::global(cx);
+    let niri_state = NiriState::global(cx);
+
+    let initial_items = windows_to_items(niri_state.read(cx).windows());
+
     let picker = cx.new(|cx| {
       let delegate = WindowsDelegate { icon_cache };
-      let mut picker = Picker::new(delegate, Arc::new(vec![]), window, cx);
+      let mut picker = Picker::new(delegate, Arc::new(initial_items), window, cx);
       picker.placeholder("Search windows...", cx);
       picker
     });
 
-    let subscriptions = vec![cx.subscribe_in(
+    let mut subscriptions = vec![cx.subscribe_in(
       &picker,
       window,
       |_this, _picker, event, window, cx| {
         if let PickerEvent::Picked(item) = event {
-          let window_id = item.id;
-          cx.spawn_in(window, async move |_this, cx| {
-            cx.background_spawn(async move {
-              let mut socket = niri_ipc::socket::Socket::connect()?;
-              let action = niri_ipc::Action::FocusWindow { id: window_id };
-              let reply = socket.send(niri_ipc::Request::Action(action))?;
-              if let Err(message) = reply {
-                anyhow::bail!("Niri error: {message}");
-              }
-              anyhow::Ok(())
-            })
-            .await
-            .log_err();
-
-            cx.update(|window, _cx| {
-              window.remove_window();
-            })
-            .log_err();
-          })
-          .detach();
+          focus_niri_window(item.id, window, cx);
         }
       },
     )];
 
-    cx.focus_view(&picker.read(cx).search_input.clone(), window);
+    subscriptions.push(cx.subscribe_in(
+      &niri_state,
+      window,
+      {
+        let picker = picker.clone();
+        move |_this, niri_state, _event: &NiriEvent, window, cx| {
+          let items = windows_to_items(niri_state.read(cx).windows());
+          picker.update(cx, |picker, cx| {
+            picker.set_items(items, window, cx);
+          });
+        }
+      },
+    ));
 
-    let load_task = Self::load_windows(&picker, window, cx);
+    cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
     Self {
       picker,
-      _load_task: Some(load_task),
       _subscriptions: subscriptions,
     }
-  }
-
-  fn load_windows(
-    picker: &Entity<Picker<WindowsDelegate>>,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) -> Task<()> {
-    let picker = picker.clone();
-
-    cx.spawn_in(window, async move |_this, cx| {
-      let windows = cx
-        .background_spawn(async move {
-          let mut socket = niri_ipc::socket::Socket::connect()?;
-          match socket.send(niri_ipc::Request::Windows)? {
-            Ok(niri_ipc::Response::Windows(windows)) => Ok(windows),
-            Ok(other) => anyhow::bail!("Unexpected response: {other:?}"),
-            Err(message) => anyhow::bail!("Niri error: {message}"),
-          }
-        })
-        .await;
-
-      let windows: Vec<niri_ipc::Window> = match windows {
-        Ok(windows) => windows,
-        Err(error) => {
-          tracing::error!(?error, "Failed to list niri windows");
-          return;
-        }
-      };
-
-      let items: Vec<WindowItem> = windows
-        .into_iter()
-        .map(|window| {
-          let title: SharedString = window
-            .title
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| "(untitled)".to_string())
-            .into();
-          let app_id: SharedString = window.app_id.unwrap_or_default().into();
-          let search_string = format!("{title} {app_id}");
-
-          WindowItem {
-            id: window.id,
-            title,
-            app_id,
-            is_focused: window.is_focused,
-            search_string,
-          }
-        })
-        .collect();
-
-      picker
-        .update_in(cx, |picker, window, cx| {
-          picker.set_items(items, window, cx);
-        })
-        .log_err();
-    })
   }
 }
 

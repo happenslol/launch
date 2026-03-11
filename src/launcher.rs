@@ -123,7 +123,7 @@ impl Launcher {
     items.extend(bluetooth::get_items());
     items.extend(clipboard::get_items());
     items.extend(llm::get_items());
-    items.extend(niri::get_items());
+    items.extend(niri::get_items(cx));
     items.extend(power::get_items());
     items.extend(search_providers());
 
@@ -163,8 +163,17 @@ impl Launcher {
       &picker,
       window,
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
-        PickerEvent::Picked(item) => this.launch(item.clone(), window, cx),
-        PickerEvent::SecondaryPicked(_) => {}
+        PickerEvent::Picked(item) => {
+          if let RootItem::App { entry, .. } = &item {
+            if let Some(window_id) = niri::find_window_by_app_id(&entry.appid, cx) {
+              DB.record_launch(&item.id());
+              niri::focus_niri_window(window_id, window, cx);
+              return;
+            }
+          }
+          this.launch(item.clone(), window, cx);
+        }
+        PickerEvent::SecondaryPicked(item) => this.launch(item.clone(), window, cx),
         PickerEvent::QueryChanged(query) => {
           this.update_inline_results(query.clone(), window, cx);
         }
