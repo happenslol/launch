@@ -12,8 +12,10 @@ use rusqlite::OpenFlags;
 use rustix::fs::{OFlags, fcntl_setfl};
 use rustix::pipe::PipeFlags;
 use tracing::{debug, error, info, warn};
-use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, delegate_noop, event_created_child};
 use wayland_client::protocol::{wl_registry, wl_seat};
+use wayland_client::{
+  Connection, Dispatch, Proxy, QueueHandle, delegate_noop, event_created_child,
+};
 use wayland_protocols_wlr::data_control::v1::client::{
   zwlr_data_control_device_v1, zwlr_data_control_manager_v1, zwlr_data_control_offer_v1,
   zwlr_data_control_source_v1,
@@ -977,9 +979,16 @@ pub fn offer_and_wait(mime_data: HashMap<String, Vec<u8>>) -> anyhow::Result<()>
     SelectionState::Ours(source) => source,
     _ => unreachable!(),
   };
-  state.data_device.as_ref().unwrap().set_selection(Some(source_ref));
+  state
+    .data_device
+    .as_ref()
+    .unwrap()
+    .set_selection(Some(source_ref));
 
-  info!("Forked clipboard offer: serving {} mime types", state.clipboard_data.len());
+  info!(
+    "Forked clipboard offer: serving {} mime types",
+    state.clipboard_data.len()
+  );
 
   loop {
     event_queue.blocking_dispatch(&mut state)?;
@@ -1019,7 +1028,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for StandaloneState {
       "zwlr_data_control_manager_v1" => {
         state.data_manager = Some(
           registry.bind::<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1, _, _>(
-            name, version, qh, (),
+            name,
+            version,
+            qh,
+            (),
           ),
         );
       }

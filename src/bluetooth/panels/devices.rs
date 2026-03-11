@@ -231,12 +231,14 @@ impl BluetoothDevicesPanel {
       picker
     });
 
-    let subscriptions = vec![cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
-      if let PickerEvent::Picked(bluetooth_entry) = ev {
-        let device = bluetooth_entry.entry.read(cx).device.clone();
-        this.handle_device_picked(device, window, cx);
-      }
-    })];
+    let subscriptions = vec![
+      cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| {
+        if let PickerEvent::Picked(bluetooth_entry) = ev {
+          let device = bluetooth_entry.entry.read(cx).device.clone();
+          this.handle_device_picked(device, window, cx);
+        }
+      }),
+    ];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 

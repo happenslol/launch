@@ -379,10 +379,8 @@ impl WifiPanel {
       picker
     });
 
-    let subscriptions = vec![cx.subscribe_in(
-      &picker,
-      window,
-      |this, _picker, ev, window, cx| match ev {
+    let subscriptions = vec![
+      cx.subscribe_in(&picker, window, |this, _picker, ev, window, cx| match ev {
         PickerEvent::Picked(wifi_entry) => {
           let (access_point, is_connected, is_known, connection_path) = {
             let entry = wifi_entry.entry.read(cx);
@@ -408,8 +406,8 @@ impl WifiPanel {
           this.open_action_submenu(wifi_entry.clone(), window, cx);
         }
         _ => {}
-      },
-    )];
+      }),
+    ];
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 

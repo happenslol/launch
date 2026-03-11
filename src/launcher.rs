@@ -24,15 +24,17 @@ use nucleo_matcher::{
   Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::{
-  audio, bluetooth, clipboard, niri,
+  audio, bluetooth, clipboard,
   db::DB,
+  dbus,
+  dbus::GlobalDbusConnection,
   icon::{Icon, IconName},
   llm,
   matcher::MatcherPool,
-  network,
+  network, niri,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   power,
   util::{ResultExt, h_flex, v_flex},
@@ -167,8 +169,40 @@ impl Launcher {
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
         PickerEvent::Picked(item) => {
           if let RootItem::App { entry, .. } = &item {
+            if entry.dbus_activatable() {
+              DB.record_launch(&item.id());
+              let app_id = entry.appid.clone();
+              let conn_task = GlobalDbusConnection::session(cx);
+              let window_id = niri::find_window_by_app_id(&entry.appid, cx);
+              let entry = entry.clone();
+              cx.spawn_in(window, async move |_, cx| {
+                if let Some(conn) = conn_task.await {
+                  if dbus::application::activate(&conn, &app_id).await.is_ok() {
+                    debug!(app_id, "Launched via dbus activation");
+                    let _ = cx.update(|window, _| window.remove_window());
+                    return;
+                  }
+                }
+                if let Some(window_id) = window_id {
+                  debug!(app_id = entry.appid.as_str(), "Falling back to niri focus");
+                  let _ = cx.update(|window, cx| niri::focus_niri_window(window_id, window, cx));
+                  return;
+                }
+                debug!(app_id = entry.appid.as_str(), "Falling back to fork/exec");
+                match xdg::start(&entry) {
+                  Ok(_) => {
+                    let _ = cx.update(|window, _| window.remove_window());
+                  }
+                  Err(err) => error!(?err, "Failed to start process"),
+                }
+              })
+              .detach();
+              return;
+            }
+
             if let Some(window_id) = niri::find_window_by_app_id(&entry.appid, cx) {
               DB.record_launch(&item.id());
+              debug!(app_id = entry.appid.as_str(), "Launching via niri focus");
               niri::focus_niri_window(window_id, window, cx);
               return;
             }
@@ -388,15 +422,17 @@ impl Launcher {
     });
   }
 
-
   fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
     DB.record_launch(&item.id());
 
     match &item {
-      RootItem::App { entry, .. } => match xdg::start(entry) {
-        Ok(_) => window.remove_window(),
-        Err(err) => error!(?err, "Failed to start process"),
-      },
+      RootItem::App { entry, .. } => {
+        debug!(app_id = entry.appid.as_str(), "Launching via fork/exec");
+        match xdg::start(entry) {
+          Ok(_) => window.remove_window(),
+          Err(err) => error!(?err, "Failed to start process"),
+        }
+      }
       RootItem::Panel { view, .. } => {
         let panel = view(window, cx);
         self.active_panel = Some(panel);

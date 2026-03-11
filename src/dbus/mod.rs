@@ -1,3 +1,4 @@
+pub mod application;
 pub mod bluez;
 pub mod logind;
 pub mod networkmanager;
@@ -45,7 +46,6 @@ impl GlobalDbusConnection {
     task
   }
 
-  #[allow(unused)]
   pub fn session(cx: &mut App) -> Shared<Task<Option<zbus::Connection>>> {
     let this = cx.global::<Self>();
     if let Some(shared) = this.session.as_ref() {

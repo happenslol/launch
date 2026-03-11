@@ -45,9 +45,14 @@ impl NiriState {
   }
 
   pub fn find_window_by_app_id(&self, app_id: &str) -> Option<u64> {
-    self.windows
+    self
+      .windows
       .iter()
-      .find(|w| w.app_id.as_deref() == Some(app_id))
+      .find(|w| {
+        w.app_id
+          .as_deref()
+          .is_some_and(|id| id.eq_ignore_ascii_case(app_id))
+      })
       .map(|w| w.id)
   }
 
@@ -215,11 +220,7 @@ fn windows_to_items(windows: &[niri_ipc::Window]) -> Vec<WindowItem> {
         .unwrap_or("(untitled)")
         .to_string()
         .into();
-      let app_id: SharedString = window
-        .app_id
-        .clone()
-        .unwrap_or_default()
-        .into();
+      let app_id: SharedString = window.app_id.clone().unwrap_or_default().into();
       let search_string = format!("{title} {app_id}");
 
       WindowItem {
@@ -252,29 +253,24 @@ impl WindowsPanel {
       picker
     });
 
-    let mut subscriptions = vec![cx.subscribe_in(
-      &picker,
-      window,
-      |_this, _picker, event, window, cx| {
-        if let PickerEvent::Picked(item) = event {
-          focus_niri_window(item.id, window, cx);
-        }
-      },
-    )];
+    let mut subscriptions =
+      vec![
+        cx.subscribe_in(&picker, window, |_this, _picker, event, window, cx| {
+          if let PickerEvent::Picked(item) = event {
+            focus_niri_window(item.id, window, cx);
+          }
+        }),
+      ];
 
-    subscriptions.push(cx.subscribe_in(
-      &niri_state,
-      window,
-      {
-        let picker = picker.clone();
-        move |_this, niri_state, _event: &NiriEvent, window, cx| {
-          let items = windows_to_items(niri_state.read(cx).windows());
-          picker.update(cx, |picker, cx| {
-            picker.set_items(items, window, cx);
-          });
-        }
-      },
-    ));
+    subscriptions.push(cx.subscribe_in(&niri_state, window, {
+      let picker = picker.clone();
+      move |_this, niri_state, _event: &NiriEvent, window, cx| {
+        let items = windows_to_items(niri_state.read(cx).windows());
+        picker.update(cx, |picker, cx| {
+          picker.set_items(items, window, cx);
+        });
+      }
+    }));
 
     cx.focus_view(&picker.read(cx).search_input.clone(), window);
 
@@ -327,10 +323,18 @@ impl PickerDelegate for WindowsDelegate {
       .items_center()
       .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
       .when_some(icon, |this, icon| {
-        this.child(img(ImageSource::Resource(icon.clone())).size(icon_size).flex_shrink_0())
+        this.child(
+          img(ImageSource::Resource(icon.clone()))
+            .size(icon_size)
+            .flex_shrink_0(),
+        )
       })
       .when_none(&icon, |this| {
-        this.child(Icon::new(IconName::AppWindow).size(icon_size).flex_shrink_0())
+        this.child(
+          Icon::new(IconName::AppWindow)
+            .size(icon_size)
+            .flex_shrink_0(),
+        )
       })
       .child(
         h_flex()

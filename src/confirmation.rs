@@ -164,9 +164,12 @@ impl Render for ConfirmationPrompt {
           .rounded_xl()
           .bg(rgba(0x00000088))
           .when(!closing, |this| {
-            this.on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
-              this.start_exit(cx);
-            }))
+            this.on_mouse_down(
+              gpui::MouseButton::Left,
+              cx.listener(|this, _, _, cx| {
+                this.start_exit(cx);
+              }),
+            )
           })
           .with_animation(
             ElementId::NamedInteger("confirmation-backdrop-fade".into(), closing as u64),
@@ -270,7 +273,5 @@ fn render_button(
 }
 
 pub fn render_confirmation_overlay(prompt: &Entity<ConfirmationPrompt>) -> AnyElement {
-  div()
-    .child(prompt.clone())
-    .into_any_element()
+  div().child(prompt.clone()).into_any_element()
 }
