@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+  Arc,
+  atomic::{AtomicBool, Ordering},
+};
 
 use gpui::{
   App, Context, Entity, EventEmitter, FocusHandle, Focusable, Global, ImageSource, IntoElement,
@@ -129,27 +132,52 @@ pub fn find_window_by_app_id(app_id: &str, cx: &App) -> Option<u64> {
   state.0.read(cx).find_window_by_app_id(app_id)
 }
 
-pub fn focus_niri_window(window_id: u64, window: &mut Window, cx: &App) {
-  window
-    .spawn(cx, async move |cx| {
-      cx.background_spawn(async move {
-        let mut socket = niri_ipc::socket::Socket::connect()?;
-        let action = niri_ipc::Action::FocusWindow { id: window_id };
-        let reply = socket.send(niri_ipc::Request::Action(action))?;
-        if let Err(message) = reply {
-          anyhow::bail!("Niri error: {message}");
-        }
-        anyhow::Ok(())
-      })
-      .await
-      .log_err();
+fn focus_niri_window_sync(window_id: u64) -> anyhow::Result<()> {
+  let mut socket = niri_ipc::socket::Socket::connect()?;
+  let action = niri_ipc::Action::FocusWindow { id: window_id };
+  let reply = socket.send(niri_ipc::Request::Action(action))?;
+  if let Err(message) = reply {
+    anyhow::bail!("Niri error: {message}");
+  }
+  Ok(())
+}
 
-      cx.update(|window, _cx| {
-        window.remove_window();
+pub fn focus_niri_window(window_id: u64, window: &mut Window, cx: &App) {
+  if crate::IS_DAEMON.load(Ordering::Acquire) {
+    window
+      .spawn(cx, async move |cx| {
+        cx.update(|window, _cx| {
+          window.remove_window();
+        })
+        .log_err();
+
+        cx.background_spawn(async move {
+          std::thread::sleep(std::time::Duration::from_millis(50));
+          focus_niri_window_sync(window_id)
+        })
+        .await
+        .log_err();
       })
-      .log_err();
-    })
-    .detach();
+      .detach();
+  } else {
+    match fork::fork() {
+      Ok(fork::Fork::Child) => {
+        let _ = fork::setsid();
+        let _ = fork::redirect_stdio();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if let Err(err) = focus_niri_window_sync(window_id) {
+          tracing::error!(?err, "Forked niri focus failed");
+        }
+        std::process::exit(0);
+      }
+      Ok(fork::Fork::Parent(_)) => {
+        window.remove_window();
+      }
+      Err(err) => {
+        tracing::error!("Failed to fork niri focus process: {err}");
+      }
+    }
+  }
 }
 
 pub fn get_items(cx: &App) -> Vec<RootItem> {

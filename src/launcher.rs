@@ -7,6 +7,8 @@ use std::{
   },
 };
 
+use crate::wayland;
+
 use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
@@ -353,12 +355,17 @@ impl Launcher {
 
   fn copy_result(&mut self, _: &CopyResult, window: &mut Window, cx: &mut Context<Self>) {
     if let Some(color) = &self.color_result {
-      let connection = crate::wayland::WaylandConnection::global(cx);
-      connection
-        .read(cx)
-        .send_command(crate::wayland::Command::OfferText {
-          text: color.copy_text.to_string(),
-        });
+      let text = color.copy_text.to_string();
+
+      if crate::IS_DAEMON.load(Ordering::Acquire) {
+        let connection = wayland::WaylandConnection::global(cx);
+        connection
+          .read(cx)
+          .send_command(wayland::Command::OfferText { text });
+      } else {
+        wayland::fork_clipboard_offer(wayland::build_text_mime_data(&text));
+      }
+
       window.remove_window();
     }
   }

@@ -11,10 +11,12 @@ use calloop::{Interest, Mode, PostAction};
 use rusqlite::OpenFlags;
 use rustix::fs::{OFlags, fcntl_setfl};
 use rustix::pipe::PipeFlags;
-use tracing::{debug, error, warn};
-use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, event_created_child};
+use tracing::{debug, error, info, warn};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, delegate_noop, event_created_child};
+use wayland_client::protocol::{wl_registry, wl_seat};
 use wayland_protocols_wlr::data_control::v1::client::{
-  zwlr_data_control_device_v1, zwlr_data_control_offer_v1, zwlr_data_control_source_v1,
+  zwlr_data_control_device_v1, zwlr_data_control_manager_v1, zwlr_data_control_offer_v1,
+  zwlr_data_control_source_v1,
 };
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -918,3 +920,205 @@ impl Dispatch<zwlr_data_control_source_v1::ZwlrDataControlSourceV1, ()> for Stat
     }
   }
 }
+
+pub(crate) fn build_text_mime_data(text: &str) -> HashMap<String, Vec<u8>> {
+  let data = text.as_bytes().to_vec();
+  let mut mime_data = HashMap::new();
+  for mime in TEXT_MIME_TYPES {
+    mime_data.insert((*mime).to_string(), data.clone());
+  }
+  mime_data
+}
+
+struct StandaloneState {
+  seat: Option<wl_seat::WlSeat>,
+  data_device: Option<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1>,
+  data_manager: Option<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1>,
+  clipboard_data: HashMap<String, Vec<u8>>,
+  selection_state: SelectionState,
+}
+
+pub fn offer_and_wait(mime_data: HashMap<String, Vec<u8>>) -> anyhow::Result<()> {
+  let conn = Connection::connect_to_env()?;
+  let display = conn.display();
+  let mut event_queue = conn.new_event_queue();
+  let qh = event_queue.handle();
+  let _registry = display.get_registry(&qh, ());
+
+  let mut state = StandaloneState {
+    seat: None,
+    data_device: None,
+    data_manager: None,
+    clipboard_data: mime_data,
+    selection_state: SelectionState::Free,
+  };
+
+  event_queue.roundtrip(&mut state)?;
+
+  if let (Some(data_manager), Some(seat)) = (&state.data_manager, &state.seat) {
+    let device = data_manager.get_data_device(seat, &qh, ());
+    state.data_device = Some(device);
+  } else {
+    anyhow::bail!("Failed to bind wl_seat or data control manager");
+  }
+
+  // Create the data source and offer all mime types
+  let source = state
+    .data_manager
+    .as_ref()
+    .unwrap()
+    .create_data_source(&qh, ());
+  for mime_type in state.clipboard_data.keys() {
+    source.offer(mime_type.clone());
+  }
+
+  state.selection_state = SelectionState::Ours(source);
+  let source_ref = match &state.selection_state {
+    SelectionState::Ours(source) => source,
+    _ => unreachable!(),
+  };
+  state.data_device.as_ref().unwrap().set_selection(Some(source_ref));
+
+  info!("Forked clipboard offer: serving {} mime types", state.clipboard_data.len());
+
+  loop {
+    event_queue.blocking_dispatch(&mut state)?;
+    if matches!(state.selection_state, SelectionState::Free) {
+      info!("Forked clipboard offer: selection taken by another app, exiting");
+      break;
+    }
+  }
+
+  Ok(())
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for StandaloneState {
+  fn event(
+    state: &mut Self,
+    registry: &wl_registry::WlRegistry,
+    event: wl_registry::Event,
+    _data: &(),
+    _conn: &Connection,
+    qh: &QueueHandle<Self>,
+  ) {
+    let wl_registry::Event::Global {
+      name,
+      interface,
+      version,
+    } = event
+    else {
+      return;
+    };
+
+    match &interface[..] {
+      "wl_seat" => {
+        if state.seat.is_none() {
+          state.seat = Some(registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, ()));
+        }
+      }
+      "zwlr_data_control_manager_v1" => {
+        state.data_manager = Some(
+          registry.bind::<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1, _, _>(
+            name, version, qh, (),
+          ),
+        );
+      }
+      _ => {}
+    }
+  }
+}
+
+impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for StandaloneState {
+  fn event(
+    state: &mut Self,
+    _device: &zwlr_data_control_device_v1::ZwlrDataControlDeviceV1,
+    event: zwlr_data_control_device_v1::Event,
+    _data: &(),
+    _conn: &Connection,
+    _qh: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_data_control_device_v1::Event::DataOffer { id } => {
+        // We don't care about incoming offers in the standalone state
+        id.destroy();
+      }
+      zwlr_data_control_device_v1::Event::Selection { id } => {
+        if let Some(offer) = id {
+          offer.destroy();
+        }
+      }
+      zwlr_data_control_device_v1::Event::Finished => {
+        state.data_device = None;
+      }
+      _ => {}
+    }
+  }
+
+  event_created_child!(StandaloneState, zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, [
+    zwlr_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()),
+  ]);
+}
+
+impl Dispatch<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()> for StandaloneState {
+  fn event(
+    _state: &mut Self,
+    _offer: &zwlr_data_control_offer_v1::ZwlrDataControlOfferV1,
+    _event: zwlr_data_control_offer_v1::Event,
+    _data: &(),
+    _conn: &Connection,
+    _qh: &QueueHandle<Self>,
+  ) {
+  }
+}
+
+impl Dispatch<zwlr_data_control_source_v1::ZwlrDataControlSourceV1, ()> for StandaloneState {
+  fn event(
+    state: &mut Self,
+    source: &zwlr_data_control_source_v1::ZwlrDataControlSourceV1,
+    event: zwlr_data_control_source_v1::Event,
+    _data: &(),
+    _conn: &Connection,
+    _qh: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {
+        let is_ours = matches!(
+          &state.selection_state,
+          SelectionState::Ours(our_source) if our_source.id() == source.id()
+        );
+        if !is_ours {
+          return;
+        }
+
+        let Some(data) = state.clipboard_data.get(&mime_type) else {
+          return;
+        };
+
+        if let Err(err) = fcntl_setfl(&fd, OFlags::empty()) {
+          error!(?err, "Failed to clear O_NONBLOCK on send fd");
+          return;
+        }
+
+        let mut file = fs::File::from(fd);
+        if let Err(err) = file.write_all(data) {
+          error!(?err, "Failed to write clipboard data to fd");
+        }
+      }
+      zwlr_data_control_source_v1::Event::Cancelled => {
+        let is_ours = matches!(
+          &state.selection_state,
+          SelectionState::Ours(our_source) if our_source.id() == source.id()
+        );
+
+        if is_ours {
+          state.selection_state = SelectionState::Free;
+        }
+        source.destroy();
+      }
+      _ => {}
+    }
+  }
+}
+
+delegate_noop!(StandaloneState: ignore wl_seat::WlSeat);
+delegate_noop!(StandaloneState: ignore zwlr_data_control_manager_v1::ZwlrDataControlManagerV1);

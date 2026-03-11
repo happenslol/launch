@@ -30,7 +30,11 @@ mod util;
 mod wayland;
 mod xdg;
 
-use std::{os::unix::net::UnixListener, process};
+use std::{
+  os::unix::net::UnixListener,
+  process,
+  sync::atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::Result;
 use clap::Parser;
@@ -38,6 +42,8 @@ use flume::Receiver;
 use fork::Fork;
 use gpui::{App, Application, QuitMode, prelude::*};
 use tracing::{debug, error, info};
+
+pub static IS_DAEMON: AtomicBool = AtomicBool::new(false);
 
 use crate::{
   assets::{Assets, load_embedded_fonts},
@@ -64,8 +70,6 @@ fn main() -> Result<()> {
     None => debug!("no build id"),
   }
 
-  // FIXME: Copying is broken in this mode, since we'll quit and stop offering content when the
-  // window closes. We could fix this by forking a thread that holds the offer until it is accepted.
   if args.no_daemon {
     run_app(args.panel, args.no_keyboard_capture, None);
     return Ok(());
@@ -102,6 +106,8 @@ fn main() -> Result<()> {
 
 fn daemonize(listener: UnixListener, panel: Option<String>, no_keyboard_capture: bool) {
   if let Fork::Child = fork::fork().expect("Failed to fork") {
+    IS_DAEMON.store(true, Ordering::Release);
+
     if fork::setsid().is_err() {
       eprintln!("Failed to setsid: {}", std::io::Error::last_os_error());
       process::exit(1);

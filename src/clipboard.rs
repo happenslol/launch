@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+  Arc,
+  atomic::{AtomicBool, Ordering},
+};
 
 use gpui::{
   AnyElement, App, Context, Entity, FocusHandle, Focusable, Image, ImageFormat, ImageSource,
@@ -10,6 +13,7 @@ use nucleo_matcher::{
   Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
+use tracing::error;
 
 use crate::{
   confirmation::{ConfirmationEvent, ConfirmationPrompt, render_confirmation_overlay},
@@ -108,12 +112,19 @@ impl ClipboardPanel {
     });
 
     let subscriptions = vec![
-      cx.subscribe_in(&picker, window, |this, _picker, event, window, cx| {
+      cx.subscribe_in(&picker, window, |_this, _picker, event, window, cx| {
         if let PickerEvent::Picked(item) = event {
-          this
-            .connection
-            .read(cx)
-            .send_command(wayland::Command::CopyHistoryEntry { id: item.id });
+          if crate::IS_DAEMON.load(Ordering::Acquire) {
+            let connection = wayland::WaylandConnection::global(cx);
+            connection
+              .read(cx)
+              .send_command(wayland::Command::CopyHistoryEntry { id: item.id });
+          } else if let Some(reader) = ClipboardDbReader::global(cx) {
+            match reader.get_mime_data_by_id(item.id) {
+              Ok(mime_data) => wayland::fork_clipboard_offer(mime_data),
+              Err(err) => error!(?err, "Failed to read clipboard entry for fork offer"),
+            }
+          }
           window.remove_window();
         }
       }),
