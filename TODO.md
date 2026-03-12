@@ -20,6 +20,11 @@
 - [x] lock, hibernate, shutdown
 - [x] update styling for streams
 - [x] submenu experiments
+- [ ] replace --no-daemon with --foreground
+- [ ] clipboard entries above 10mb
+- [ ] screen lock
+- [ ] tray host
+- [ ] notifications
 - [ ] calc result history/panel
 - [ ] process monitor/kill
 - [ ] alternate actions in clipboard (e.g. open uri)
@@ -28,7 +33,6 @@
 - [ ] kdl config
 - [ ] make windows panel dependant on detected window manager/compositor
 - [ ] open existing instance for application if found
-- [ ] tray host
 
 # refactor
 
