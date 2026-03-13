@@ -130,6 +130,14 @@ While updating an entity (`cx: Context<T>`), it can emit an event using `cx.emit
 
 Other entities can then register a callback to handle these events by doing `cx.subscribe(other_entity, |this, other_entity, event, cx| ...)`. This will return a `Subscription` which deregisters the callback when dropped. Typically `cx.subscribe` happens when creating a new entity and the subscriptions are stored in a `_subscriptions: Vec<Subscription>` field.
 
+# Clipboard
+
+Never use GPUI's built-in clipboard API. This project has its own clipboard implementation via a custom Wayland connection (`zwlr_data_control` protocol) with persistent history. Use:
+
+- `WaylandConnection::send_command(Command::OfferText { text })` to write text to the clipboard
+- `WaylandConnection::send_command(Command::CopyHistoryEntry { id })` to copy a history entry back to the clipboard
+- `ClipboardDbReader::global(cx)` to get a reader, then `reader.recent(limit)` or `reader.get_mime_data_by_id(id)` to read clipboard history
+
 # Panels
 
 A "panel" is a view that is rendered in the launcher window. Panels can be selected from the launcher or started from the command line with their id. Panels will mostly use a picker view, but can theoretically render whatever they want.
