@@ -42,7 +42,7 @@ const X11_METADATA_MIMES: &[&str] = &[
 const SECRET_HINT_MIME: &str = "x-kde-passwordManagerHint";
 const REOFFER_HINT_MIME: &str = "x-launch";
 
-const MAX_ENTRY_SIZE: usize = 10 * 1024 * 1024;
+const MAX_DB_ENTRY_SIZE: usize = 100 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentType {
@@ -514,7 +514,6 @@ struct MimeReadState {
   total_count: usize,
   original_offer_id: wayland_client::backend::ObjectId,
   offered_mime_types: Vec<String>,
-  total_bytes: usize,
 }
 
 impl State {
@@ -587,17 +586,25 @@ impl State {
 
     expand_text_aliases(&mut mime_data, &offered_mime_types);
 
+    let total_bytes: usize = mime_data.values().map(|d| d.len()).sum();
     let content_type = detect_content_type(&offered_mime_types, &mime_data);
     let preview = compute_preview(content_type, &mime_data);
 
     debug!(
       content_type = ?content_type,
       mime_count = mime_data.len(),
+      total_bytes,
       preview = &preview,
       "Clipboard data captured"
     );
 
-    if let Some(writer) = &self.clipboard.db_writer {
+    if total_bytes > MAX_DB_ENTRY_SIZE {
+      debug!(
+        total_bytes,
+        max = MAX_DB_ENTRY_SIZE,
+        "Clipboard entry exceeds database size limit, skipping persistence"
+      );
+    } else if let Some(writer) = &self.clipboard.db_writer {
       writer.insert(&offered_mime_types, &mime_data, content_type, &preview);
     }
 
@@ -709,7 +716,6 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Stat
           total_count: target_mimes.len(),
           original_offer_id: offer_id,
           offered_mime_types: mime_types,
-          total_bytes: 0,
         }));
 
         for target_mime in &target_mimes {
@@ -762,33 +768,6 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Stat
               }
               Ok(buf) => {
                 let mut rs = read_state.borrow_mut();
-                rs.total_bytes += buf.len();
-                if rs.total_bytes > MAX_ENTRY_SIZE {
-                  warn!(
-                    total_bytes = rs.total_bytes,
-                    "Clipboard entry exceeds size limit, truncating"
-                  );
-                  rs.completed.insert(mime_key.clone());
-                  let all_done = rs.completed.len() == rs.total_count;
-                  drop(rs);
-
-                  if all_done {
-                    let rs = read_state.borrow();
-                    let mime_data = rs.buffers.clone();
-                    let original_offer_id = rs.original_offer_id.clone();
-                    let offered_mime_types = rs.offered_mime_types.clone();
-                    drop(rs);
-
-                    state.on_all_mimes_read_complete(
-                      mime_data,
-                      original_offer_id,
-                      offered_mime_types,
-                      &qh,
-                    );
-                  }
-                  return Ok(PostAction::Remove);
-                }
-
                 let entry = rs.buffers.entry(mime_key.clone()).or_default();
                 entry.extend_from_slice(buf);
                 let len = buf.len();
