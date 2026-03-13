@@ -30,11 +30,7 @@ mod util;
 mod wayland;
 mod xdg;
 
-use std::{
-  os::unix::net::UnixListener,
-  process,
-  sync::atomic::{AtomicBool, Ordering},
-};
+use std::process;
 
 use anyhow::Result;
 use clap::Parser;
@@ -42,8 +38,6 @@ use flume::Receiver;
 use fork::Fork;
 use gpui::{App, Application, QuitMode, prelude::*};
 use tracing::{debug, error, info};
-
-pub static IS_DAEMON: AtomicBool = AtomicBool::new(false);
 
 use crate::{
   assets::{Assets, load_embedded_fonts},
@@ -55,10 +49,18 @@ use crate::{
 #[derive(Debug, Parser)]
 struct Args {
   panel: Option<String>,
-  #[arg(long)]
-  no_daemon: bool,
-  #[arg(long)]
+  #[arg(long, global = true)]
+  foreground: bool,
+  #[arg(long, global = true)]
   no_keyboard_capture: bool,
+  #[command(subcommand)]
+  command: Option<Command>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+  /// Start the daemon without opening a window
+  Daemon,
 }
 
 fn main() -> Result<()> {
@@ -70,8 +72,12 @@ fn main() -> Result<()> {
     None => debug!("no build id"),
   }
 
-  if args.no_daemon {
-    run_app(args.panel, args.no_keyboard_capture, None);
+  let daemon_only = matches!(args.command, Some(Command::Daemon));
+
+  if args.foreground {
+    let listener = instance::force_acquire()?;
+    let receiver = instance::listen(listener);
+    run_app(args.panel, args.no_keyboard_capture, receiver, daemon_only);
     return Ok(());
   }
 
@@ -79,35 +85,53 @@ fn main() -> Result<()> {
 
   match role {
     Role::Client(mut stream) => {
-      info!("Sending open message to background process");
-      let response = instance::send_open(&mut stream, args.panel.clone())?;
+      let response = if daemon_only {
+        info!("Daemon already running, checking version");
+        instance::send_version_check(&mut stream)
+      } else {
+        info!("Sending open message to background process");
+        instance::send_open(&mut stream, args.panel.clone())
+      };
       drop(stream);
 
-      match response {
-        Response::Accepted => {
-          info!("Background process accepted request");
+      let listener = match response {
+        Ok(Response::Accepted) => {
+          if daemon_only {
+            info!("Same-version daemon already running");
+          } else {
+            info!("Background process accepted request");
+          }
           return Ok(());
         }
-        Response::Quitting => {
+        Ok(Response::Quitting) => {
           info!("Background process is a different version, taking over");
-          let listener = instance::acquire_after_quit()?;
-          daemonize(listener, args.panel, args.no_keyboard_capture);
+          instance::acquire_after_quit()?
         }
-      }
+        Err(err) => {
+          info!(?err, "Incompatible daemon, replacing");
+          instance::force_acquire()?
+        }
+      };
+
+      let panel = if daemon_only { None } else { args.panel };
+      fork_and_run(listener, panel, args.no_keyboard_capture, daemon_only);
     }
     Role::Server(listener) => {
       info!("No existing instance, daemonizing");
-      daemonize(listener, args.panel, args.no_keyboard_capture);
+      fork_and_run(listener, args.panel, args.no_keyboard_capture, daemon_only);
     }
   }
 
   Ok(())
 }
 
-fn daemonize(listener: UnixListener, panel: Option<String>, no_keyboard_capture: bool) {
+fn fork_and_run(
+  listener: std::os::unix::net::UnixListener,
+  panel: Option<String>,
+  no_keyboard_capture: bool,
+  daemon_only: bool,
+) {
   if let Fork::Child = fork::fork().expect("Failed to fork") {
-    IS_DAEMON.store(true, Ordering::Release);
-
     if fork::setsid().is_err() {
       eprintln!("Failed to setsid: {}", std::io::Error::last_os_error());
       process::exit(1);
@@ -120,20 +144,19 @@ fn daemonize(listener: UnixListener, panel: Option<String>, no_keyboard_capture:
     }
 
     let receiver = instance::listen(listener);
-    run_app(panel, no_keyboard_capture, Some(receiver));
+    run_app(panel, no_keyboard_capture, receiver, daemon_only);
   }
 }
 
-fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Receiver<Message>>) {
-  let mode = if receiver.is_some() {
-    QuitMode::Explicit
-  } else {
-    QuitMode::LastWindowClosed
-  };
-
+fn run_app(
+  panel: Option<String>,
+  no_keyboard_capture: bool,
+  receiver: Receiver<Message>,
+  daemon_only: bool,
+) {
   Application::new()
     .with_assets(Assets)
-    .with_quit_mode(mode)
+    .with_quit_mode(QuitMode::Explicit)
     .run(move |cx| {
       tokio::init(cx);
       wayland::init(cx).unwrap();
@@ -145,24 +168,31 @@ fn run_app(panel: Option<String>, no_keyboard_capture: bool, receiver: Option<Re
       InputState::init(cx);
       load_embedded_fonts(cx).unwrap();
 
-      open_launcher_window(cx, panel, no_keyboard_capture);
+      if !daemon_only {
+        open_launcher_window(cx, panel, no_keyboard_capture);
+      }
 
-      if let Some(receiver) = receiver {
-        cx.spawn(async move |cx| {
-          while let Ok(message) = receiver.recv_async().await {
-            match message {
-              Message::Open { panel } => {
-                cx.update(|cx| {
-                  if cx.windows().is_empty() {
-                    open_launcher_window(cx, panel, no_keyboard_capture);
-                  }
-                });
-              }
+      cx.spawn(async move |cx| {
+        while let Ok(message) = receiver.recv_async().await {
+          match message {
+            Message::Open { panel } => {
+              debug!(?panel, "Processing open window message");
+              cx.update(|cx| {
+                let has_launcher = cx
+                  .windows()
+                  .iter()
+                  .any(|w| w.downcast::<Launcher>().is_some());
+                if has_launcher {
+                  debug!("Skipping open, launcher window already exists");
+                } else {
+                  open_launcher_window(cx, panel, no_keyboard_capture);
+                }
+              });
             }
           }
-        })
-        .detach();
-      }
+        }
+      })
+      .detach();
     });
 }
 

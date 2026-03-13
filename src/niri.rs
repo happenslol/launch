@@ -1,6 +1,6 @@
 use std::sync::{
   Arc,
-  atomic::{AtomicBool, Ordering},
+  atomic::AtomicBool,
 };
 
 use gpui::{
@@ -157,41 +157,21 @@ fn focus_niri_window_sync(window_id: u64) -> anyhow::Result<()> {
 }
 
 pub fn focus_niri_window(window_id: u64, window: &mut Window, cx: &App) {
-  if crate::IS_DAEMON.load(Ordering::Acquire) {
-    window
-      .spawn(cx, async move |cx| {
-        cx.update(|window, _cx| {
-          window.remove_window();
-        })
-        .log_err();
-
-        cx.background_spawn(async move {
-          std::thread::sleep(std::time::Duration::from_millis(50));
-          focus_niri_window_sync(window_id)
-        })
-        .await
-        .log_err();
-      })
-      .detach();
-  } else {
-    match fork::fork() {
-      Ok(fork::Fork::Child) => {
-        let _ = fork::setsid();
-        let _ = fork::redirect_stdio();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        if let Err(err) = focus_niri_window_sync(window_id) {
-          tracing::error!(?err, "Forked niri focus failed");
-        }
-        std::process::exit(0);
-      }
-      Ok(fork::Fork::Parent(_)) => {
+  window
+    .spawn(cx, async move |cx| {
+      cx.update(|window, _cx| {
         window.remove_window();
-      }
-      Err(err) => {
-        tracing::error!("Failed to fork niri focus process: {err}");
-      }
-    }
-  }
+      })
+      .log_err();
+
+      cx.background_spawn(async move {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        focus_niri_window_sync(window_id)
+      })
+      .await
+      .log_err();
+    })
+    .detach();
 }
 
 pub fn get_items(cx: &App) -> Vec<RootItem> {

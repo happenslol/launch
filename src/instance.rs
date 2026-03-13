@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 struct Request {
   build_id: Option<Vec<u8>>,
   panel: Option<String>,
+  open_window: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -70,10 +71,48 @@ pub fn acquire_after_quit() -> Result<UnixListener> {
   anyhow::bail!("Timed out waiting for previous instance to release socket")
 }
 
+pub fn force_acquire() -> Result<UnixListener> {
+  let address = socket_address()?;
+
+  match UnixListener::bind_addr(&address) {
+    Ok(listener) => Ok(listener),
+    Err(err) if err.kind() == ErrorKind::AddrInUse => {
+      let mut stream = UnixStream::connect_addr(&address)?;
+      send_quit(&mut stream)?;
+      drop(stream);
+      acquire_after_quit()
+    }
+    Err(err) => Err(err.into()),
+  }
+}
+
 pub fn send_open(stream: &mut UnixStream, panel: Option<String>) -> Result<Response> {
   let request = Request {
     build_id: current_build_id(),
     panel,
+    open_window: true,
+  };
+  rmp_serde::encode::write(stream, &request)?;
+  let response: Response = rmp_serde::from_read(&*stream)?;
+  Ok(response)
+}
+
+pub fn send_version_check(stream: &mut UnixStream) -> Result<Response> {
+  let request = Request {
+    build_id: current_build_id(),
+    panel: None,
+    open_window: false,
+  };
+  rmp_serde::encode::write(stream, &request)?;
+  let response: Response = rmp_serde::from_read(&*stream)?;
+  Ok(response)
+}
+
+pub fn send_quit(stream: &mut UnixStream) -> Result<Response> {
+  let request = Request {
+    build_id: Some(vec![]),
+    panel: None,
+    open_window: false,
   };
   rmp_serde::encode::write(stream, &request)?;
   let response: Response = rmp_serde::from_read(&*stream)?;
@@ -104,7 +143,8 @@ pub fn listen(listener: UnixListener) -> Receiver<Message> {
 
       let version_matches = match (&build_id, &request.build_id) {
         (Some(ours), Some(theirs)) => ours == theirs,
-        _ => true,
+        (None, None) => true,
+        _ => false,
       };
 
       if !version_matches {
@@ -115,13 +155,16 @@ pub fn listen(listener: UnixListener) -> Receiver<Message> {
 
       let _ = rmp_serde::encode::write(&mut stream, &Response::Accepted);
 
-      if sender
-        .send(Message::Open {
-          panel: request.panel,
-        })
-        .is_err()
-      {
-        break;
+      if request.open_window {
+        tracing::debug!(panel = ?request.panel, "Received open window command");
+        if sender
+          .send(Message::Open {
+            panel: request.panel,
+          })
+          .is_err()
+        {
+          break;
+        }
       }
     }
   });

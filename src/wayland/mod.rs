@@ -4,8 +4,6 @@
 
 pub(crate) mod clipboard;
 
-use std::collections::HashMap;
-use std::process;
 use std::thread;
 
 use anyhow::Result;
@@ -14,7 +12,6 @@ use calloop::{
   channel::{Channel, Event},
 };
 use calloop_wayland_source::WaylandSource;
-use fork::Fork;
 use gpui::{App, Entity, EventEmitter, Global, prelude::*};
 use tracing::{debug, error};
 use wayland_client::{
@@ -26,7 +23,6 @@ use wayland_protocols_wlr::data_control::v1::client::{
 };
 
 use clipboard::ClipboardState;
-pub(crate) use clipboard::build_text_mime_data;
 pub use clipboard::{ClipboardDbReader, ClipboardEntry, ContentType};
 
 #[derive(Debug)]
@@ -171,24 +167,6 @@ pub fn init(cx: &mut App) -> Result<()> {
   .detach();
 
   Ok(())
-}
-
-pub fn fork_clipboard_offer(mime_data: HashMap<String, Vec<u8>>) {
-  match fork::fork() {
-    Ok(Fork::Child) => {
-      let _ = fork::setsid();
-      let _ = fork::redirect_stdio();
-
-      if let Err(err) = clipboard::offer_and_wait(mime_data) {
-        error!(?err, "Forked clipboard offer failed");
-      }
-      process::exit(0);
-    }
-    Ok(Fork::Parent(_)) => {}
-    Err(err) => {
-      error!("Failed to fork clipboard offer process: {err}");
-    }
-  }
 }
 
 fn run(

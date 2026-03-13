@@ -7,7 +7,7 @@ use std::{
   },
 };
 
-use crate::wayland;
+use crate::wayland::{self, WaylandConnection};
 
 use chrono::{DateTime, Local, TimeZone};
 
@@ -391,14 +391,10 @@ impl Launcher {
     if let Some(color) = &self.color_result {
       let text = color.copy_text.to_string();
 
-      if crate::IS_DAEMON.load(Ordering::Acquire) {
-        let connection = wayland::WaylandConnection::global(cx);
-        connection
-          .read(cx)
-          .send_command(wayland::Command::OfferText { text });
-      } else {
-        wayland::fork_clipboard_offer(wayland::build_text_mime_data(&text));
-      }
+      let connection = WaylandConnection::global(cx);
+      connection
+        .read(cx)
+        .send_command(wayland::Command::OfferText { text });
 
       window.remove_window();
     }
