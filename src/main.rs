@@ -162,6 +162,7 @@ fn run_app(
       wayland::init(cx).unwrap();
       matcher::init(cx);
       dbus::init(cx);
+      dbus::status_notifier::init(cx);
       audio::init(cx);
       xdg::init(cx);
       niri::init(cx);
