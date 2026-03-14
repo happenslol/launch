@@ -43,3 +43,4 @@
 # misc
 
 - [ ] clean clipboard after x days
+- [ ] xdg icon theme lookup, transparent cache refresh/icon lookup in background thread

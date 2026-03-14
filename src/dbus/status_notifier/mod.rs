@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use futures::StreamExt;
-use gpui::{App, AppContext, Entity, EventEmitter, SharedString, Task};
+use gpui::{App, AppContext, Entity, EventEmitter, Global, SharedString, Task};
 use serde::Deserialize;
 use tracing::{info, warn};
 use zbus::fdo::IntrospectableProxy;
@@ -147,6 +147,10 @@ pub enum SystrayEvent {
   ItemUpdated { address: String },
 }
 
+struct GlobalSystray(Entity<Systray>);
+
+impl Global for GlobalSystray {}
+
 pub struct Systray {
   items: Vec<TrayItem>,
   _item_signal_tasks: HashMap<String, Task<()>>,
@@ -156,7 +160,10 @@ pub struct Systray {
 impl EventEmitter<SystrayEvent> for Systray {}
 
 impl Systray {
-  #[allow(dead_code)]
+  pub fn global(cx: &App) -> Entity<Self> {
+    cx.global::<GlobalSystray>().0.clone()
+  }
+
   pub fn items(&self) -> &[TrayItem] {
     &self.items
   }
@@ -194,6 +201,8 @@ pub fn init(cx: &mut App) {
     _item_signal_tasks: HashMap::new(),
     _host_task: None,
   });
+
+  cx.set_global(GlobalSystray(entity.clone()));
 
   let host_task = cx.spawn({
     let entity = entity.clone();

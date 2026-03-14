@@ -31,6 +31,7 @@ use crate::{
   db::DB,
   dbus,
   dbus::GlobalDbusConnection,
+  dbus::status_notifier::Systray,
   icon::{Icon, IconName},
   llm,
   matcher::MatcherPool,
@@ -62,6 +63,7 @@ struct ColorResult {
 pub struct Launcher {
   focus_handle: FocusHandle,
   picker: Entity<Picker<RootDelegate>>,
+  systray: Entity<Systray>,
   active_panel: Option<AnyView>,
   pub(crate) action_overlay: Option<AnyView>,
   color_result: Option<ColorResult>,
@@ -85,7 +87,7 @@ impl Launcher {
       app_id: Some("launch".to_string()),
       window_bounds: Some(WindowBounds::Windowed(Bounds {
         origin: point(px(0.), px(0.)),
-        size: Size::new(px(800.), px(450.)),
+        size: Size::new(px(800.), px(498.)),
       })),
       window_background: gpui::WindowBackgroundAppearance::Transparent,
       kind: WindowKind::LayerShell(LayerShellOptions {
@@ -163,7 +165,11 @@ impl Launcher {
       cx.focus_view(&picker.read(cx).search_input.clone(), window);
     }
 
-    let subscriptions = vec![cx.subscribe_in(
+    let systray = Systray::global(cx);
+
+    let subscriptions = vec![
+      cx.observe(&systray, |_, _, cx| cx.notify()),
+      cx.subscribe_in(
       &picker,
       window,
       move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
@@ -219,6 +225,7 @@ impl Launcher {
     Self {
       focus_handle: cx.focus_handle(),
       picker,
+      systray,
       active_panel,
       action_overlay: None,
       color_result: None,
@@ -464,7 +471,12 @@ impl Focusable for Launcher {
 
 impl Render for Launcher {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    v_flex()
+    let tray_items = self.systray.read(cx).items().to_vec();
+    let icon_cache = self.picker.read(cx).delegate.icon_cache.clone();
+    let icon_cache = icon_cache.read(cx);
+
+    div()
+      .size_full()
       .key_context(CONTEXT)
       .track_focus(&self.focus_handle)
       .font_family("Iosevka")
@@ -472,64 +484,106 @@ impl Render for Launcher {
       .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::go_back))
       .on_action(cx.listener(Self::copy_result))
-      .rounded_xl()
-      .size_full()
-      .border_1()
-      .border_color(rgba(0xFFFFFF15))
-      .bg(rgba(0x171717F0))
-      .overflow_hidden()
-      .when_some(self.active_panel.as_ref(), |div, panel| {
-        div.child(panel.clone())
-      })
-      .when_none(&self.active_panel, |this| {
-        this
-          .child(picker_input(&self.picker).text_size(px(18.)))
-          .when_some(self.color_result.as_ref(), |this, color| {
-            this.child(
-              v_flex()
-                .items_center()
-                .justify_center()
-                .mx_2()
-                .mt_2()
-                .mb_1()
-                .px_3()
-                .py_12()
-                .gap_1()
-                .rounded_lg()
-                .bg(color.color)
-                .child(
-                  div()
-                    .text_color(color.contrast_color)
-                    .text_size(px(16.))
-                    .child(color.formatted.clone()),
-                ),
-            )
+      .child(
+        v_flex()
+          .h(px(450.))
+          .rounded_xl()
+          .border_1()
+          .border_color(rgba(0xFFFFFF15))
+          .bg(rgba(0x171717F0))
+          .overflow_hidden()
+          .when_some(self.active_panel.as_ref(), |div, panel| {
+            div.child(panel.clone())
           })
-          .when(self.color_result.is_none(), |this| {
-            this.when_some(
-              self
-                .timestamp_result
-                .clone()
-                .or_else(|| self.fend_result.clone()),
-              |this, result| {
+          .when_none(&self.active_panel, |this| {
+            this
+              .child(picker_input(&self.picker).text_size(px(18.)))
+              .when_some(self.color_result.as_ref(), |this, color| {
                 this.child(
-                  h_flex()
+                  v_flex()
+                    .items_center()
+                    .justify_center()
+                    .mx_2()
+                    .mt_2()
+                    .mb_1()
                     .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(rgba(0xFFFFFF12))
-                    .gap_2()
-                    .text_color(rgb(0x888888))
-                    .child("=")
-                    .child(div().text_color(rgb(0xFFFFFF)).child(result)),
+                    .py_12()
+                    .gap_1()
+                    .rounded_lg()
+                    .bg(color.color)
+                    .child(
+                      div()
+                        .text_color(color.contrast_color)
+                        .text_size(px(16.))
+                        .child(color.formatted.clone()),
+                    ),
                 )
-              },
-            )
+              })
+              .when(self.color_result.is_none(), |this| {
+                this.when_some(
+                  self
+                    .timestamp_result
+                    .clone()
+                    .or_else(|| self.fend_result.clone()),
+                  |this, result| {
+                    this.child(
+                      h_flex()
+                        .px_3()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(rgba(0xFFFFFF12))
+                        .gap_2()
+                        .text_color(rgb(0x888888))
+                        .child("=")
+                        .child(div().text_color(rgb(0xFFFFFF)).child(result)),
+                    )
+                  },
+                )
+              })
+              .child(picker_results(&self.picker))
           })
-          .child(picker_results(&self.picker))
-      })
-      .when_some(self.action_overlay.clone(), |this, overlay| {
-        this.child(overlay)
+          .when_some(self.action_overlay.clone(), |this, overlay| {
+            this.child(overlay)
+          }),
+      )
+      .when(!tray_items.is_empty(), |this| {
+        this.child(
+          h_flex()
+            .justify_end()
+            .mt(px(8.))
+            .child(
+              h_flex()
+                .px_2()
+                .py_1()
+                .rounded_lg()
+                .bg(rgba(0x171717F0))
+                .border_1()
+                .border_color(rgba(0xFFFFFF15))
+                .gap_1()
+                .children(tray_items.iter().map(|item| {
+                  let icon_element = item
+                    .icon_name
+                    .as_ref()
+                    .and_then(|name| icon_cache.get(name))
+                    .map(|resource| {
+                      img(ImageSource::Resource(resource.clone()))
+                        .size(px(24.))
+                        .into_any_element()
+                    })
+                    .unwrap_or_else(|| {
+                      Icon::new(IconName::AppWindow)
+                        .size(px(24.))
+                        .into_any_element()
+                    });
+
+                  div()
+                    .p(px(4.))
+                    .rounded_md()
+                    .hover(|style| style.bg(rgba(0xFFFFFF15)))
+                    .child(icon_element)
+                })),
+            ),
+        )
       })
   }
 }
