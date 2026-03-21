@@ -103,13 +103,11 @@ impl TrayItem {
     })
   }
 
-  #[allow(dead_code)]
   pub async fn activate(&self, x: i32, y: i32) -> Result<()> {
     self.proxy.activate(x, y).await?;
     Ok(())
   }
 
-  #[allow(dead_code)]
   pub async fn secondary_activate(&self, x: i32, y: i32) -> Result<()> {
     self.proxy.secondary_activate(x, y).await?;
     Ok(())

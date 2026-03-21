@@ -37,6 +37,41 @@ impl XdgIconCache {
     self.cache.get(name)
   }
 
+  pub fn lookup(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
+    let names: Vec<String> = names
+      .into_iter()
+      .filter(|name| !self.cache.contains_key(name))
+      .collect();
+
+    if names.is_empty() {
+      return;
+    }
+
+    cx.spawn(async move |this, cx| {
+      let entries = cx
+        .background_spawn(async move {
+          let mut entries = HashMap::new();
+          for name in &names {
+            if let Some(path) = get_icon(name) {
+              entries.insert(name.clone(), Resource::Path(path.into()));
+            }
+          }
+          entries
+        })
+        .await;
+
+      if !entries.is_empty() {
+        this
+          .update(cx, |this, cx| {
+            this.cache.extend(entries);
+            cx.notify();
+          })
+          .log_err();
+      }
+    })
+    .detach();
+  }
+
   pub fn refresh(&mut self, locales: Vec<String>, cx: &mut Context<Self>) {
     if self.refresh_task.is_some() {
       return;

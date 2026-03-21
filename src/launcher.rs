@@ -13,8 +13,9 @@ use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
-  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, SharedString,
-  Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions, actions, div, img,
+  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, MouseButton,
+  SharedString, Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions,
+  actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -168,7 +169,20 @@ impl Launcher {
     let systray = Systray::global(cx);
 
     let subscriptions = vec![
-      cx.observe(&systray, |_, _, cx| cx.notify()),
+      cx.observe(&systray, |this, _, cx| {
+        let names: Vec<String> = this
+          .systray
+          .read(cx)
+          .items()
+          .iter()
+          .filter_map(|item| item.icon_name.as_ref().map(|s| s.to_string()))
+          .collect();
+
+        let icon_cache = this.picker.read(cx).delegate.icon_cache.clone();
+        icon_cache.update(cx, |cache, cx| cache.lookup(names, cx));
+
+        cx.notify();
+      }),
       cx.subscribe_in(
       &picker,
       window,
@@ -571,15 +585,47 @@ impl Render for Launcher {
                         .into_any_element()
                     })
                     .unwrap_or_else(|| {
-                      Icon::new(IconName::AppWindow)
-                        .size(px(24.))
-                        .into_any_element()
+                      let fallback = match item.icon_name.as_ref().map(|s| s.as_ref()) {
+                        Some("input-keyboard-symbolic") => IconName::Keyboard,
+                        _ => IconName::AppWindow,
+                      };
+                      Icon::new(fallback).size(px(24.)).into_any_element()
                     });
 
+                  let item = item.clone();
                   div()
+                    .id(item.id.clone())
                     .p(px(4.))
                     .rounded_md()
+                    .cursor_pointer()
                     .hover(|style| style.bg(rgba(0xFFFFFF15)))
+                    .on_click({
+                      let item = item.clone();
+                      move |_, window, cx| {
+                        let item = item.clone();
+                        window
+                          .spawn(cx, async move |cx| {
+                            item.activate(0, 0).await.log_err();
+                            let _ = cx.update(|window, _| window.remove_window());
+                          })
+                          .detach();
+                      }
+                    })
+                    .on_mouse_down(
+                      MouseButton::Right,
+                      {
+                        let item = item.clone();
+                        move |_, window, cx| {
+                          let item = item.clone();
+                          window
+                            .spawn(cx, async move |cx| {
+                              item.secondary_activate(0, 0).await.log_err();
+                              let _ = cx.update(|window, _| window.remove_window());
+                            })
+                            .detach();
+                        }
+                      },
+                    )
                     .child(icon_element)
                 })),
             ),
