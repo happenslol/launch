@@ -25,20 +25,21 @@ use nucleo_matcher::{
   Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::{
   audio, bluetooth, clipboard,
   db::DB,
   dbus,
   dbus::GlobalDbusConnection,
-  dbus::status_notifier::Systray,
+  dbus::status_notifier::{Systray, TrayItem},
   icon::{Icon, IconName},
   llm,
   matcher::MatcherPool,
   network, niri,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   power,
+  tray_menu::{self, TrayMenu, TrayMenuEvent},
   util::{ResultExt, h_flex, v_flex},
   xdg::{self, XdgIconCache, open_url},
 };
@@ -72,6 +73,7 @@ pub struct Launcher {
   fend_result: Option<SharedString>,
   fend_cancel_flag: Arc<AtomicBool>,
   fend_task: Option<Task<()>>,
+  tray_menu: Option<Entity<TrayMenu>>,
   pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -242,6 +244,7 @@ impl Launcher {
       systray,
       active_panel,
       action_overlay: None,
+      tray_menu: None,
       color_result: None,
       timestamp_result: None,
       fend_result: None,
@@ -439,6 +442,60 @@ impl Launcher {
     });
   }
 
+  fn show_tray_menu(
+    &mut self,
+    item: TrayItem,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    cx.spawn_in(window, async move |entity, cx| {
+      let proxy = match item.menu_proxy().await {
+        Ok(Some(proxy)) => proxy,
+        Ok(None) => return,
+        Err(error) => {
+          warn!(?error, "failed to get menu proxy");
+          return;
+        }
+      };
+
+      proxy.about_to_show(0).await.log_err();
+
+      let layout = match proxy.get_layout(0, -1, vec![]).await {
+        Ok((_revision, raw)) => match tray_menu::parse_layout(raw) {
+          Ok(items) => items,
+          Err(error) => {
+            warn!(?error, "failed to parse menu layout");
+            return;
+          }
+        },
+        Err(error) => {
+          warn!(?error, "failed to get menu layout");
+          return;
+        }
+      };
+
+      entity
+        .update_in(cx, |this, window, cx| {
+          let menu = cx.new(|cx| TrayMenu::new(layout, proxy, window, cx));
+
+          this._subscriptions.push(cx.subscribe_in(
+            &menu,
+            window,
+            |this, _menu, _event: &TrayMenuEvent, window, cx| {
+              this.tray_menu = None;
+              this.focus_picker(window, cx);
+              cx.notify();
+            },
+          ));
+
+          this.tray_menu = Some(menu);
+          cx.notify();
+        })
+        .log_err();
+    })
+    .detach();
+  }
+
   fn launch(&mut self, item: RootItem, window: &mut Window, cx: &mut Context<Self>) {
     DB.record_launch(&item.id());
 
@@ -601,35 +658,44 @@ impl Render for Launcher {
                     .hover(|style| style.bg(rgba(0xFFFFFF15)))
                     .on_click({
                       let item = item.clone();
-                      move |_, window, cx| {
-                        let item = item.clone();
-                        window
-                          .spawn(cx, async move |cx| {
+                      cx.listener(move |this, _, window, cx| {
+                        if item.item_is_menu || item.has_menu() {
+                          this.show_tray_menu(item.clone(), window, cx);
+                        } else {
+                          let item = item.clone();
+                          cx.spawn_in(window, async move |_, cx| {
                             item.activate(0, 0).await.log_err();
                             let _ = cx.update(|window, _| window.remove_window());
                           })
                           .detach();
-                      }
+                        }
+                      })
                     })
                     .on_mouse_down(
                       MouseButton::Right,
-                      {
+                      cx.listener({
                         let item = item.clone();
-                        move |_, window, cx| {
-                          let item = item.clone();
-                          window
-                            .spawn(cx, async move |cx| {
+                        move |this, _, window, cx| {
+                          if item.has_menu() {
+                            this.show_tray_menu(item.clone(), window, cx);
+                          } else {
+                            let item = item.clone();
+                            cx.spawn_in(window, async move |_, cx| {
                               item.secondary_activate(0, 0).await.log_err();
                               let _ = cx.update(|window, _| window.remove_window());
                             })
                             .detach();
+                          }
                         }
-                      },
+                      }),
                     )
                     .child(icon_element)
                 })),
             ),
         )
+      })
+      .when_some(self.tray_menu.as_ref(), |this, menu| {
+        this.child(menu.clone())
       })
   }
 }

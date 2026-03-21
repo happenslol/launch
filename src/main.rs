@@ -26,6 +26,7 @@ mod power;
 mod scrollbar;
 mod submenu;
 mod tokio;
+mod tray_menu;
 mod util;
 mod wayland;
 mod xdg;

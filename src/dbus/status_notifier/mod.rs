@@ -11,6 +11,8 @@ use tracing::{info, warn};
 use zbus::fdo::IntrospectableProxy;
 use zvariant::OwnedObjectPath;
 
+pub use api::DBusMenuProxy;
+
 use crate::dbus::GlobalDbusConnection;
 use crate::util::ResultExt;
 use watcher::Watcher;
@@ -43,9 +45,7 @@ pub struct TrayItem {
   pub icon_name: Option<SharedString>,
   pub icon_theme_path: Option<SharedString>,
   pub icon_pixmap: Option<Vec<(i32, i32, Vec<u8>)>>,
-  #[allow(dead_code)]
   pub menu_path: Option<OwnedObjectPath>,
-  #[allow(dead_code)]
   pub item_is_menu: bool,
 
   address: String,
@@ -101,6 +101,25 @@ impl TrayItem {
       address: address.to_owned(),
       proxy,
     })
+  }
+
+  pub fn has_menu(&self) -> bool {
+    self.menu_path.is_some()
+  }
+
+  pub async fn menu_proxy(&self) -> Result<Option<api::DBusMenuProxy<'static>>> {
+    let path = match &self.menu_path {
+      Some(path) => path.clone(),
+      None => return Ok(None),
+    };
+
+    let proxy = api::DBusMenuProxy::builder(self.proxy.inner().connection())
+      .destination(self.proxy.inner().destination().to_owned())?
+      .path(path)?
+      .build()
+      .await?;
+
+    Ok(Some(proxy))
   }
 
   pub async fn activate(&self, x: i32, y: i32) -> Result<()> {
