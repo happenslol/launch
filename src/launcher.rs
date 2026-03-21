@@ -52,8 +52,21 @@ impl fend_core::Interrupt for FendInterrupt {
   }
 }
 
-actions!(launcher, [Quit, GoBack, CopyResult, OpenModalBottomRight,]);
+actions!(
+  launcher,
+  [
+    Quit,
+    GoBack,
+    CopyResult,
+    OpenModalBottomRight,
+    Tab,
+    TrayNext,
+    TrayPrev,
+    TrayActivate,
+  ]
+);
 const CONTEXT: &str = "launcher";
+const TRAY_CONTEXT: &str = "tray";
 
 struct ColorResult {
   copy_text: SharedString,
@@ -74,6 +87,8 @@ pub struct Launcher {
   fend_cancel_flag: Arc<AtomicBool>,
   fend_task: Option<Task<()>>,
   tray_menu: Option<Entity<TrayMenu>>,
+  tray_focus_handle: FocusHandle,
+  selected_tray_index: Option<usize>,
   pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -112,6 +127,13 @@ impl Launcher {
       KeyBinding::new("shift-escape", GoBack, Some(CONTEXT)),
       KeyBinding::new("ctrl-enter", CopyResult, Some(CONTEXT)),
       KeyBinding::new("ctrl-0", OpenModalBottomRight, Some(CONTEXT)),
+      KeyBinding::new("tab", Tab, Some(CONTEXT)),
+      KeyBinding::new("right", TrayNext, Some(TRAY_CONTEXT)),
+      KeyBinding::new("l", TrayNext, Some(TRAY_CONTEXT)),
+      KeyBinding::new("left", TrayPrev, Some(TRAY_CONTEXT)),
+      KeyBinding::new("h", TrayPrev, Some(TRAY_CONTEXT)),
+      KeyBinding::new("enter", TrayActivate, Some(TRAY_CONTEXT)),
+      KeyBinding::new("space", TrayActivate, Some(TRAY_CONTEXT)),
     ]);
 
     let launches = Arc::new(DB.get_launches());
@@ -169,8 +191,16 @@ impl Launcher {
     }
 
     let systray = Systray::global(cx);
+    let tray_focus_handle = cx.focus_handle();
 
     let subscriptions = vec![
+      cx.on_focus(&tray_focus_handle, window, |this, _window, cx| {
+        let count = this.systray.read(cx).items().len();
+        if count > 0 && this.selected_tray_index.is_none() {
+          this.selected_tray_index = Some(0);
+        }
+        cx.notify();
+      }),
       cx.observe(&systray, |this, _, cx| {
         let names: Vec<String> = this
           .systray
@@ -245,6 +275,8 @@ impl Launcher {
       active_panel,
       action_overlay: None,
       tray_menu: None,
+      tray_focus_handle,
+      selected_tray_index: None,
       color_result: None,
       timestamp_result: None,
       fend_result: None,
@@ -442,6 +474,70 @@ impl Launcher {
     });
   }
 
+  fn tab(&mut self, _: &Tab, window: &mut Window, cx: &mut Context<Self>) {
+    if self.active_panel.is_some() {
+      return;
+    }
+    if self.systray.read(cx).items().is_empty() {
+      return;
+    }
+
+    if self.tray_focus_handle.is_focused(window) {
+      self.selected_tray_index = None;
+      let focus_handle = self.picker.read(cx).search_input.focus_handle(cx);
+      window.focus(&focus_handle, cx);
+    } else {
+      if self.selected_tray_index.is_none() {
+        self.selected_tray_index = Some(0);
+      }
+      window.focus(&self.tray_focus_handle, cx);
+    }
+    cx.notify();
+  }
+
+  fn tray_next(&mut self, _: &TrayNext, _window: &mut Window, cx: &mut Context<Self>) {
+    let count = self.systray.read(cx).items().len();
+    if count == 0 {
+      return;
+    }
+    self.selected_tray_index = Some(self.selected_tray_index.map_or(0, |i| (i + 1) % count));
+    cx.notify();
+  }
+
+  fn tray_prev(&mut self, _: &TrayPrev, _window: &mut Window, cx: &mut Context<Self>) {
+    let count = self.systray.read(cx).items().len();
+    if count == 0 {
+      return;
+    }
+    self.selected_tray_index = Some(
+      self
+        .selected_tray_index
+        .map_or(count - 1, |i| if i == 0 { count - 1 } else { i - 1 }),
+    );
+    cx.notify();
+  }
+
+  fn tray_activate(&mut self, _: &TrayActivate, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(index) = self.selected_tray_index else {
+      return;
+    };
+    let items = self.systray.read(cx).items().to_vec();
+    let Some(item) = items.get(index) else {
+      return;
+    };
+
+    if item.item_is_menu || item.has_menu() {
+      self.show_tray_menu(item.clone(), window, cx);
+    } else {
+      let item = item.clone();
+      cx.spawn_in(window, async move |_, cx| {
+        item.activate(0, 0).await.log_err();
+        let _ = cx.update(|window, _| window.remove_window());
+      })
+      .detach();
+    }
+  }
+
   fn show_tray_menu(
     &mut self,
     item: TrayItem,
@@ -483,7 +579,10 @@ impl Launcher {
             window,
             |this, _menu, _event: &TrayMenuEvent, window, cx| {
               this.tray_menu = None;
-              this.focus_picker(window, cx);
+              let tray_focus_handle = this.tray_focus_handle.clone();
+              window.defer(cx, move |window, cx| {
+                window.focus(&tray_focus_handle, cx);
+              });
               cx.notify();
             },
           ));
@@ -541,20 +640,22 @@ impl Focusable for Launcher {
 }
 
 impl Render for Launcher {
-  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let tray_items = self.systray.read(cx).items().to_vec();
     let icon_cache = self.picker.read(cx).delegate.icon_cache.clone();
     let icon_cache = icon_cache.read(cx);
+    let selected_tray_index = self.selected_tray_index;
+    let tray_focus_handle = self.tray_focus_handle.clone();
 
     div()
       .size_full()
       .key_context(CONTEXT)
-      .track_focus(&self.focus_handle)
       .font_family("Iosevka")
       .text_color(rgb(0xFFFFFF))
       .on_action(cx.listener(Self::quit))
       .on_action(cx.listener(Self::go_back))
       .on_action(cx.listener(Self::copy_result))
+      .on_action(cx.listener(Self::tab))
       .child(
         v_flex()
           .h(px(450.))
@@ -624,14 +725,22 @@ impl Render for Launcher {
             .mt(px(8.))
             .child(
               h_flex()
+                .key_context(TRAY_CONTEXT)
+                .track_focus(&tray_focus_handle)
+                .on_action(cx.listener(Self::tray_next))
+                .on_action(cx.listener(Self::tray_prev))
+                .on_action(cx.listener(Self::tray_activate))
                 .px_2()
                 .py_1()
                 .rounded_lg()
                 .bg(rgba(0x171717F0))
                 .border_1()
                 .border_color(rgba(0xFFFFFF15))
+                .when(selected_tray_index.is_some(), |this| this.border_color(rgba(0xFFFFFF30)))
                 .gap_1()
-                .children(tray_items.iter().map(|item| {
+                .children(tray_items.iter().enumerate().map(|(index, item)| {
+                  let is_selected = selected_tray_index == Some(index);
+
                   let icon_element = item
                     .icon_name
                     .as_ref()
@@ -655,7 +764,10 @@ impl Render for Launcher {
                     .p(px(4.))
                     .rounded_md()
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgba(0xFFFFFF15)))
+                    .when(is_selected, |this| this.bg(rgba(0xFFFFFF15)))
+                    .when(!is_selected, |this| {
+                      this.hover(|style| style.bg(rgba(0xFFFFFF15)))
+                    })
                     .on_click({
                       let item = item.clone();
                       cx.listener(move |this, _, window, cx| {

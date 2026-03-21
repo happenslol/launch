@@ -4,7 +4,8 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::{
   Animation, AnimationExt, App, Context, ElementId, EventEmitter, FocusHandle, Focusable,
-  IntoElement, KeyBinding, Render, SharedString, Task, Window, actions, div, prelude::*, px, rgba,
+  IntoElement, KeyBinding, MouseButton, Render, SharedString, Task, Window, actions, div,
+  prelude::*, px, rgba,
 };
 use zvariant::Value;
 
@@ -507,7 +508,9 @@ impl Render for TrayMenu {
       .on_action(cx.listener(Self::activate_action))
       .on_action(cx.listener(Self::open_submenu_action))
       .on_action(cx.listener(Self::close_submenu_action))
-      .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx)))
+      .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+        this.dismiss(cx);
+      }))
       .child(
         div()
           .id("tray-menu-content")
