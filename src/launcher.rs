@@ -105,7 +105,7 @@ impl Launcher {
       app_id: Some("launch".to_string()),
       window_bounds: Some(WindowBounds::Windowed(Bounds {
         origin: point(px(0.), px(0.)),
-        size: Size::new(px(800.), px(498.)),
+        size: Size::new(px(800.), px(506.)),
       })),
       window_background: gpui::WindowBackgroundAppearance::Transparent,
       kind: WindowKind::LayerShell(LayerShellOptions {
