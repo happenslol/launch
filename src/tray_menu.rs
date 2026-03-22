@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::{
   Animation, AnimationExt, App, Context, ElementId, EventEmitter, FocusHandle, Focusable,
-  IntoElement, KeyBinding, MouseButton, Render, SharedString, Task, Window, actions, div,
-  prelude::*, px, rgba,
+  IntoElement, KeyBinding, MouseButton, Render, ScrollHandle, SharedString, Task, Window, actions,
+  div, prelude::*, px, rgba,
 };
 use zvariant::Value;
 
@@ -191,6 +191,7 @@ pub struct TrayMenu {
   items: Vec<MenuItem>,
   menu_stack: Vec<(Vec<MenuItem>, Option<usize>)>,
   selected_index: Option<usize>,
+  scroll_handle: ScrollHandle,
   closing: bool,
   dismiss_task: Option<Task<()>>,
   focus_handle: FocusHandle,
@@ -223,12 +224,14 @@ impl TrayMenu {
     let focus_handle = cx.focus_handle();
     window.focus(&focus_handle, cx);
 
-    let initial_index = first_selectable_index(&items, None, Direction::Forward);
+    let visible = visible_items(&items);
+    let initial_index = first_selectable_index(&visible, None, Direction::Forward);
 
     Self {
       items,
       menu_stack: Vec::new(),
       selected_index: initial_index,
+      scroll_handle: ScrollHandle::new(),
       closing: false,
       dismiss_task: None,
       focus_handle,
@@ -264,14 +267,22 @@ impl TrayMenu {
   }
 
   fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
+    let visible = visible_items(&self.items);
     self.selected_index =
-      first_selectable_index(&self.items, self.selected_index, Direction::Forward);
+      first_selectable_index(&visible, self.selected_index, Direction::Forward);
+    if let Some(index) = self.selected_index {
+      self.scroll_handle.scroll_to_item(index);
+    }
     cx.notify();
   }
 
   fn select_prev(&mut self, _: &SelectPrev, _window: &mut Window, cx: &mut Context<Self>) {
+    let visible = visible_items(&self.items);
     self.selected_index =
-      first_selectable_index(&self.items, self.selected_index, Direction::Backward);
+      first_selectable_index(&visible, self.selected_index, Direction::Backward);
+    if let Some(index) = self.selected_index {
+      self.scroll_handle.scroll_to_item(index);
+    }
     cx.notify();
   }
 
@@ -281,12 +292,7 @@ impl TrayMenu {
 
   fn selected_visible_item(&self) -> Option<MenuItem> {
     let index = self.selected_index?;
-    self
-      .items
-      .iter()
-      .filter(|item| item.visible)
-      .nth(index)
-      .cloned()
+    visible_items(&self.items).into_iter().nth(index)
   }
 
   fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -343,7 +349,8 @@ impl TrayMenu {
 
     self.menu_stack.push((parent_items, parent_selection));
 
-    let initial_index = first_selectable_index(&children, None, Direction::Forward);
+    let visible = visible_items(&children);
+    let initial_index = first_selectable_index(&visible, None, Direction::Forward);
     self.items = children;
     self.selected_index = initial_index;
     cx.notify();
@@ -357,8 +364,9 @@ impl TrayMenu {
             this
               .update_in(cx, |this, _window, cx| {
                 this.items = new_items;
+                let visible = visible_items(&this.items);
                 this.selected_index =
-                  first_selectable_index(&this.items, None, Direction::Forward);
+                  first_selectable_index(&visible, None, Direction::Forward);
                 cx.notify();
               })
               .log_err();
@@ -403,22 +411,37 @@ enum Direction {
   Backward,
 }
 
+fn visible_items(items: &[MenuItem]) -> Vec<MenuItem> {
+  let mut result: Vec<MenuItem> = items
+    .iter()
+    .filter(|i| i.visible)
+    .cloned()
+    .fold(Vec::new(), |mut acc, item| {
+      if item.is_separator {
+        if acc.last().is_some_and(|last: &MenuItem| !last.is_separator) {
+          acc.push(item);
+        }
+      } else {
+        acc.push(item);
+      }
+      acc
+    });
+  if result.last().is_some_and(|i| i.is_separator) {
+    result.pop();
+  }
+  result
+}
+
 fn first_selectable_index(
-  items: &[MenuItem],
+  visible_items: &[MenuItem],
   current: Option<usize>,
   direction: Direction,
 ) -> Option<usize> {
-  let visible: Vec<(usize, &MenuItem)> = items
-    .iter()
-    .enumerate()
-    .filter(|(_, item)| item.visible)
-    .collect();
-
-  if visible.is_empty() {
+  if visible_items.is_empty() {
     return None;
   }
 
-  let count = visible.len();
+  let count = visible_items.len();
 
   let start = match (current, direction) {
     (None, Direction::Forward) => 0,
@@ -445,7 +468,7 @@ fn first_selectable_index(
       Direction::Backward => (start + count - offset) % count,
     };
 
-    let (_, item) = &visible[index];
+    let item = &visible_items[index];
     if !item.is_separator && item.enabled {
       return Some(index);
     }
@@ -464,28 +487,11 @@ impl Render for TrayMenu {
   fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let closing = self.closing;
     let easing = |delta: f32| 1.0 - (1.0 - delta).powi(3);
-    let mut visible_items: Vec<MenuItem> = self
-      .items
-      .iter()
-      .filter(|i| i.visible)
-      .cloned()
-      .fold(Vec::new(), |mut acc, item| {
-        if item.is_separator {
-          if acc.last().is_some_and(|last: &MenuItem| !last.is_separator) {
-            acc.push(item);
-          }
-        } else {
-          acc.push(item);
-        }
-        acc
-      });
-    if visible_items.last().is_some_and(|i| i.is_separator) {
-      visible_items.pop();
-    }
+    let visible = visible_items(&self.items);
     let selected_index = self.selected_index;
 
     // Check if any item has a toggle indicator for alignment
-    let has_toggles = visible_items
+    let has_toggles = visible
       .iter()
       .any(|item| item.toggle_type != ToggleType::None);
 
@@ -518,12 +524,13 @@ impl Render for TrayMenu {
           .w(px(250.))
           .max_h(px(400.))
           .overflow_y_scroll()
+          .track_scroll(&self.scroll_handle)
           .bg(rgba(0x171717F0))
           .border_1()
           .border_color(rgba(0xFFFFFF15))
           .rounded_lg()
           .py_1()
-          .children(visible_items.iter().enumerate().map(|(index, item)| {
+          .children(visible.iter().enumerate().map(|(index, item)| {
             let is_selected = selected_index == Some(index);
 
             if item.is_separator {
