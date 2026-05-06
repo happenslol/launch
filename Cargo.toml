@@ -71,6 +71,7 @@ rig-core = { version = "0.31.0" }
 buildid = "1.0.4"
 tracing-appender = "0.2.4"
 hex = "0.4.3"
+image = "0.25"
 
 [dependencies.gpui]
 git = "https://github.com/zed-industries/zed"

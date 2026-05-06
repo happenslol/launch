@@ -1,6 +1,6 @@
 use std::{
   collections::{BTreeMap, HashMap, HashSet},
-  path::PathBuf,
+  path::{Path, PathBuf},
   process,
 };
 
@@ -37,13 +37,13 @@ impl XdgIconCache {
     self.cache.get(name)
   }
 
-  pub fn lookup(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
-    let names: Vec<String> = names
+  pub fn lookup(&mut self, items: Vec<(String, Option<String>)>, cx: &mut Context<Self>) {
+    let items: Vec<(String, Option<String>)> = items
       .into_iter()
-      .filter(|name| !self.cache.contains_key(name))
+      .filter(|(name, _)| !self.cache.contains_key(name))
       .collect();
 
-    if names.is_empty() {
+    if items.is_empty() {
       return;
     }
 
@@ -51,8 +51,8 @@ impl XdgIconCache {
       let entries = cx
         .background_spawn(async move {
           let mut entries = HashMap::new();
-          for name in &names {
-            if let Some(path) = get_icon(name) {
+          for (name, theme_path) in &items {
+            if let Some(path) = get_icon(name, theme_path.as_deref()) {
               entries.insert(name.clone(), Resource::Path(path.into()));
             }
           }
@@ -90,7 +90,7 @@ impl XdgIconCache {
               continue;
             };
 
-            let Some(icon_path) = get_icon(icon_name) else {
+            let Some(icon_path) = get_icon(icon_name, None) else {
               continue;
             };
 
@@ -170,21 +170,64 @@ pub fn get_items(locales: &[String]) -> Result<(Vec<RootItem>, Vec<String>)> {
   ))
 }
 
-pub fn get_icon(name: &str) -> Option<PathBuf> {
-  let scale = Some(1);
-  let size = Some(24);
-
-  let mut lookup = freedesktop_icons::lookup(name).force_svg().with_cache();
-
-  if let Some(scale) = scale {
-    lookup = lookup.with_scale(scale);
+pub fn get_icon(name: &str, theme_path: Option<&str>) -> Option<PathBuf> {
+  // Some apps put an absolute path in icon_name directly
+  let path = Path::new(name);
+  if path.is_absolute() && path.is_file() {
+    return Some(path.to_path_buf());
   }
 
-  if let Some(size) = size {
-    lookup = lookup.with_size(size);
+  // SNI's IconThemePath should be searched before the standard XDG dirs
+  if let Some(theme_path) = theme_path {
+    if let Some(found) = find_in_theme_path(theme_path, name) {
+      return Some(found);
+    }
   }
 
-  lookup.find()
+  freedesktop_icons::lookup(name)
+    .with_cache()
+    .with_scale(1)
+    .with_size(24)
+    .find()
+}
+
+fn find_in_theme_path(dir: &str, name: &str) -> Option<PathBuf> {
+  // Most apps drop icons directly in the theme path, no theme structure
+  for ext in ["svg", "png"] {
+    let path = PathBuf::from(dir).join(format!("{name}.{ext}"));
+    if path.is_file() {
+      return Some(path);
+    }
+  }
+
+  // Otherwise scan, preferring SVG
+  let mut svg_match: Option<PathBuf> = None;
+  let mut png_match: Option<PathBuf> = None;
+  for entry in walkdir::WalkDir::new(dir)
+    .max_depth(5)
+    .into_iter()
+    .filter_map(|e| e.ok())
+  {
+    let path = entry.path();
+    if !path.is_file() {
+      continue;
+    }
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+      continue;
+    };
+    if stem != name {
+      continue;
+    }
+    let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+      continue;
+    };
+    match ext {
+      "svg" if svg_match.is_none() => svg_match = Some(path.to_path_buf()),
+      "png" if png_match.is_none() => png_match = Some(path.to_path_buf()),
+      _ => {}
+    }
+  }
+  svg_match.or(png_match)
 }
 
 pub fn open_url(url: &str) -> Result<()> {

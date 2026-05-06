@@ -3187,6 +3187,7 @@ dependencies = [
  "futures",
  "gpui",
  "hex",
+ "image",
  "include-fs",
  "indexmap",
  "itertools 0.14.0",

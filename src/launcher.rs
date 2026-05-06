@@ -14,13 +14,15 @@ use chrono::{DateTime, Local, TimeZone};
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
   AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, MouseButton,
-  SharedString, Size, Subscription, Task, Window, WindowBounds, WindowKind, WindowOptions,
-  actions, div, img,
+  RenderImage, SharedString, Size, Subscription, Task, Window, WindowBounds, WindowKind,
+  WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
   px, rems, rgb, rgba,
 };
+use image::{Frame, ImageBuffer, Rgba};
+use smallvec::SmallVec;
 use nucleo_matcher::{
   Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
@@ -32,7 +34,7 @@ use crate::{
   db::DB,
   dbus,
   dbus::GlobalDbusConnection,
-  dbus::status_notifier::{Systray, TrayItem},
+  dbus::status_notifier::{Systray, SystrayEvent, TrayItem},
   icon::{Icon, IconName},
   llm,
   matcher::MatcherPool,
@@ -79,6 +81,7 @@ pub struct Launcher {
   focus_handle: FocusHandle,
   picker: Entity<Picker<RootDelegate>>,
   systray: Entity<Systray>,
+  tray_pixmaps: HashMap<String, Arc<RenderImage>>,
   active_panel: Option<AnyView>,
   pub(crate) action_overlay: Option<AnyView>,
   color_result: Option<ColorResult>,
@@ -193,6 +196,13 @@ impl Launcher {
     let systray = Systray::global(cx);
     let tray_focus_handle = cx.focus_handle();
 
+    let mut tray_pixmaps: HashMap<String, Arc<RenderImage>> = HashMap::new();
+    for item in systray.read(cx).items() {
+      if let Some(image) = decode_tray_pixmap(item.icon_pixmap.as_deref()) {
+        tray_pixmaps.insert(item.address().to_string(), image);
+      }
+    }
+
     let subscriptions = vec![
       cx.on_focus(&tray_focus_handle, window, |this, _window, cx| {
         let count = this.systray.read(cx).items().len();
@@ -201,17 +211,55 @@ impl Launcher {
         }
         cx.notify();
       }),
+      cx.subscribe(&systray, |this, systray, event: &SystrayEvent, cx| {
+        match event {
+          SystrayEvent::ItemAdded(item) => {
+            if let Some(image) = decode_tray_pixmap(item.icon_pixmap.as_deref()) {
+              this.tray_pixmaps.insert(item.address().to_string(), image);
+              cx.notify();
+            }
+          }
+          SystrayEvent::ItemRemoved { address } => {
+            if this.tray_pixmaps.remove(address).is_some() {
+              cx.notify();
+            }
+          }
+          SystrayEvent::ItemUpdated { address } => {
+            let new_pixmap = systray
+              .read(cx)
+              .items()
+              .iter()
+              .find(|i| i.address() == address)
+              .and_then(|i| decode_tray_pixmap(i.icon_pixmap.as_deref()));
+            match new_pixmap {
+              Some(image) => {
+                this.tray_pixmaps.insert(address.clone(), image);
+                cx.notify();
+              }
+              None => {
+                if this.tray_pixmaps.remove(address).is_some() {
+                  cx.notify();
+                }
+              }
+            }
+          }
+        }
+      }),
       cx.observe(&systray, |this, _, cx| {
-        let names: Vec<String> = this
+        let items: Vec<(String, Option<String>)> = this
           .systray
           .read(cx)
           .items()
           .iter()
-          .filter_map(|item| item.icon_name.as_ref().map(|s| s.to_string()))
+          .filter_map(|item| {
+            let name = item.icon_name.as_ref()?.to_string();
+            let theme_path = item.icon_theme_path.as_ref().map(|p| p.to_string());
+            Some((name, theme_path))
+          })
           .collect();
 
         let icon_cache = this.picker.read(cx).delegate.icon_cache.clone();
-        icon_cache.update(cx, |cache, cx| cache.lookup(names, cx));
+        icon_cache.update(cx, |cache, cx| cache.lookup(items, cx));
 
         cx.notify();
       }),
@@ -272,6 +320,7 @@ impl Launcher {
       focus_handle: cx.focus_handle(),
       picker,
       systray,
+      tray_pixmaps,
       active_panel,
       action_overlay: None,
       tray_menu: None,
@@ -285,6 +334,7 @@ impl Launcher {
       _subscriptions: subscriptions,
     }
   }
+
 
   fn format_color(color: &csscolorparser::Color, format: &str) -> Option<String> {
     match format {
@@ -644,6 +694,7 @@ impl Render for Launcher {
     let tray_items = self.systray.read(cx).items().to_vec();
     let icon_cache = self.picker.read(cx).delegate.icon_cache.clone();
     let icon_cache = icon_cache.read(cx);
+    let tray_pixmaps = self.tray_pixmaps.clone();
     let selected_tray_index = self.selected_tray_index;
     let tray_focus_handle = self.tray_focus_handle.clone();
 
@@ -741,15 +792,19 @@ impl Render for Launcher {
                 .children(tray_items.iter().enumerate().map(|(index, item)| {
                   let is_selected = selected_tray_index == Some(index);
 
-                  let icon_element = item
+                  let icon_source = item
                     .icon_name
                     .as_ref()
                     .and_then(|name| icon_cache.get(name))
-                    .map(|resource| {
-                      img(ImageSource::Resource(resource.clone()))
-                        .size(px(24.))
-                        .into_any_element()
-                    })
+                    .map(|resource| ImageSource::Resource(resource.clone()))
+                    .or_else(|| {
+                      tray_pixmaps
+                        .get(item.address())
+                        .map(|image| ImageSource::Render(image.clone()))
+                    });
+
+                  let icon_element = icon_source
+                    .map(|source| img(source).size(px(24.)).into_any_element())
                     .unwrap_or_else(|| {
                       let fallback = match item.icon_name.as_ref().map(|s| s.as_ref()) {
                         Some("input-keyboard-symbolic") => IconName::Keyboard,
@@ -1126,4 +1181,28 @@ impl PickerDelegate for RootDelegate {
         .log_err();
     })
   }
+}
+
+fn decode_tray_pixmap(pixmaps: Option<&[(i32, i32, Vec<u8>)]>) -> Option<Arc<RenderImage>> {
+  let pixmaps = pixmaps?;
+  let (w, h, data) = pixmaps
+    .iter()
+    .filter(|(w, h, data)| {
+      *w > 0 && *h > 0 && data.len() == (*w as usize) * (*h as usize) * 4
+    })
+    .max_by_key(|(w, h, _)| (*w as i64) * (*h as i64))?;
+
+  let width = *w as u32;
+  let height = *h as u32;
+
+  // SNI pixmap is ARGB32 in network byte order; gpui frames hold BGRA bytes
+  // typed as Rgba<u8>, so each 4-byte pixel must be reversed.
+  let mut buf = data.clone();
+  for pixel in buf.chunks_exact_mut(4) {
+    pixel.reverse();
+  }
+
+  let buffer = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width, height, buf)?;
+  let frame = Frame::new(buffer);
+  Some(Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1))))
 }

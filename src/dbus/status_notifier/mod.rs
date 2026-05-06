@@ -107,6 +107,10 @@ impl TrayItem {
     self.menu_path.is_some()
   }
 
+  pub fn address(&self) -> &str {
+    &self.address
+  }
+
   pub async fn menu_proxy(&self) -> Result<Option<api::DBusMenuProxy<'static>>> {
     let path = match &self.menu_path {
       Some(path) => path.clone(),
@@ -157,7 +161,6 @@ impl std::fmt::Debug for TrayItem {
   }
 }
 
-#[allow(dead_code)]
 pub enum SystrayEvent {
   ItemAdded(TrayItem),
   ItemRemoved { address: String },
