@@ -55,6 +55,7 @@
           pipewire
           wireplumber
           pulseaudio
+          fontconfig
         ];
       };
 
@@ -73,6 +74,7 @@
         wayland
         pipewire
         pulseaudio
+        fontconfig
       ]);
     in {
       devShells.default = craneLib.devShell {

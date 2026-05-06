@@ -124,7 +124,7 @@ impl Element for Scrollbar {
 
     let viewport_height = bounds.size.height;
     let max_offset = self.scroll_handle.max_offset();
-    let content_height = viewport_height + max_offset.height;
+    let content_height = viewport_height + max_offset.y;
 
     let has_overflow = content_height > viewport_height && viewport_height > px(0.0);
 

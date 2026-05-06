@@ -155,7 +155,7 @@ fn run_app(
   receiver: Receiver<Message>,
   daemon_only: bool,
 ) {
-  Application::new()
+  Application::with_platform(gpui_linux::current_platform(false))
     .with_assets(Assets)
     .with_quit_mode(QuitMode::Explicit)
     .run(move |cx| {

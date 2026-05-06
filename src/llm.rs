@@ -590,7 +590,7 @@ impl LlmPanel {
               .on_scroll_wheel(cx.listener(|this, _event, _window, _cx| {
                 let offset = this.scroll_handle.offset();
                 let max = this.scroll_handle.max_offset();
-                let distance_from_bottom = max.height + offset.y;
+                let distance_from_bottom = max.y + offset.y;
                 this.autoscroll = distance_from_bottom < px(20.0);
               }))
               .flex()
