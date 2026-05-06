@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{
-  Animation, AnimationExt, App, Context, ElementId, EventEmitter, FocusHandle, Focusable,
-  IntoElement, KeyBinding, MouseButton, Render, ScrollHandle, SharedString, Task, Window, actions,
-  div, prelude::*, px, rgba,
+  Animation, AnimationExt, App, Context, ElementId, FocusHandle, Focusable, IntoElement,
+  KeyBinding, Pixels, Render, ScrollHandle, SharedString, Task, Window, actions, div, prelude::*,
+  px, rgba,
 };
 use zvariant::Value;
 
@@ -29,8 +29,21 @@ const CONTEXT: &str = "tray_menu";
 const ANIM_ENTER_DURATION: Duration = Duration::from_millis(150);
 const ANIM_EXIT_DURATION: Duration = Duration::from_millis(100);
 
-pub enum TrayMenuEvent {
-  Dismissed,
+pub const MENU_WIDTH: Pixels = px(250.);
+pub const MENU_MAX_HEIGHT: Pixels = px(400.);
+
+const ITEM_HEIGHT: f32 = 30.;
+const SEPARATOR_HEIGHT: f32 = 9.;
+const MENU_VERTICAL_PADDING: f32 = 8.;
+
+pub fn estimate_menu_height(items: &[MenuItem]) -> Pixels {
+  let visible = visible_items(items);
+  let total: f32 = visible
+    .iter()
+    .map(|item| if item.is_separator { SEPARATOR_HEIGHT } else { ITEM_HEIGHT })
+    .sum::<f32>()
+    + MENU_VERTICAL_PADDING;
+  px(total.min(f32::from(MENU_MAX_HEIGHT)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,8 +211,6 @@ pub struct TrayMenu {
   proxy: DBusMenuProxy<'static>,
 }
 
-impl EventEmitter<TrayMenuEvent> for TrayMenu {}
-
 impl TrayMenu {
   pub fn new(
     items: Vec<MenuItem>,
@@ -251,8 +262,8 @@ impl TrayMenu {
       cx.background_executor().timer(ANIM_EXIT_DURATION).await;
 
       this
-        .update(cx, |_this, cx| {
-          cx.emit(TrayMenuEvent::Dismissed);
+        .update_in(cx, |_this, window, _cx| {
+          window.remove_window();
         })
         .log_err();
     }));
@@ -496,16 +507,7 @@ impl Render for TrayMenu {
       .any(|item| item.toggle_type != ToggleType::None);
 
     div()
-      .id("tray-menu-overlay")
-      .absolute()
-      .top_0()
-      .left_0()
-      .size_full()
-      .flex()
-      .items_end()
-      .justify_end()
-      .pb_4()
-      .pr_4()
+      .id("tray-menu-content")
       .key_context(CONTEXT)
       .track_focus(&self.focus_handle)
       .on_action(cx.listener(Self::dismiss_action))
@@ -514,114 +516,99 @@ impl Render for TrayMenu {
       .on_action(cx.listener(Self::activate_action))
       .on_action(cx.listener(Self::open_submenu_action))
       .on_action(cx.listener(Self::close_submenu_action))
-      .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-        this.dismiss(cx);
-      }))
-      .child(
+      .size_full()
+      .max_h(MENU_MAX_HEIGHT)
+      .overflow_y_scroll()
+      .track_scroll(&self.scroll_handle)
+      .bg(rgba(0x171717F0))
+      .border_1()
+      .border_color(rgba(0xFFFFFF15))
+      .rounded_lg()
+      .py_1()
+      .children(visible.iter().enumerate().map(|(index, item)| {
+        let is_selected = selected_index == Some(index);
+
+        if item.is_separator {
+          return div()
+            .id(ElementId::NamedInteger("tray-sep".into(), index as u64))
+            .mx_2()
+            .my_1()
+            .h(px(1.))
+            .bg(rgba(0xFFFFFF15))
+            .into_any_element();
+        }
+
+        let enabled = item.enabled;
+        let has_submenu = item.has_submenu();
+
         div()
-          .id("tray-menu-content")
-          .occlude()
-          .w(px(250.))
-          .max_h(px(400.))
-          .overflow_y_scroll()
-          .track_scroll(&self.scroll_handle)
-          .bg(rgba(0x171717F0))
-          .border_1()
-          .border_color(rgba(0xFFFFFF15))
-          .rounded_lg()
-          .py_1()
-          .children(visible.iter().enumerate().map(|(index, item)| {
-            let is_selected = selected_index == Some(index);
-
-            if item.is_separator {
-              return div()
-                .id(ElementId::NamedInteger("tray-sep".into(), index as u64))
-                .mx_2()
-                .my_1()
-                .h(px(1.))
-                .bg(rgba(0xFFFFFF15))
-                .into_any_element();
-            }
-
-            let enabled = item.enabled;
-            let has_submenu = item.has_submenu();
-
-            div()
-              .id(ElementId::NamedInteger("tray-item".into(), index as u64))
-              .px_2()
-              .py(px(5.))
-              .mx_1()
-              .rounded_md()
-              .text_sm()
-              .flex()
-              .items_center()
-              .gap_2()
-              .when(is_selected && enabled, |this| this.bg(rgba(0xFFFFFF0F)))
-              .when(!enabled, |this| this.text_color(rgba(0xFFFFFF44)))
-              .when(enabled, |this| {
-                this.cursor_pointer().on_mouse_move({
-                  let index = index;
-                  cx.listener(move |this, _, _, cx| {
-                    if this.selected_index != Some(index) {
-                      this.selected_index = Some(index);
-                      cx.notify();
-                    }
-                  })
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                  this.activate_item_at(index, window, cx);
-                }))
+          .id(ElementId::NamedInteger("tray-item".into(), index as u64))
+          .px_2()
+          .py(px(5.))
+          .mx_1()
+          .rounded_md()
+          .text_sm()
+          .flex()
+          .items_center()
+          .gap_2()
+          .when(is_selected && enabled, |this| this.bg(rgba(0xFFFFFF0F)))
+          .when(!enabled, |this| this.text_color(rgba(0xFFFFFF44)))
+          .when(enabled, |this| {
+            this.cursor_pointer().on_mouse_move({
+              let index = index;
+              cx.listener(move |this, _, _, cx| {
+                if this.selected_index != Some(index) {
+                  this.selected_index = Some(index);
+                  cx.notify();
+                }
               })
-              .when(has_toggles, |this| {
-                this.child(
-                  div()
-                    .w(px(16.))
-                    .h(px(16.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .map(|this| match (item.toggle_type, item.toggle_state) {
-                      (ToggleType::Checkmark, 1) => this.child(
-                        Icon::new(IconName::Check)
-                          .size(px(14.))
-                          .text_color(rgba(0xFFFFFFCC)),
-                      ),
-                      (ToggleType::Radio, 1) => this.child(
-                        Icon::new(IconName::CircleDot)
-                          .size(px(14.))
-                          .text_color(rgba(0xFFFFFFCC)),
-                      ),
-                      _ => this,
-                    }),
-                )
-              })
-              .child(div().flex_grow().min_w_0().truncate().child(item.label.clone()))
-              .when(has_submenu, |this| {
-                this.child(
-                  Icon::new(IconName::ChevronRight)
-                    .size(px(14.))
-                    .text_color(rgba(0xFFFFFF66))
-                    .flex_none(),
-                )
-              })
-              .into_any_element()
-          }))
-          .with_animation(
-            ElementId::NamedInteger("tray-menu-slide".into(), closing as u64),
-            Animation::new(ANIM_ENTER_DURATION).with_easing(easing),
-            move |this, delta| {
-              let progress = if closing { delta } else { 1.0 - delta };
-              let opacity = if closing { 1.0 - delta } else { delta };
-              let scale = 0.9 + 0.1 * (1.0 - progress);
-              let offset = 15.0 * progress;
-              this
-                .w(px(250. * scale))
-                .mb(px(-offset))
-                .mr(px(-offset))
-                .opacity(opacity)
-            },
-          ),
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+              this.activate_item_at(index, window, cx);
+            }))
+          })
+          .when(has_toggles, |this| {
+            this.child(
+              div()
+                .w(px(16.))
+                .h(px(16.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .map(|this| match (item.toggle_type, item.toggle_state) {
+                  (ToggleType::Checkmark, 1) => this.child(
+                    Icon::new(IconName::Check)
+                      .size(px(14.))
+                      .text_color(rgba(0xFFFFFFCC)),
+                  ),
+                  (ToggleType::Radio, 1) => this.child(
+                    Icon::new(IconName::CircleDot)
+                      .size(px(14.))
+                      .text_color(rgba(0xFFFFFFCC)),
+                  ),
+                  _ => this,
+                }),
+            )
+          })
+          .child(div().flex_grow().min_w_0().truncate().child(item.label.clone()))
+          .when(has_submenu, |this| {
+            this.child(
+              Icon::new(IconName::ChevronRight)
+                .size(px(14.))
+                .text_color(rgba(0xFFFFFF66))
+                .flex_none(),
+            )
+          })
+          .into_any_element()
+      }))
+      .with_animation(
+        ElementId::NamedInteger("tray-menu-fade".into(), closing as u64),
+        Animation::new(ANIM_ENTER_DURATION).with_easing(easing),
+        move |this, delta| {
+          let opacity = if closing { 1.0 - delta } else { delta };
+          this.opacity(opacity)
+        },
       )
   }
 }

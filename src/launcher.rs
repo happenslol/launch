@@ -13,11 +13,12 @@ use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
-  AnyView, App, Bounds, Entity, FocusHandle, Focusable, ImageSource, KeyBinding, MouseButton,
-  RenderImage, SharedString, Size, Subscription, Task, Window, WindowBounds, WindowKind,
-  WindowOptions, actions, div, img,
+  AnyView, App, Bounds, BoundsHandle, Entity, FocusHandle, Focusable, ImageSource, KeyBinding,
+  MouseButton, RenderImage, SharedString, Size, Subscription, Task, Window, WindowBackgroundAppearance,
+  WindowBounds, WindowKind, WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
+  popup::{PopupAnchor, PopupConstraintAdjustment, PopupGravity, PopupOptions},
   prelude::*,
   px, rems, rgb, rgba,
 };
@@ -41,7 +42,7 @@ use crate::{
   network, niri,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   power,
-  tray_menu::{self, TrayMenu, TrayMenuEvent},
+  tray_menu::{self, MENU_WIDTH, TrayMenu, estimate_menu_height},
   util::{ResultExt, h_flex, v_flex},
   xdg::{self, XdgIconCache, open_url},
 };
@@ -89,7 +90,7 @@ pub struct Launcher {
   fend_result: Option<SharedString>,
   fend_cancel_flag: Arc<AtomicBool>,
   fend_task: Option<Task<()>>,
-  tray_menu: Option<Entity<TrayMenu>>,
+  tray_bounds: HashMap<String, BoundsHandle>,
   tray_focus_handle: FocusHandle,
   selected_tray_index: Option<usize>,
   pub(crate) _subscriptions: Vec<Subscription>,
@@ -220,6 +221,7 @@ impl Launcher {
             }
           }
           SystrayEvent::ItemRemoved { address } => {
+            this.tray_bounds.remove(address);
             if this.tray_pixmaps.remove(address).is_some() {
               cx.notify();
             }
@@ -323,7 +325,7 @@ impl Launcher {
       tray_pixmaps,
       active_panel,
       action_overlay: None,
-      tray_menu: None,
+      tray_bounds: HashMap::new(),
       tray_focus_handle,
       selected_tray_index: None,
       color_result: None,
@@ -577,7 +579,12 @@ impl Launcher {
     };
 
     if item.item_is_menu || item.has_menu() {
-      self.show_tray_menu(item.clone(), window, cx);
+      let bounds = self
+        .tray_bounds
+        .get(item.address())
+        .map(|h| h.bounds())
+        .unwrap_or_default();
+      self.show_tray_menu(item.clone(), bounds, window, cx);
     } else {
       let item = item.clone();
       cx.spawn_in(window, async move |_, cx| {
@@ -591,10 +598,11 @@ impl Launcher {
   fn show_tray_menu(
     &mut self,
     item: TrayItem,
+    anchor_rect: Bounds<gpui::Pixels>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    cx.spawn_in(window, async move |entity, cx| {
+    cx.spawn_in(window, async move |_, cx| {
       let proxy = match item.menu_proxy().await {
         Ok(Some(proxy)) => proxy,
         Ok(None) => return,
@@ -620,27 +628,35 @@ impl Launcher {
         }
       };
 
-      entity
-        .update_in(cx, |this, window, cx| {
-          let menu = cx.new(|cx| TrayMenu::new(layout, proxy, window, cx));
+      let height = estimate_menu_height(&layout);
 
-          this._subscriptions.push(cx.subscribe_in(
-            &menu,
-            window,
-            |this, _menu, _event: &TrayMenuEvent, window, cx| {
-              this.tray_menu = None;
-              let tray_focus_handle = this.tray_focus_handle.clone();
-              window.defer(cx, move |window, cx| {
-                window.focus(&tray_focus_handle, cx);
-              });
-              cx.notify();
-            },
-          ));
-
-          this.tray_menu = Some(menu);
-          cx.notify();
-        })
+      cx.update(|_, cx| {
+        cx.open_window(
+          WindowOptions {
+            titlebar: None,
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+              origin: point(px(0.), px(0.)),
+              size: Size::new(MENU_WIDTH, height),
+            })),
+            window_background: WindowBackgroundAppearance::Transparent,
+            kind: WindowKind::XdgPopup(PopupOptions {
+              anchor_rect,
+              anchor: PopupAnchor::TopRight,
+              gravity: PopupGravity::TopLeft,
+              constraint_adjustment: PopupConstraintAdjustment::FLIP_X
+                | PopupConstraintAdjustment::FLIP_Y
+                | PopupConstraintAdjustment::SLIDE_X
+                | PopupConstraintAdjustment::SLIDE_Y,
+              offset: None,
+              reactive: true,
+            }),
+            ..Default::default()
+          },
+          |window, cx| cx.new(|cx| TrayMenu::new(layout, proxy, window, cx)),
+        )
         .log_err();
+      })
+      .log_err();
     })
     .detach();
   }
@@ -697,6 +713,17 @@ impl Render for Launcher {
     let tray_pixmaps = self.tray_pixmaps.clone();
     let selected_tray_index = self.selected_tray_index;
     let tray_focus_handle = self.tray_focus_handle.clone();
+
+    let tray_handles: Vec<BoundsHandle> = tray_items
+      .iter()
+      .map(|item| {
+        self
+          .tray_bounds
+          .entry(item.address().to_string())
+          .or_insert_with(BoundsHandle::new)
+          .clone()
+      })
+      .collect();
 
     div()
       .size_full()
@@ -814,8 +841,10 @@ impl Render for Launcher {
                     });
 
                   let item = item.clone();
+                  let bounds_handle = tray_handles[index].clone();
                   div()
                     .id(item.id.clone())
+                    .track_bounds(&bounds_handle)
                     .p(px(4.))
                     .rounded_md()
                     .cursor_pointer()
@@ -825,9 +854,10 @@ impl Render for Launcher {
                     })
                     .on_click({
                       let item = item.clone();
+                      let bounds_handle = bounds_handle.clone();
                       cx.listener(move |this, _, window, cx| {
                         if item.item_is_menu || item.has_menu() {
-                          this.show_tray_menu(item.clone(), window, cx);
+                          this.show_tray_menu(item.clone(), bounds_handle.bounds(), window, cx);
                         } else {
                           let item = item.clone();
                           cx.spawn_in(window, async move |_, cx| {
@@ -842,9 +872,10 @@ impl Render for Launcher {
                       MouseButton::Right,
                       cx.listener({
                         let item = item.clone();
+                        let bounds_handle = bounds_handle.clone();
                         move |this, _, window, cx| {
                           if item.has_menu() {
-                            this.show_tray_menu(item.clone(), window, cx);
+                            this.show_tray_menu(item.clone(), bounds_handle.bounds(), window, cx);
                           } else {
                             let item = item.clone();
                             cx.spawn_in(window, async move |_, cx| {
@@ -860,9 +891,6 @@ impl Render for Launcher {
                 })),
             ),
         )
-      })
-      .when_some(self.tray_menu.as_ref(), |this, menu| {
-        this.child(menu.clone())
       })
   }
 }
