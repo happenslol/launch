@@ -630,32 +630,29 @@ impl Launcher {
 
       let height = estimate_menu_height(&layout);
 
-      cx.update(|_, cx| {
-        cx.open_window(
-          WindowOptions {
-            titlebar: None,
-            window_bounds: Some(WindowBounds::Windowed(Bounds {
-              origin: point(px(0.), px(0.)),
-              size: Size::new(MENU_WIDTH, height),
-            })),
-            window_background: WindowBackgroundAppearance::Transparent,
-            kind: WindowKind::XdgPopup(PopupOptions {
-              anchor_rect,
-              anchor: PopupAnchor::TopRight,
-              gravity: PopupGravity::TopLeft,
-              constraint_adjustment: PopupConstraintAdjustment::FLIP_X
-                | PopupConstraintAdjustment::FLIP_Y
-                | PopupConstraintAdjustment::SLIDE_X
-                | PopupConstraintAdjustment::SLIDE_Y,
-              offset: None,
-              reactive: true,
-            }),
-            ..Default::default()
-          },
-          |window, cx| cx.new(|cx| TrayMenu::new(layout, proxy, window, cx)),
-        )
-        .log_err();
-      })
+      cx.open_window(
+        WindowOptions {
+          titlebar: None,
+          window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(0.), px(0.)),
+            size: Size::new(MENU_WIDTH, height),
+          })),
+          window_background: WindowBackgroundAppearance::Transparent,
+          kind: WindowKind::XdgPopup(PopupOptions {
+            anchor_rect,
+            anchor: PopupAnchor::TopRight,
+            gravity: PopupGravity::TopLeft,
+            constraint_adjustment: PopupConstraintAdjustment::FLIP_X
+              | PopupConstraintAdjustment::FLIP_Y
+              | PopupConstraintAdjustment::SLIDE_X
+              | PopupConstraintAdjustment::SLIDE_Y,
+            offset: None,
+            reactive: true,
+          }),
+          ..Default::default()
+        },
+        |window, cx| cx.new(|cx| TrayMenu::new(layout, proxy, window, cx)),
+      )
       .log_err();
     })
     .detach();

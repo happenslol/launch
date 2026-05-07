@@ -5,12 +5,13 @@ use anyhow::Result;
 use gpui::{
   Animation, AnimationExt, App, Context, ElementId, FocusHandle, Focusable, IntoElement,
   KeyBinding, Pixels, Render, ScrollHandle, SharedString, Task, Window, actions, div, prelude::*,
-  px, rgba,
+  px, rgb, rgba,
 };
 use zvariant::Value;
 
 use crate::dbus::status_notifier::DBusMenuProxy;
 use crate::icon::{Icon, IconName};
+use crate::launcher::Launcher;
 use crate::util::ResultExt;
 
 actions!(
@@ -320,14 +321,28 @@ impl TrayMenu {
     } else {
       let id = item.id;
       let proxy = self.proxy.clone();
-      cx.spawn_in(window, async move |_, cx| {
+      cx.spawn(async move |_, _| {
         proxy
           .event(id, "clicked", &Value::I32(0), 0)
           .await
           .log_err();
-        let _ = cx.update(|window, _| window.remove_window());
       })
       .detach();
+
+      let weak = cx.weak_entity();
+      cx.defer(move |cx| {
+        let launcher_handles: Vec<_> = cx
+          .windows()
+          .into_iter()
+          .filter_map(|h| h.downcast::<Launcher>())
+          .collect();
+        for handle in launcher_handles {
+          handle
+            .update(cx, |_, window, _| window.remove_window())
+            .log_err();
+        }
+        weak.update(cx, |this, cx| this.dismiss(cx)).log_err();
+      });
     }
   }
 
@@ -520,6 +535,8 @@ impl Render for TrayMenu {
       .max_h(MENU_MAX_HEIGHT)
       .overflow_y_scroll()
       .track_scroll(&self.scroll_handle)
+      .font_family("Iosevka")
+      .text_color(rgb(0xFFFFFF))
       .bg(rgba(0x171717F0))
       .border_1()
       .border_color(rgba(0xFFFFFF15))
