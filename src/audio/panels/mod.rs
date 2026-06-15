@@ -6,8 +6,7 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 
-use sinks::AudioSinksPanel;
-pub use sinks::VolumeBar;
+pub use sinks::{AudioSinksPanel, VolumeBar};
 use sources::AudioSourcesPanel;
 use streams::AudioStreamsPanel;
 

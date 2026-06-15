@@ -28,6 +28,7 @@ mod submenu;
 mod tokio;
 mod tray_menu;
 mod util;
+mod volume_osd;
 mod wayland;
 mod xdg;
 
@@ -165,6 +166,7 @@ fn run_app(
       dbus::init(cx);
       dbus::status_notifier::init(cx);
       audio::init(cx);
+      volume_osd::init(cx);
       xdg::init(cx);
       niri::init(cx);
       InputState::init(cx);

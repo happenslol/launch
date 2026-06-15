@@ -519,6 +519,12 @@ impl Launcher {
     }
   }
 
+  pub fn is_showing_volume_panel(&self) -> bool {
+    self.active_panel.as_ref().is_some_and(|panel| {
+      panel.entity_type() == std::any::TypeId::of::<audio::panels::AudioSinksPanel>()
+    })
+  }
+
   pub fn focus_picker(&self, window: &mut Window, cx: &mut Context<Self>) {
     let picker = self.picker.clone();
     window.defer(cx, move |window, cx| {

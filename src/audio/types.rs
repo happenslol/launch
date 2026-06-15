@@ -74,10 +74,11 @@ impl PartialEq for ChannelVolumes {
 impl PartialEq<pulse::volume::ChannelVolumes> for ChannelVolumes {
   fn eq(&self, other: &pulse::volume::ChannelVolumes) -> bool {
     let other = other.get();
-    self.volumes.len() == other.len()
+    self.channels as usize == other.len()
       && self
         .volumes
         .iter()
+        .take(self.channels as usize)
         .zip(other.iter())
         .all(|(a, b)| *a == b.0)
   }
