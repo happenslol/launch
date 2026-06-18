@@ -5,8 +5,9 @@ use std::{
   sync::{Arc, LazyLock, Mutex},
 };
 
-use gpui::Resource;
+use gpui::{App, Global, Resource};
 use rusqlite::OpenFlags;
+use tracing::error;
 
 #[derive(Debug, Clone)]
 pub struct Db(Arc<Mutex<rusqlite::Connection>>);
@@ -16,16 +17,21 @@ pub struct Db(Arc<Mutex<rusqlite::Connection>>);
 // through a queue of closures.
 pub static DB: LazyLock<Db> = LazyLock::new(Db::new);
 
+/// Path of the main application database. Used both by the shared writer
+/// connection and by on-demand read-only readers (see [`NotificationDbReader`]).
+pub fn launch_db_path() -> PathBuf {
+  let local = dirs::data_local_dir()
+    .expect("No local data dir")
+    .join("launch");
+
+  fs::create_dir_all(&local).expect("Failed to create ensure local data dir");
+  local.join("launch.db")
+}
+
 impl Db {
   fn new() -> Self {
-    let local = dirs::data_local_dir()
-      .expect("No local data dir")
-      .join("launch");
-
-    fs::create_dir_all(&local).expect("Failed to create ensure local data dir");
-
     let conn = rusqlite::Connection::open_with_flags(
-      local.join("launch.db"),
+      launch_db_path(),
       OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE,
     )
     .expect("Failed to open database");
@@ -50,6 +56,16 @@ impl Db {
           role TEXT NOT NULL,
           content TEXT NOT NULL,
           timestamp INTEGER NOT NULL DEFAULT (unixepoch())
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS notifications (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp INTEGER NOT NULL DEFAULT (unixepoch()),
+          app_name TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL DEFAULT '',
+          body TEXT NOT NULL DEFAULT '',
+          app_icon TEXT NOT NULL DEFAULT '',
+          urgency INTEGER NOT NULL DEFAULT 1
         ) STRICT;
         "#,
       )
@@ -135,5 +151,102 @@ impl Db {
     }
 
     result
+  }
+
+  /// Appends a received notification to the persistent history. Failures are
+  /// logged rather than propagated so a malformed notification can never take
+  /// down the daemon.
+  pub fn record_notification(
+    &self,
+    app_name: &str,
+    summary: &str,
+    body: &str,
+    app_icon: &str,
+    urgency: u8,
+  ) {
+    let conn = self.0.lock().unwrap();
+    let result = conn
+      .prepare_cached(
+        r#"
+        INSERT INTO notifications (app_name, summary, body, app_icon, urgency)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+      )
+      .and_then(|mut query| {
+        query.execute(rusqlite::params![app_name, summary, body, app_icon, urgency])
+      });
+
+    if let Err(err) = result {
+      error!(?err, "Failed to record notification");
+    }
+  }
+}
+
+/// A single persisted notification, as read back from the history.
+#[allow(dead_code)]
+pub struct NotificationRecord {
+  pub id: i64,
+  pub timestamp: i64,
+  pub app_name: String,
+  pub summary: String,
+  pub body: String,
+  pub app_icon: String,
+  pub urgency: u8,
+}
+
+/// On-demand read-only access to the notification history. Cloneable and cheap
+/// (it only holds the database path), so it can be moved into background tasks
+/// that open their own short-lived connection, mirroring `ClipboardDbReader`.
+#[derive(Debug, Clone)]
+pub struct NotificationDbReader(PathBuf);
+
+struct GlobalNotificationDbReader(NotificationDbReader);
+
+impl Global for GlobalNotificationDbReader {}
+
+impl NotificationDbReader {
+  pub fn install(cx: &mut App) {
+    cx.set_global(GlobalNotificationDbReader(Self(launch_db_path())));
+  }
+
+  #[allow(dead_code)]
+  pub fn global(cx: &App) -> Option<NotificationDbReader> {
+    cx.try_global::<GlobalNotificationDbReader>()
+      .map(|global| global.0.clone())
+  }
+
+  fn open(&self) -> anyhow::Result<rusqlite::Connection> {
+    Ok(rusqlite::Connection::open_with_flags(
+      &self.0,
+      OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?)
+  }
+
+  #[allow(dead_code)]
+  pub fn recent(&self, limit: u32) -> anyhow::Result<Vec<NotificationRecord>> {
+    let conn = self.open()?;
+    let mut statement = conn.prepare_cached(
+      "SELECT id, timestamp, app_name, summary, body, app_icon, urgency \
+       FROM notifications ORDER BY id DESC LIMIT ?1",
+    )?;
+
+    let rows = statement.query_map([limit], |row| {
+      Ok(NotificationRecord {
+        id: row.get(0)?,
+        timestamp: row.get(1)?,
+        app_name: row.get(2)?,
+        summary: row.get(3)?,
+        body: row.get(4)?,
+        app_icon: row.get(5)?,
+        urgency: row.get(6)?,
+      })
+    })?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+      entries.push(row?);
+    }
+
+    Ok(entries)
   }
 }

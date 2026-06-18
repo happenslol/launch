@@ -21,6 +21,7 @@ mod markdown;
 mod matcher;
 mod network;
 mod niri;
+mod notification_osd;
 mod picker;
 mod power;
 mod scrollbar;
@@ -166,11 +167,13 @@ fn run_app(
       matcher::init(cx);
       dbus::init(cx);
       dbus::status_notifier::init(cx);
+      dbus::notifications::init(cx);
       audio::init(cx);
       volume_osd::init(cx);
       xdg::init(cx);
       niri::init(cx);
       workspace_osd::init(cx);
+      notification_osd::init(cx);
       InputState::init(cx);
       load_embedded_fonts(cx).unwrap();
 
