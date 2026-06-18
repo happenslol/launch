@@ -30,6 +30,7 @@ mod tray_menu;
 mod util;
 mod volume_osd;
 mod wayland;
+mod workspace_osd;
 mod xdg;
 
 use std::process;
@@ -169,6 +170,7 @@ fn run_app(
       volume_osd::init(cx);
       xdg::init(cx);
       niri::init(cx);
+      workspace_osd::init(cx);
       InputState::init(cx);
       load_embedded_fonts(cx).unwrap();
 
