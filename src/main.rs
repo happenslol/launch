@@ -8,6 +8,7 @@ mod assets;
 mod audio;
 mod bluetooth;
 mod clipboard;
+mod config;
 mod confirmation;
 mod db;
 mod dbus;
@@ -165,6 +166,7 @@ fn run_app(
       tokio::init(cx);
       wayland::init(cx).unwrap();
       matcher::init(cx);
+      config::init(cx);
       dbus::init(cx);
       dbus::status_notifier::init(cx);
       dbus::notifications::init(cx);

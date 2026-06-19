@@ -1,15 +1,16 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use gpui::{
   AnyElement, App, Bounds, ClickEvent, Context, DisplayId, Entity, FontWeight, Global, ImageSource,
-  IntoElement, MouseButton, Pixels, Render, Resource, SharedString, Size, Styled, Subscription, Window,
-  WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, img,
+  IntoElement, MouseButton, Pixels, Render, Resource, SharedString, Size, Styled, Subscription, Task,
+  Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, img,
   point, prelude::*, px, rgb, rgba,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
 };
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{
+  config::ConfigState,
   dbus::notifications::{CloseReason, Notification, NotificationEvent, Notifications, Urgency},
   icon::{Icon, IconName},
   util::{ResultExt, h_flex, v_flex},
@@ -19,6 +20,14 @@ const WINDOW_WIDTH: f32 = 400.0;
 const CARD_HEIGHT: f32 = 96.0;
 const CARD_GAP: f32 = 10.0;
 const MARGIN: f32 = 12.0;
+
+/// A burst of notifications (e.g. several `notify-send`s at once) produces a
+/// rapid sequence of changes. Resizing the layer-shell surface for each one
+/// back-to-back is unreliable — consecutive resizes race the compositor's
+/// configure handshake and the surface can stay stuck at its initial size.
+/// Coalescing the changes into a single sync resizes the surface once, after
+/// the burst has settled.
+const SYNC_DEBOUNCE: Duration = Duration::from_millis(50);
 
 pub fn init(cx: &mut App) {
   let notifications = Notifications::global(cx);
@@ -36,25 +45,54 @@ struct NotificationOsd {
   notifications: Entity<Notifications>,
   window: Option<WindowHandle<NotificationsView>>,
   count: usize,
-  _subscription: Subscription,
+  sync_task: Option<Task<()>>,
+  _subscriptions: Vec<Subscription>,
 }
 
 impl NotificationOsd {
   fn new(notifications: Entity<Notifications>, cx: &mut Context<Self>) -> Self {
-    let subscription = cx.subscribe(
-      &notifications,
-      |this, _notifications, _event: &NotificationEvent, cx| this.sync(cx),
-    );
+    let config = ConfigState::global(cx);
+    let subscriptions = vec![
+      cx.subscribe(
+        &notifications,
+        |this, _notifications, _event: &NotificationEvent, cx| this.schedule_sync(cx),
+      ),
+      cx.observe(&config, |this, _config, cx| this.reload_display(cx)),
+    ];
 
     let mut this = Self {
       notifications,
       window: None,
       count: 0,
-      _subscription: subscription,
+      sync_task: None,
+      _subscriptions: subscriptions,
     };
 
     this.sync(cx);
     this
+  }
+
+  /// Coalesces rapid notification changes into a single `sync`. Each call
+  /// replaces the pending task, so a burst of changes only triggers one resize
+  /// once the burst has settled. See [`SYNC_DEBOUNCE`].
+  fn schedule_sync(&mut self, cx: &mut Context<Self>) {
+    self.sync_task = Some(cx.spawn(async move |this, cx| {
+      cx.background_executor().timer(SYNC_DEBOUNCE).await;
+      this.update(cx, |this, cx| this.sync(cx)).log_err();
+    }));
+  }
+
+  /// Tears down the current surface so the next `sync` reopens it on the
+  /// configured display. Called when the config changes so the live-reloaded
+  /// display setting takes effect immediately.
+  fn reload_display(&mut self, cx: &mut Context<Self>) {
+    if let Some(handle) = self.window.take() {
+      handle
+        .update(cx, |_view, window, _cx| window.remove_window())
+        .log_err();
+    }
+    self.count = 0;
+    self.sync(cx);
   }
 
   fn sync(&mut self, cx: &mut Context<Self>) {
@@ -95,7 +133,7 @@ impl NotificationOsd {
       self.window = None;
     }
 
-    let Some(display_id) = first_display(cx) else {
+    let Some(display_id) = target_display(cx) else {
       error!("no display available to show notifications on");
       return;
     };
@@ -113,8 +151,21 @@ impl NotificationOsd {
   }
 }
 
-fn first_display(cx: &App) -> Option<DisplayId> {
-  cx.displays().into_iter().next().map(|display| display.id())
+/// Resolves the display to show notifications on. Uses the configured output
+/// name when set and present, otherwise falls back to the first display.
+fn target_display(cx: &App) -> Option<DisplayId> {
+  let configured = ConfigState::get(cx).notifications.display;
+  let displays = cx.displays();
+
+  if let Some(name) = configured {
+    if let Some(display) = displays.iter().find(|display| display.name() == Some(name.as_str())) {
+      return Some(display.id());
+    }
+
+    warn!(%name, "Configured notification display not found, using first display");
+  }
+
+  displays.into_iter().next().map(|display| display.id())
 }
 
 fn window_height(count: usize) -> Pixels {

@@ -1,0 +1,230 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context as _, Result};
+use gpui::{App, Entity, Global, Task, prelude::*};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::Deserialize;
+use tracing::{error, info, warn};
+
+use crate::util::ResultExt;
+
+/// User configuration loaded from `~/.config/launch/config.toml`.
+///
+/// The file is parsed with `toml_edit` so that a future settings GUI can edit
+/// it while preserving comments and formatting. All fields default so a missing
+/// or partial file still produces a usable config.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Config {
+  pub notifications: NotificationsConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct NotificationsConfig {
+  /// Name of the output that notifications are shown on, e.g. `"DP-1"` or
+  /// `"HDMI-A-1"`. When unset, the first available display is used.
+  pub display: Option<String>,
+}
+
+struct GlobalConfig(Entity<ConfigState>);
+
+impl Global for GlobalConfig {}
+
+pub fn init(cx: &mut App) {
+  let entity = cx.new(ConfigState::new);
+  cx.set_global(GlobalConfig(entity));
+}
+
+/// Holds the live config and keeps it in sync with the file on disk.
+///
+/// The file is watched via inotify (through the `notify` crate) rather than
+/// polled. Reads of the changed file happen on a background thread; the parsed
+/// result is applied on the foreground and triggers `cx.notify()` so observers
+/// can react to live edits.
+pub struct ConfigState {
+  config: Config,
+  path: Option<PathBuf>,
+  _watcher: Option<RecommendedWatcher>,
+  _watch_task: Task<()>,
+}
+
+impl ConfigState {
+  fn new(cx: &mut Context<Self>) -> Self {
+    let Some(path) = config_path() else {
+      error!("Could not determine config directory; using default config");
+      return Self {
+        config: Config::default(),
+        path: None,
+        _watcher: None,
+        _watch_task: Task::ready(()),
+      };
+    };
+
+    if let Err(error) = ensure_file(&path) {
+      error!(?error, "Failed to create config file");
+    }
+
+    let config = load(&path).log_err().unwrap_or_default();
+    let (watcher, watch_task) = watch(path.clone(), cx);
+
+    Self {
+      config,
+      path: Some(path),
+      _watcher: watcher,
+      _watch_task: watch_task,
+    }
+  }
+
+  pub fn global(cx: &App) -> Entity<Self> {
+    cx.global::<GlobalConfig>().0.clone()
+  }
+
+  /// Returns a snapshot of the current config.
+  pub fn get(cx: &App) -> Config {
+    cx.global::<GlobalConfig>().0.read(cx).config.clone()
+  }
+}
+
+/// Watches the config file's parent directory for changes and reloads on edit.
+///
+/// The parent directory is watched rather than the file itself so that atomic
+/// saves (write-to-temp then rename), which most editors perform, are still
+/// observed after the original inode is replaced.
+fn watch(path: PathBuf, cx: &mut Context<ConfigState>) -> (Option<RecommendedWatcher>, Task<()>) {
+  let (sender, receiver) = flume::unbounded::<()>();
+
+  let watcher = build_watcher(&path, sender).log_err();
+
+  let task = cx.spawn(async move |this, cx| {
+    while receiver.recv_async().await.is_ok() {
+      let Ok(Some(path)) = this.read_with(cx, |this, _| this.path.clone()) else {
+        break;
+      };
+
+      match cx.background_spawn(async move { load(&path) }).await {
+        Ok(config) => {
+          // Editors emit several write events per save, so only apply and log
+          // when the parsed config actually differs from what we already hold.
+          let result = this.update(cx, |this, cx| {
+            if this.config == config {
+              return false;
+            }
+            this.config = config;
+            cx.notify();
+            true
+          });
+
+          match result {
+            Ok(true) => info!("Reloaded config"),
+            Ok(false) => {}
+            Err(_) => break,
+          }
+        }
+        Err(error) => warn!(?error, "Failed to reload config"),
+      }
+    }
+  });
+
+  (watcher, task)
+}
+
+fn build_watcher(path: &Path, sender: flume::Sender<()>) -> Result<RecommendedWatcher> {
+  let target = path.to_path_buf();
+  let directory = path
+    .parent()
+    .context("config path has no parent directory")?
+    .to_path_buf();
+
+  let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| match result {
+    Ok(event) => {
+      // Only react to writes. Reading the file to reload it emits inotify access
+      // events, so reacting to those as well would trigger an endless loop.
+      let is_write = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
+      if is_write
+        && event.paths.iter().any(|changed| changed == &target)
+        && sender.send(()).is_err()
+      {
+        // The receiver has been dropped, which only happens once the app is
+        // shutting down. Nothing left to notify, so the failure is expected.
+      }
+    }
+    Err(error) => error!(?error, "Config watch error"),
+  })?;
+
+  watcher.watch(&directory, RecursiveMode::NonRecursive)?;
+  Ok(watcher)
+}
+
+fn load(path: &Path) -> Result<Config> {
+  let content = std::fs::read_to_string(path)
+    .with_context(|| format!("reading config file {}", path.display()))?;
+  let config = toml_edit::de::from_str(&content)
+    .with_context(|| format!("parsing config file {}", path.display()))?;
+  Ok(config)
+}
+
+fn ensure_file(path: &Path) -> Result<()> {
+  if path.exists() {
+    return Ok(());
+  }
+
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent)
+      .with_context(|| format!("creating config directory {}", parent.display()))?;
+  }
+
+  std::fs::write(path, "")
+    .with_context(|| format!("creating config file {}", path.display()))?;
+  Ok(())
+}
+
+fn config_path() -> Option<PathBuf> {
+  dirs::config_dir().map(|dir| dir.join("launch").join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn parse(content: &str) -> Config {
+    toml_edit::de::from_str(content).expect("config should parse")
+  }
+
+  #[test]
+  fn empty_config_uses_defaults() {
+    let config = parse("");
+    assert_eq!(config.notifications.display, None);
+  }
+
+  #[test]
+  fn partial_section_uses_defaults() {
+    let config = parse("[notifications]\n");
+    assert_eq!(config.notifications.display, None);
+  }
+
+  #[test]
+  fn reads_notification_display() {
+    let config = parse("[notifications]\ndisplay = \"DP-1\"\n");
+    assert_eq!(config.notifications.display.as_deref(), Some("DP-1"));
+  }
+
+  #[test]
+  fn ensure_file_creates_missing_file_and_parents() {
+    let dir = std::env::temp_dir().join(format!("launch-config-test-{}", std::process::id()));
+    let path = dir.join("nested").join("config.toml");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    ensure_file(&path).expect("file should be created");
+    assert!(path.exists());
+
+    // Calling again on an existing file leaves it untouched.
+    std::fs::write(&path, "[notifications]\ndisplay = \"eDP-1\"\n").unwrap();
+    ensure_file(&path).expect("existing file should be left alone");
+
+    let config = load(&path).expect("written config should load");
+    assert_eq!(config.notifications.display.as_deref(), Some("eDP-1"));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+}
