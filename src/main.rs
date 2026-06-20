@@ -46,6 +46,7 @@ use tracing::{debug, error, info};
 
 use crate::{
   assets::{Assets, load_embedded_fonts},
+  db::NotificationDbReader,
   input::state::InputState,
   instance::{Message, Response, Role},
   launcher::Launcher,
@@ -66,6 +67,12 @@ struct Args {
 enum Command {
   /// Start the daemon without opening a window
   Daemon,
+  /// Print the most recent notifications from the history
+  Notifications {
+    /// Number of notifications to print
+    #[arg(short = 'n', long = "count", default_value_t = 10)]
+    count: u32,
+  },
 }
 
 fn main() -> Result<()> {
@@ -75,6 +82,10 @@ fn main() -> Result<()> {
   match buildid::build_id() {
     Some(id) => debug!(build_id = hex::encode(id)),
     None => debug!("no build id"),
+  }
+
+  if let Some(Command::Notifications { count }) = &args.command {
+    return print_recent_notifications(*count);
   }
 
   let daemon_only = matches!(args.command, Some(Command::Daemon));
@@ -124,6 +135,45 @@ fn main() -> Result<()> {
     Role::Server(listener) => {
       info!("No existing instance, daemonizing");
       fork_and_run(listener, args.panel, args.no_keyboard_capture, daemon_only);
+    }
+  }
+
+  Ok(())
+}
+
+fn print_recent_notifications(count: u32) -> Result<()> {
+  let records = NotificationDbReader::at_default_path().recent(count)?;
+
+  if records.is_empty() {
+    println!("No notifications in history.");
+    return Ok(());
+  }
+
+  for record in records {
+    let when = chrono::DateTime::from_timestamp(record.timestamp, 0)
+      .map(|time| {
+        time
+          .with_timezone(&chrono::Local)
+          .format("%Y-%m-%d %H:%M:%S")
+          .to_string()
+      })
+      .unwrap_or_else(|| record.timestamp.to_string());
+
+    let urgency = match record.urgency {
+      0 => "low",
+      2 => "critical",
+      _ => "normal",
+    };
+
+    println!(
+      "{when}  [{urgency}]  app={:?}  icon={:?}",
+      record.app_name, record.app_icon
+    );
+    if !record.summary.is_empty() {
+      println!("    summary: {}", record.summary);
+    }
+    if !record.body.is_empty() {
+      println!("    body:    {}", record.body);
     }
   }
 

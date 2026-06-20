@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use gpui::{App, AppContext, Entity, EventEmitter, Global, RenderImage, SharedString, Task};
@@ -86,6 +86,8 @@ pub struct Notification {
   pub icon_path: Option<SharedString>,
   /// The raw `app_icon` argument, kept for the persisted history.
   pub app_icon: SharedString,
+  /// When this notification was received, for relative-time display.
+  pub received: Instant,
 }
 
 impl Notification {
@@ -135,6 +137,7 @@ impl Notification {
       image,
       icon_path,
       app_icon: SharedString::from(app_icon),
+      received: Instant::now(),
     }
   }
 

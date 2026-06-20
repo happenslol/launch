@@ -3367,6 +3367,7 @@ dependencies = [
  "pipewire",
  "pulldown-cmark",
  "quick-xml 0.37.5",
+ "regex",
  "rig-core",
  "rmp-serde",
  "ropey",

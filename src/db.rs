@@ -209,6 +209,12 @@ impl NotificationDbReader {
     cx.set_global(GlobalNotificationDbReader(Self(launch_db_path())));
   }
 
+  /// A reader bound to the default database path, for use outside the app (e.g.
+  /// the CLI) where no [`App`] context is available.
+  pub fn at_default_path() -> Self {
+    Self(launch_db_path())
+  }
+
   #[allow(dead_code)]
   pub fn global(cx: &App) -> Option<NotificationDbReader> {
     cx.try_global::<GlobalNotificationDbReader>()
