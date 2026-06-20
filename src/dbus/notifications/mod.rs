@@ -266,12 +266,22 @@ struct GlobalNotifications(Entity<Notifications>);
 
 impl Global for GlobalNotifications {}
 
+/// A notification's time-to-live, tracked so it can be paused while hovered.
+/// `task` counts down `remaining`; pausing cancels it and debits the elapsed
+/// time, resuming restarts it with whatever is left.
+struct Expiry {
+  remaining: Duration,
+  /// When the running countdown began, or `None` while paused.
+  started_at: Option<Instant>,
+  task: Option<Task<()>>,
+}
+
 /// The source of truth for live notifications. Owns per-notification expiry
 /// timers and the connection used to emit `NotificationClosed`/`ActionInvoked`
 /// back to clients. The on-screen display observes this entity.
 pub struct Notifications {
   active: Vec<Notification>,
-  expiry: HashMap<u32, Task<()>>,
+  expiry: HashMap<u32, Expiry>,
   connection: Option<zbus::Connection>,
   _host_task: Option<Task<()>>,
 }
@@ -336,16 +346,72 @@ impl Notifications {
     self.dismiss(id, CloseReason::Dismissed, cx);
   }
 
+  /// Pauses a notification's expiry while the pointer is over it, resuming with
+  /// the remaining time once it leaves.
+  pub fn set_hovered(&mut self, id: u32, hovered: bool, cx: &mut gpui::Context<Self>) {
+    if hovered {
+      self.pause_expiry(id);
+    } else {
+      self.resume_expiry(id, cx);
+    }
+  }
+
   fn arm_expiry(&mut self, id: u32, timeout_ms: u64, cx: &mut gpui::Context<Self>) {
+    self.expiry.insert(
+      id,
+      Expiry {
+        remaining: Duration::from_millis(timeout_ms),
+        started_at: None,
+        task: None,
+      },
+    );
+    self.start_expiry(id, cx);
+  }
+
+  /// (Re)starts the countdown for `id` from its remaining time, replacing any
+  /// running timer. Dismisses immediately if no time is left.
+  fn start_expiry(&mut self, id: u32, cx: &mut gpui::Context<Self>) {
+    let Some(remaining) = self.expiry.get(&id).map(|expiry| expiry.remaining) else {
+      return;
+    };
+
+    if remaining.is_zero() {
+      self.dismiss(id, CloseReason::Expired, cx);
+      return;
+    }
+
     let task = cx.spawn(async move |this, cx| {
-      cx.background_executor()
-        .timer(Duration::from_millis(timeout_ms))
-        .await;
+      cx.background_executor().timer(remaining).await;
       this
         .update(cx, |this, cx| this.dismiss(id, CloseReason::Expired, cx))
         .log_err();
     });
-    self.expiry.insert(id, task);
+
+    if let Some(expiry) = self.expiry.get_mut(&id) {
+      expiry.started_at = Some(Instant::now());
+      expiry.task = Some(task);
+    }
+  }
+
+  /// Pauses the countdown for `id`, debiting the time elapsed since it started
+  /// so resuming continues where it left off. No-op if already paused or absent.
+  fn pause_expiry(&mut self, id: u32) {
+    let Some(expiry) = self.expiry.get_mut(&id) else {
+      return;
+    };
+
+    if let Some(started_at) = expiry.started_at.take() {
+      expiry.remaining = expiry.remaining.saturating_sub(started_at.elapsed());
+      expiry.task = None;
+    }
+  }
+
+  /// Resumes a paused countdown for `id` with whatever time remained.
+  fn resume_expiry(&mut self, id: u32, cx: &mut gpui::Context<Self>) {
+    let is_paused = self.expiry.get(&id).is_some_and(|expiry| expiry.task.is_none());
+    if is_paused {
+      self.start_expiry(id, cx);
+    }
   }
 
   fn emit_closed(&self, id: u32, reason: CloseReason, cx: &mut gpui::Context<Self>) {

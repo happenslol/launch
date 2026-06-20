@@ -378,6 +378,11 @@ impl NotificationsView {
             .update(cx, |notifications, cx| notifications.dismiss(id, CloseReason::Dismissed, cx));
         }),
       )
+      .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+        this
+          .notifications
+          .update(cx, |notifications, cx| notifications.set_hovered(id, *hovered, cx));
+      }))
   }
 
   fn action_button(
