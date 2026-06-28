@@ -20,7 +20,7 @@ use crate::{
     GlobalDbusConnection,
     networkmanager::{AccessPoint, NetworkManager, WirelessDevice},
   },
-  icon::{Icon, IconName},
+  icon::{Icon, IconName, Spinner},
   input::{
     input,
     state::{InputEvent, InputState},
@@ -1400,6 +1400,7 @@ impl PickerDelegate for WifiDelegate {
     let entry = &item.entry.read(cx);
     let ap = &entry.access_point;
     let connection_state = entry.connection_state;
+    let is_connected = entry.is_connected;
 
     let status = match connection_state {
       ConnectionState::Connecting => Some("Connecting..."),
@@ -1422,13 +1423,20 @@ impl PickerDelegate for WifiDelegate {
     // Hue from 0.0 (red) to 0.33 (green) based on signal strength.
     let signal_color = hsla(strength * 0.33, 0.8, 0.5, 1.0);
 
+    let background_color = match (is_connected, is_selected) {
+      (true, true) => rgba(0x3B82F635),
+      (true, false) => rgba(0x3B82F625),
+      (false, true) => rgba(0xFFFFFF0F),
+      (false, false) => rgba(0x00000000),
+    };
+
     v_flex()
       .relative()
       .w_full()
       .px_2()
       .py_2()
       .rounded_md()
-      .when(is_selected, |this| this.bg(rgba(0xFFFFFF0F)))
+      .bg(background_color)
       .child(
         div()
           .flex()
@@ -1491,7 +1499,10 @@ impl PickerDelegate for WifiDelegate {
                   })
                   .child(security.to_string()),
               ),
-          ),
+          )
+          .when(connection_state == ConnectionState::Connecting, |this| {
+            this.child(Spinner::new().color(rgb(0x888888).into()))
+          }),
       )
   }
 
