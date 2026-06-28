@@ -5,7 +5,7 @@ use futures::StreamExt;
 use std::time::Duration;
 
 use gpui::{
-  Animation, AnimationExt, App, Context, ElementId, Entity, FocusHandle, Focusable,
+  Animation, AnimationExt, App, Context, ElementId, Entity, EntityId, FocusHandle, Focusable,
   InteractiveElement, IntoElement, KeyBinding, ParentElement, SharedString, Styled, Subscription,
   Task, Window, actions, div, hsla, prelude::*, px, relative, rems, rgb, rgba,
 };
@@ -594,19 +594,6 @@ impl WifiPanel {
           });
 
           for (ap, alternate_paths) in deduplicated {
-            let existing = this.entries.iter_mut().find(|entry| {
-              entry.id == ap.path.as_str() || entry.alternate_paths.contains(ap.path.as_str())
-            });
-
-            if let Some(existing) = existing {
-              existing.entry.update(cx, |inner, cx| {
-                inner.access_point = ap;
-                cx.notify();
-              });
-              existing.alternate_paths = alternate_paths;
-              continue;
-            }
-
             let is_connected = active_hw_address
               .as_ref()
               .is_some_and(|addr| addr == &ap.hw_address);
@@ -615,6 +602,26 @@ impl WifiPanel {
               .find(|(ssid, _)| ssid == &ap.ssid)
               .map(|(_, path)| path.clone());
             let is_known = known_conn.is_some();
+
+            let existing = this.entries.iter_mut().find(|entry| {
+              entry.id == ap.path.as_str() || entry.alternate_paths.contains(ap.path.as_str())
+            });
+
+            if let Some(existing) = existing {
+              existing.is_known = is_known;
+              existing.entry.update(cx, |inner, cx| {
+                inner.access_point = ap;
+                inner.is_connected = is_connected;
+                inner.is_known = is_known;
+                inner.connection_path = known_conn;
+                if is_connected {
+                  inner.connection_state = ConnectionState::Idle;
+                }
+                cx.notify();
+              });
+              existing.alternate_paths = alternate_paths;
+              continue;
+            }
 
             let mut entry = WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
             entry.alternate_paths = alternate_paths;
@@ -704,19 +711,6 @@ impl WifiPanel {
         });
 
         for (ap, alternate_paths) in deduplicated {
-          let existing = this.entries.iter_mut().find(|entry| {
-            entry.id == ap.path.as_str() || entry.alternate_paths.contains(ap.path.as_str())
-          });
-
-          if let Some(existing) = existing {
-            existing.entry.update(cx, |inner, cx| {
-              inner.access_point = ap;
-              cx.notify();
-            });
-            existing.alternate_paths = alternate_paths;
-            continue;
-          }
-
           let is_connected = active_hw_address
             .as_ref()
             .is_some_and(|addr| addr == &ap.hw_address);
@@ -725,6 +719,26 @@ impl WifiPanel {
             .find(|(ssid, _)| ssid == &ap.ssid)
             .map(|(_, path)| path.clone());
           let is_known = known_conn.is_some();
+
+          let existing = this.entries.iter_mut().find(|entry| {
+            entry.id == ap.path.as_str() || entry.alternate_paths.contains(ap.path.as_str())
+          });
+
+          if let Some(existing) = existing {
+            existing.is_known = is_known;
+            existing.entry.update(cx, |inner, cx| {
+              inner.access_point = ap;
+              inner.is_connected = is_connected;
+              inner.is_known = is_known;
+              inner.connection_path = known_conn;
+              if is_connected {
+                inner.connection_state = ConnectionState::Idle;
+              }
+              cx.notify();
+            });
+            existing.alternate_paths = alternate_paths;
+            continue;
+          }
 
           let mut entry = WifiEntry::new(ap, is_connected, is_known, known_conn, window, cx);
           entry.alternate_paths = alternate_paths;
@@ -1039,6 +1053,21 @@ impl WifiPanel {
     .detach();
   }
 
+  /// NetworkManager only keeps a single active wifi connection, so connecting to
+  /// one network implicitly disconnects any other. Mirror that locally so at most
+  /// one entry is ever shown as connected.
+  fn mark_only_connected(&mut self, connected_id: EntityId, cx: &mut Context<Self>) {
+    for wifi_entry in &self.entries {
+      let should_be_connected = wifi_entry.entry.entity_id() == connected_id;
+      wifi_entry.entry.update(cx, |inner, cx| {
+        if inner.is_connected != should_be_connected {
+          inner.is_connected = should_be_connected;
+          cx.notify();
+        }
+      });
+    }
+  }
+
   fn connect_known(
     &mut self,
     entry: &Entity<WifiEntryInner>,
@@ -1066,7 +1095,7 @@ impl WifiPanel {
     cx.spawn({
       let entry = entry.clone();
       let ssid = access_point.ssid.clone();
-      async move |_this, cx| {
+      async move |this, cx| {
         let executor = cx.background_executor().clone();
         let ap_path = access_point.path.clone();
         let device_path = device.device_path().clone();
@@ -1084,10 +1113,12 @@ impl WifiPanel {
         match result {
           Ok(()) => {
             tracing::info!(%ssid, "Connected to known wifi network");
-            entry.update(cx, |entry, cx| {
-              entry.connection_state = ConnectionState::Idle;
-              entry.is_connected = true;
-              cx.notify();
+            let _ = this.update(cx, |this, cx| {
+              entry.update(cx, |inner, cx| {
+                inner.connection_state = ConnectionState::Idle;
+                cx.notify();
+              });
+              this.mark_only_connected(entry.entity_id(), cx);
             });
           }
           Err(error) => {
@@ -1150,7 +1181,6 @@ impl WifiPanel {
             let _ = this.update_in(cx, |this, window, cx| {
               entry.update(cx, |inner, cx| {
                 inner.connection_state = ConnectionState::Idle;
-                inner.is_connected = true;
                 inner.is_known = true;
                 cx.notify();
               });
@@ -1160,6 +1190,7 @@ impl WifiPanel {
                   wifi_entry.is_known = true;
                 }
               }
+              this.mark_only_connected(entry_id, cx);
               picker.update(cx, |picker, cx| {
                 picker.set_items(this.entries.clone(), window, cx);
               });
@@ -1231,7 +1262,6 @@ impl WifiPanel {
             let _ = this.update_in(cx, |this, window, cx| {
               entry.update(cx, |inner, cx| {
                 inner.connection_state = ConnectionState::Idle;
-                inner.is_connected = true;
                 inner.is_known = true;
                 cx.notify();
               });
@@ -1241,6 +1271,7 @@ impl WifiPanel {
                   wifi_entry.is_known = true;
                 }
               }
+              this.mark_only_connected(entry_id, cx);
               picker.update(cx, |picker, cx| {
                 picker.set_items(this.entries.clone(), window, cx);
               });
