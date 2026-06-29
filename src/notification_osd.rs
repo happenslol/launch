@@ -32,49 +32,36 @@ const CARD_GAP: f32 = 10.0;
 const MARGIN: f32 = 12.0;
 
 // Per-layout card heights (with a taller variant for those that grow to fit
-// action buttons). The compact and media layouts are fixed at these heights. The
-// message layout instead treats its height as a minimum and grows with its
-// wrapping body (up to a three-line clamp). The surface opens at an upper-bound
-// estimate (see [`total_height`] / [`NotificationLayout::open_height`]) and the
-// measured content height trims it down — see [`NotificationsView::render`] and
-// [`NotificationOsd::report_content_height`].
+// action buttons). The compact and media layouts are fixed at these heights; the
+// message layout treats its height as a minimum and grows with its wrapping body
+// (up to a three-line clamp). The surface is full-height regardless, so these
+// only size the cards themselves.
 const COMPACT_HEIGHT: f32 = 64.0;
 const COMPACT_ICON_SIZE: f32 = 36.0;
 
 const MESSAGE_HEIGHT: f32 = 110.0;
 const MESSAGE_HEIGHT_ACTIONS: f32 = 150.0;
 const MESSAGE_ICON_SIZE: f32 = 44.0;
-// Upper bounds for the message layout (body clamped to three lines, optionally
-// with action buttons), used only to size the surface when it first opens. The
-// surface opens at this overestimate and the measured height trims it back down,
-// so it never has to grow while a card is visible — a grow reads as the card
-// "unfolding". These must stay >= any real message height. See
-// [`NotificationLayout::open_height`].
-const MESSAGE_HEIGHT_MAX: f32 = 170.0;
-const MESSAGE_HEIGHT_MAX_ACTIONS: f32 = 220.0;
 
 const MEDIA_COVER_HEIGHT: f32 = 120.0;
 const MEDIA_HEIGHT: f32 = 216.0;
 const MEDIA_HEIGHT_ACTIONS: f32 = 272.0;
 
 /// A burst of notifications (e.g. several `notify-send`s at once) produces a
-/// rapid sequence of changes. Resizing the layer-shell surface for each one
-/// back-to-back is unreliable — consecutive resizes race the compositor's
-/// configure handshake and the surface can stay stuck at its initial size.
-/// Coalescing the changes into a single sync resizes the surface once, after
-/// the burst has settled.
+/// rapid sequence of change events. Coalescing them into a single `sync` avoids
+/// redundant content updates while the burst is still arriving.
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(50);
 
 /// Per-card enter/exit animation: a fade paired with a subtle horizontal slide
 /// along the right edge (in from the right, back out to the right). A leaving
-/// card is kept in the stack and
-/// rendered with the exit animation until [`ANIM_EXIT_DURATION`] elapses, then
-/// removed — see [`NotificationsView::update_content`].
+/// card is kept in the stack and rendered with the exit animation until
+/// [`ANIM_EXIT_DURATION`] elapses, then removed — see
+/// [`NotificationsView::update_content`].
 const ANIM_ENTER_DURATION: Duration = Duration::from_millis(150);
 const ANIM_EXIT_DURATION: Duration = Duration::from_millis(150);
 /// Extra time before a leaving card is dropped from the stack, so the exit
-/// animation fully finishes (it only starts on the next render) before the slot
-/// collapses, avoiding a visible pop.
+/// animation fully finishes (it only starts on the next render) before the card
+/// is removed, avoiding a visible pop.
 const ANIM_EXIT_GRACE: Duration = Duration::from_millis(60);
 const SLIDE_OFFSET: f32 = 12.0;
 
@@ -88,21 +75,19 @@ struct GlobalNotificationOsd(#[allow(dead_code)] Entity<NotificationOsd>);
 
 impl Global for GlobalNotificationOsd {}
 
-/// Mirrors the live notification list onto a single layer-shell surface anchored
-/// to the top-right of the first display, resizing it to fit the current stack.
+/// Mirrors the live notification list onto a single layer-shell surface that
+/// spans the full height of the display, anchored to the top-right.
 ///
-/// The window opens at an estimated height (see [`total_height`]); the rendered
-/// view then measures its real content and reports it back via
-/// [`NotificationOsd::report_content_height`], which is the authority for the
-/// surface's final size. This lets layouts with wrapping text (the message
-/// layout's body) grow to fit instead of being clipped.
+/// The surface is never resized: it is full-height from the moment it opens, so
+/// notifications size themselves and the stack reflows without the compositor
+/// ever scaling a stale frame. Instead the rendered view reports the extent of
+/// its cards via [`NotificationOsd::report_region`], which sets the surface's
+/// input region to just that area so clicks pass through the transparent
+/// remainder. An empty report closes the surface.
 struct NotificationOsd {
   notifications: Entity<Notifications>,
   window: Option<WindowHandle<NotificationsView>>,
-  height: Pixels,
-  target_height: Option<Pixels>,
   sync_task: Option<Task<()>>,
-  resize_task: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -120,10 +105,7 @@ impl NotificationOsd {
     let mut this = Self {
       notifications,
       window: None,
-      height: px(0.),
-      target_height: None,
       sync_task: None,
-      resize_task: None,
       _subscriptions: subscriptions,
     };
 
@@ -132,8 +114,8 @@ impl NotificationOsd {
   }
 
   /// Coalesces rapid notification changes into a single `sync`. Each call
-  /// replaces the pending task, so a burst of changes only triggers one resize
-  /// once the burst has settled. See [`SYNC_DEBOUNCE`].
+  /// replaces the pending task, so a burst of changes only triggers one content
+  /// update once the burst has settled. See [`SYNC_DEBOUNCE`].
   fn schedule_sync(&mut self, cx: &mut Context<Self>) {
     self.sync_task = Some(cx.spawn(async move |this, cx| {
       cx.background_executor().timer(SYNC_DEBOUNCE).await;
@@ -150,9 +132,6 @@ impl NotificationOsd {
         .update(cx, |_view, window, _cx| window.remove_window())
         .log_err();
     }
-    self.height = px(0.);
-    self.target_height = None;
-    self.resize_task = None;
     self.sync(cx);
   }
 
@@ -160,11 +139,9 @@ impl NotificationOsd {
     let active = self.notifications.read(cx).active().to_vec();
 
     if let Some(handle) = self.window {
-      // Update the existing surface's content in place rather than recreating
-      // it when the stack changes. The view animates cards in and out and
-      // reports its measured height back, which drives the resize — and, once
-      // the last card has finished leaving, the close (a reported height of 0).
-      // See [`Self::report_content_height`] and
+      // Update the existing surface's content in place. The view animates cards
+      // in and out within the fixed-size surface and reports its card extent
+      // back — see [`Self::report_region`] and
       // [`NotificationsView::update_content`].
       let updated = handle
         .update(cx, |view, _window, cx| view.update_content(active.clone(), cx))
@@ -180,155 +157,78 @@ impl NotificationOsd {
 
     // No surface yet: nothing to show until a notification arrives.
     if active.is_empty() {
-      self.height = px(0.);
-      self.target_height = None;
-      self.resize_task = None;
       return;
     }
 
-    let Some(display_id) = target_display(cx) else {
+    let Some((display_id, display_height)) = target_display(cx) else {
       error!("no display available to show notifications on");
       return;
     };
 
-    // Open at an estimated height so the surface starts near its final size; the
-    // view corrects it once it has measured the rendered content.
-    let height = total_height(&active);
     let osd = cx.weak_entity();
 
-    match cx.open_window(window_options(display_id, height), {
+    match cx.open_window(window_options(display_id, display_height), {
       let notifications = self.notifications.clone();
       move |_window, cx| cx.new(|_cx| NotificationsView::new(notifications, active, osd))
     }) {
-      Ok(handle) => {
-        self.window = Some(handle);
-        self.height = height;
-        self.target_height = None;
-      }
+      Ok(handle) => self.window = Some(handle),
       Err(error) => error!(?error, "Failed to open notifications window"),
     }
   }
 
-  /// Resizes the layer-shell surface to fit the height the view measured for its
-  /// rendered content, or closes it when the view has emptied (a reported height
-  /// of 0, once the last card has animated out). Called from the view's prepaint
-  /// (deferred, so never run mid-paint).
-  ///
-  /// Grows apply immediately and shrinks are debounced. A grow has to land before
-  /// the card it makes room for becomes visible, or the card appears to unfold;
-  /// the triggering card has only just been rendered (its enter animation is at
-  /// ~zero opacity), so resizing now is hidden. The surface opens at an
-  /// overestimate (see [`total_height`]), so growing only happens for later
-  /// additions, never right after open — keeping resizes off the initial
-  /// configure handshake. Shrinks just trim transparent space off the bottom, so
-  /// they can wait and coalesce.
-  fn report_content_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
-    // Sub-pixel measurement noise would otherwise cause endless tiny resizes.
-    let height = height.round();
-
-    if height > self.height {
-      let Some(handle) = self.window else {
-        return;
-      };
-      // Drop any pending shrink; this grow supersedes it.
-      self.target_height = None;
-      self.resize_task = None;
-
-      let resized = handle
-        .update(cx, |_view, window, _cx| {
-          window.resize(Size::new(px(WINDOW_WIDTH), height));
-        })
-        .is_ok();
-
-      if resized {
-        self.height = height;
-      } else {
-        self.window = None;
-      }
-      return;
-    }
-
-    if height == self.height && self.target_height.is_none() {
-      // The surface already matches the rendered content; nothing to do.
-      return;
-    }
-
-    if self.target_height == Some(height) {
-      // This change is already scheduled; don't reset the timer, or a steady
-      // stream of identical reports would keep deferring it forever.
-      return;
-    }
-
-    self.target_height = Some(height);
-    self.resize_task = Some(cx.spawn(async move |this, cx| {
-      cx.background_executor().timer(SYNC_DEBOUNCE).await;
-      this.update(cx, |this, cx| this.apply_content_height(cx)).log_err();
-    }));
-  }
-
-  fn apply_content_height(&mut self, cx: &mut Context<Self>) {
-    let Some(height) = self.target_height.take() else {
-      return;
-    };
+  /// Sets the surface's input region to the area its cards occupy (top-left of
+  /// the surface down to `height`), so clicks land on the cards while the
+  /// transparent remainder passes through. `None` means the stack is empty — the
+  /// last card has finished leaving — so the surface is torn down. Called from
+  /// the view's prepaint, deferred so it never runs mid-paint.
+  fn report_region(&mut self, height: Option<Pixels>, cx: &mut Context<Self>) {
     let Some(handle) = self.window else {
       return;
     };
 
-    // A height of 0 means the view has no cards left (the last one finished
-    // leaving): tear the surface down rather than resizing it to nothing.
-    if height <= px(0.) {
-      handle
-        .update(cx, |_view, window, _cx| window.remove_window())
-        .log_err();
-      self.window = None;
-      self.height = px(0.);
-      return;
-    }
-
-    let resized = handle
-      .update(cx, |_view, window, _cx| {
-        window.resize(Size::new(px(WINDOW_WIDTH), height));
-      })
-      .is_ok();
-
-    if resized {
-      self.height = height;
-    } else {
-      self.window = None;
+    match height {
+      None => {
+        handle
+          .update(cx, |_view, window, _cx| window.remove_window())
+          .log_err();
+        self.window = None;
+      }
+      Some(height) => {
+        let region = Bounds {
+          origin: point(px(0.), px(0.)),
+          size: Size::new(px(WINDOW_WIDTH), height.max(px(0.))),
+        };
+        // Drop a stale handle if the surface is gone, so the next `sync` reopens.
+        if handle
+          .update(cx, |_view, window, _cx| window.set_input_region(region))
+          .is_err()
+        {
+          self.window = None;
+        }
+      }
     }
   }
 }
 
-/// Resolves the display to show notifications on. Uses the configured output
-/// name when set and present, otherwise falls back to the first display.
-fn target_display(cx: &App) -> Option<DisplayId> {
+/// Resolves the display to show notifications on, returning its id and height.
+/// Uses the configured output name when set and present, otherwise falls back to
+/// the first display.
+fn target_display(cx: &App) -> Option<(DisplayId, Pixels)> {
   let configured = ConfigState::get(cx).notifications.display;
   let displays = cx.displays();
 
   if let Some(name) = configured {
     if let Some(display) = displays.iter().find(|display| display.name() == Some(name.as_str())) {
-      return Some(display.id());
+      return Some((display.id(), display.bounds().size.height));
     }
 
     warn!(%name, "Configured notification display not found, using first display");
   }
 
-  displays.into_iter().next().map(|display| display.id())
-}
-
-/// Height the surface is opened at: an upper bound on each notification's
-/// rendered height plus the gaps between cards. Deliberately an overestimate so
-/// the measured height only ever trims it (see
-/// [`NotificationOsd::report_content_height`]).
-fn total_height(active: &[Notification]) -> Pixels {
-  let mut total = 0.0;
-  for (index, notification) in active.iter().enumerate() {
-    if index > 0 {
-      total += CARD_GAP;
-    }
-    total += pick_layout(notification).open_height(notification);
-  }
-  px(total)
+  displays
+    .into_iter()
+    .next()
+    .map(|display| (display.id(), display.bounds().size.height))
 }
 
 /// The visual layouts a notification can be rendered with, chosen per
@@ -359,18 +259,6 @@ impl NotificationLayout {
       NotificationLayout::Message => MESSAGE_HEIGHT,
       NotificationLayout::Media if has_actions(notification) => MEDIA_HEIGHT_ACTIONS,
       NotificationLayout::Media => MEDIA_HEIGHT,
-    }
-  }
-
-  /// An upper bound on the rendered height, used to size the surface on open. For
-  /// the fixed layouts this equals [`Self::height`]; the message layout reserves
-  /// room for the tallest case (a three-line body, plus actions) so a tall
-  /// message does not have to grow the surface after it is already on screen.
-  fn open_height(self, notification: &Notification) -> f32 {
-    match self {
-      NotificationLayout::Message if has_actions(notification) => MESSAGE_HEIGHT_MAX_ACTIONS,
-      NotificationLayout::Message => MESSAGE_HEIGHT_MAX,
-      _ => self.height(notification),
     }
   }
 }
@@ -454,10 +342,25 @@ fn window_options(display_id: DisplayId, height: Pixels) -> WindowOptions {
 }
 
 /// A notification as the view tracks it, including ones that have been dismissed
-/// but are still animating out (`leaving`).
+/// but are still playing their exit animation.
 struct CardState {
   notification: Notification,
+  /// Resolved once when the card is created or refreshed, rather than re-running
+  /// the regex layout rules on every render frame.
+  layout: NotificationLayout,
+  /// True once dismissed: the card stays in the stack, playing its fade/slide-out
+  /// animation, until [`NotificationsView::remove_card`] drops it.
   leaving: bool,
+}
+
+impl CardState {
+  fn new(notification: Notification) -> Self {
+    Self {
+      layout: pick_layout(&notification),
+      notification,
+      leaving: false,
+    }
+  }
 }
 
 struct NotificationsView {
@@ -466,11 +369,10 @@ struct NotificationsView {
   /// Pending removals for leaving cards, keyed by id so a re-notified card can
   /// cancel its own removal and a finished one drops its task.
   removal_tasks: HashMap<u32, Task<()>>,
-  /// The last content height reported to the OSD, shared with the prepaint
-  /// listener. Enter/exit animations redraw every frame but only change opacity
-  /// and horizontal offset, not height, so this lets the listener skip the
-  /// resize round-trip on the frames where the measured height is unchanged.
-  reported_height: Rc<Cell<Pixels>>,
+  /// The last input-region extent reported to the OSD, shared with the prepaint
+  /// listener so it can skip the update on frames where the extent is unchanged.
+  /// `None` means the stack was reported empty.
+  reported_region: Rc<Cell<Option<Pixels>>>,
   osd: WeakEntity<NotificationOsd>,
 }
 
@@ -480,34 +382,29 @@ impl NotificationsView {
     items: Vec<Notification>,
     osd: WeakEntity<NotificationOsd>,
   ) -> Self {
-    let cards = items
-      .into_iter()
-      .map(|notification| CardState {
-        notification,
-        leaving: false,
-      })
-      .collect();
+    let cards = items.into_iter().map(CardState::new).collect();
 
     Self {
       notifications,
       cards,
       removal_tasks: HashMap::new(),
-      // A sentinel that no real measurement equals, so the first report fires.
-      reported_height: Rc::new(Cell::new(Pixels::MIN)),
+      // A sentinel that no real report equals, so the first report fires.
+      reported_region: Rc::new(Cell::new(Some(Pixels::MIN))),
       osd,
     }
   }
 
   /// Reconciles the displayed cards against the live set: refreshes those still
   /// present, starts the exit animation for those that vanished (keeping them in
-  /// the stack until [`ANIM_EXIT_DURATION`] passes), and inserts new arrivals at
-  /// the top, mirroring `Notifications`' newest-first ordering.
+  /// the stack until the animation finishes), and inserts new arrivals at the
+  /// top, mirroring `Notifications`' newest-first ordering.
   fn update_content(&mut self, active: Vec<Notification>, cx: &mut Context<Self>) {
     let active_ids: HashSet<u32> = active.iter().map(|notification| notification.id).collect();
 
     for notification in &active {
       if let Some(card) = self.cards.iter_mut().find(|card| card.notification.id == notification.id)
       {
+        card.layout = pick_layout(notification);
         card.notification = notification.clone();
         if card.leaving {
           // The notification came back before its exit finished; cancel removal.
@@ -517,31 +414,22 @@ impl NotificationsView {
       }
     }
 
+    let mut leaving = Vec::new();
     for card in self.cards.iter_mut() {
       if active_ids.contains(&card.notification.id) || card.leaving {
         continue;
       }
       card.leaving = true;
-      let id = card.notification.id;
-      self.removal_tasks.insert(
-        id,
-        cx.spawn(async move |this, cx| {
-          cx.background_executor().timer(ANIM_EXIT_DURATION + ANIM_EXIT_GRACE).await;
-          this.update(cx, |this, cx| this.remove_card(id, cx)).log_err();
-        }),
-      );
+      leaving.push(card.notification.id);
+    }
+    for id in leaving {
+      self.arm_removal(id, cx);
     }
 
     let known: HashSet<u32> = self.cards.iter().map(|card| card.notification.id).collect();
     for notification in active.iter().rev() {
       if !known.contains(&notification.id) {
-        self.cards.insert(
-          0,
-          CardState {
-            notification: notification.clone(),
-            leaving: false,
-          },
-        );
+        self.cards.insert(0, CardState::new(notification.clone()));
       }
     }
 
@@ -549,7 +437,17 @@ impl NotificationsView {
   }
 
   /// Drops a leaving card once its exit animation has finished, collapsing the
-  /// stack. The view re-measures on the next render and the surface follows.
+  /// stack.
+  fn arm_removal(&mut self, id: u32, cx: &mut Context<Self>) {
+    self.removal_tasks.insert(
+      id,
+      cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(ANIM_EXIT_DURATION + ANIM_EXIT_GRACE).await;
+        this.update(cx, |this, cx| this.remove_card(id, cx)).log_err();
+      }),
+    );
+  }
+
   fn remove_card(&mut self, id: u32, cx: &mut Context<Self>) {
     self.cards.retain(|card| card.notification.id != id);
     self.removal_tasks.remove(&id);
@@ -558,7 +456,7 @@ impl NotificationsView {
 
   fn render_card(&self, card: &CardState, cx: &mut Context<Self>) -> AnyElement {
     let notification = &card.notification;
-    let element = match pick_layout(notification) {
+    let element = match card.layout {
       NotificationLayout::Compact => self.render_compact(notification, cx),
       NotificationLayout::Message => self.render_message(notification, cx),
       NotificationLayout::Media => self.render_media(notification, cx),
@@ -568,11 +466,12 @@ impl NotificationsView {
     // to the right on dismiss. Re-keying the animation by `leaving` restarts it
     // with the exit parameters when the card is dismissed. The slide uses
     // relative positioning so it doesn't shift the card's measured height.
+    let id = notification.id;
     let leaving = card.leaving;
     element
       .relative()
       .with_animation(
-        ElementId::NamedInteger(format!("notif-anim-{}", notification.id).into(), leaving as u64),
+        ElementId::NamedInteger(format!("notif-anim-{id}").into(), leaving as u64),
         Animation::new(if leaving {
           ANIM_EXIT_DURATION
         } else {
@@ -786,16 +685,18 @@ impl NotificationsView {
 
   fn render_message(&self, notification: &Notification, cx: &mut Context<Self>) -> Stateful<Div> {
     // The message card grows with its (wrapping) body. The per-layout height is
-    // only a floor so short messages still read as a comfortable card.
+    // only a floor so short messages still read as a comfortable card. The floor
+    // lives on the content rather than the card so it doesn't fight the `max_h`
+    // the enter/exit reflow animation drives — see [`Self::render_card`].
     let min_height = NotificationLayout::Message.height(notification);
     let buttons = self.prominent_buttons(notification, cx);
 
     self
       .card_base(notification, cx)
-      .min_h(px(min_height))
       .child(
         v_flex()
           .w_full()
+          .min_h(px(min_height))
           .gap_3()
           .p_3()
           .child(
@@ -922,35 +823,34 @@ impl Render for NotificationsView {
     }
 
     let osd = self.osd.clone();
-    let reported_height = self.reported_height.clone();
+    let reported_region = self.reported_region.clone();
 
     v_flex()
       .size_full()
       .gap(px(CARD_GAP))
       .children(cards)
-      // Measure the laid-out card stack and report its real height so the
-      // surface can be resized to fit content that grows past its estimate
-      // (e.g. a message body wrapping onto several lines). An empty stack reports
-      // 0, which tells the OSD to tear the surface down once the last card has
-      // finished leaving.
+      // The surface is a fixed full-height overlay, so this never resizes it; it
+      // reports the extent the cards occupy, which the OSD turns into the
+      // surface's input region so clicks pass through the empty space. `None`
+      // means the stack is empty, so the surface is torn down.
       //
-      // This runs on every prepaint, including each frame of an enter/exit
-      // animation — but those only change opacity and horizontal offset, not
-      // height, so we skip the work whenever the measured height is unchanged.
-      // When it has changed, the report is deferred to the next effect cycle:
-      // the prepaint can run synchronously inside an `NotificationOsd` update
-      // (the open/resize that triggered it), and deferring avoids re-entering it.
+      // Cards keep a constant height through their fade/slide animations, so the
+      // extent only changes when one is added or removed — the gate below means
+      // animation frames in between do no work and never re-commit the region.
+      // The report is deferred to the next effect cycle: this prepaint can run
+      // synchronously inside an `NotificationOsd` update (the one that triggered
+      // it), and deferring avoids re-entering it.
       .on_children_prepainted(move |bounds, _window, cx| {
-        let height = stack_height(&bounds).unwrap_or(Pixels::ZERO).round();
-        if height == reported_height.get() {
+        let region = stack_height(&bounds).map(|height| height.round());
+        if region == reported_region.get() {
           return;
         }
-        reported_height.set(height);
+        reported_region.set(region);
 
         let osd = osd.clone();
         cx.defer(move |cx| {
           osd
-            .update(cx, |osd, cx| osd.report_content_height(height, cx))
+            .update(cx, |osd, cx| osd.report_region(region, cx))
             .log_err();
         });
       })
