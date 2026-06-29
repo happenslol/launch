@@ -98,3 +98,7 @@ include-fs = "0.2.0"
 codegen-backend = "llvm"
 [profile.dev.package.rustls]
 codegen-backend = "llvm"
+
+[profile.dev.package."*"]
+opt-level = 3
+codegen-backend = "llvm"

@@ -32,17 +32,26 @@ const CARD_GAP: f32 = 10.0;
 const MARGIN: f32 = 12.0;
 
 // Per-layout card heights (with a taller variant for those that grow to fit
-// action buttons). The compact and media layouts are fixed at these heights;
-// they also seed the surface's initial size via [`total_height`] before the
-// rendered content is measured. The message layout instead treats its height as
-// a minimum and grows with its wrapping body — see [`NotificationsView::render`]
-// and [`NotificationOsd::report_content_height`].
+// action buttons). The compact and media layouts are fixed at these heights. The
+// message layout instead treats its height as a minimum and grows with its
+// wrapping body (up to a three-line clamp). The surface opens at an upper-bound
+// estimate (see [`total_height`] / [`NotificationLayout::open_height`]) and the
+// measured content height trims it down — see [`NotificationsView::render`] and
+// [`NotificationOsd::report_content_height`].
 const COMPACT_HEIGHT: f32 = 64.0;
 const COMPACT_ICON_SIZE: f32 = 36.0;
 
 const MESSAGE_HEIGHT: f32 = 110.0;
 const MESSAGE_HEIGHT_ACTIONS: f32 = 150.0;
 const MESSAGE_ICON_SIZE: f32 = 44.0;
+// Upper bounds for the message layout (body clamped to three lines, optionally
+// with action buttons), used only to size the surface when it first opens. The
+// surface opens at this overestimate and the measured height trims it back down,
+// so it never has to grow while a card is visible — a grow reads as the card
+// "unfolding". These must stay >= any real message height. See
+// [`NotificationLayout::open_height`].
+const MESSAGE_HEIGHT_MAX: f32 = 170.0;
+const MESSAGE_HEIGHT_MAX_ACTIONS: f32 = 220.0;
 
 const MEDIA_COVER_HEIGHT: f32 = 120.0;
 const MEDIA_HEIGHT: f32 = 216.0;
@@ -202,13 +211,42 @@ impl NotificationOsd {
 
   /// Resizes the layer-shell surface to fit the height the view measured for its
   /// rendered content, or closes it when the view has emptied (a reported height
-  /// of 0, once the last card has animated out). Called from the view's
-  /// prepaint, so the work is debounced onto a later tick (never run mid-paint)
-  /// and coalesced when a burst of changes reports several heights in quick
-  /// succession.
+  /// of 0, once the last card has animated out). Called from the view's prepaint
+  /// (deferred, so never run mid-paint).
+  ///
+  /// Grows apply immediately and shrinks are debounced. A grow has to land before
+  /// the card it makes room for becomes visible, or the card appears to unfold;
+  /// the triggering card has only just been rendered (its enter animation is at
+  /// ~zero opacity), so resizing now is hidden. The surface opens at an
+  /// overestimate (see [`total_height`]), so growing only happens for later
+  /// additions, never right after open — keeping resizes off the initial
+  /// configure handshake. Shrinks just trim transparent space off the bottom, so
+  /// they can wait and coalesce.
   fn report_content_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
     // Sub-pixel measurement noise would otherwise cause endless tiny resizes.
     let height = height.round();
+
+    if height > self.height {
+      let Some(handle) = self.window else {
+        return;
+      };
+      // Drop any pending shrink; this grow supersedes it.
+      self.target_height = None;
+      self.resize_task = None;
+
+      let resized = handle
+        .update(cx, |_view, window, _cx| {
+          window.resize(Size::new(px(WINDOW_WIDTH), height));
+        })
+        .is_ok();
+
+      if resized {
+        self.height = height;
+      } else {
+        self.window = None;
+      }
+      return;
+    }
 
     if height == self.height && self.target_height.is_none() {
       // The surface already matches the rendered content; nothing to do.
@@ -278,15 +316,17 @@ fn target_display(cx: &App) -> Option<DisplayId> {
   displays.into_iter().next().map(|display| display.id())
 }
 
-/// Total surface height for the current stack: the sum of each notification's
-/// chosen-layout height plus the gaps between cards.
+/// Height the surface is opened at: an upper bound on each notification's
+/// rendered height plus the gaps between cards. Deliberately an overestimate so
+/// the measured height only ever trims it (see
+/// [`NotificationOsd::report_content_height`]).
 fn total_height(active: &[Notification]) -> Pixels {
   let mut total = 0.0;
   for (index, notification) in active.iter().enumerate() {
     if index > 0 {
       total += CARD_GAP;
     }
-    total += pick_layout(notification).height(notification);
+    total += pick_layout(notification).open_height(notification);
   }
   px(total)
 }
@@ -310,6 +350,8 @@ enum NotificationLayout {
 const DEFAULT_LAYOUT: NotificationLayout = NotificationLayout::Compact;
 
 impl NotificationLayout {
+  /// The rendered height (fixed layouts) or minimum height (the message layout,
+  /// which grows with its body). Used to size the card itself.
   fn height(self, notification: &Notification) -> f32 {
     match self {
       NotificationLayout::Compact => COMPACT_HEIGHT,
@@ -317,6 +359,18 @@ impl NotificationLayout {
       NotificationLayout::Message => MESSAGE_HEIGHT,
       NotificationLayout::Media if has_actions(notification) => MEDIA_HEIGHT_ACTIONS,
       NotificationLayout::Media => MEDIA_HEIGHT,
+    }
+  }
+
+  /// An upper bound on the rendered height, used to size the surface on open. For
+  /// the fixed layouts this equals [`Self::height`]; the message layout reserves
+  /// room for the tallest case (a three-line body, plus actions) so a tall
+  /// message does not have to grow the surface after it is already on screen.
+  fn open_height(self, notification: &Notification) -> f32 {
+    match self {
+      NotificationLayout::Message if has_actions(notification) => MESSAGE_HEIGHT_MAX_ACTIONS,
+      NotificationLayout::Message => MESSAGE_HEIGHT_MAX,
+      _ => self.height(notification),
     }
   }
 }
