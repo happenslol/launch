@@ -31,21 +31,14 @@ const WINDOW_WIDTH: f32 = 400.0;
 const CARD_GAP: f32 = 10.0;
 const MARGIN: f32 = 12.0;
 
-// Per-layout card heights (with a taller variant for those that grow to fit
-// action buttons). The compact and media layouts are fixed at these heights; the
-// message layout treats its height as a minimum and grows with its wrapping body
-// (up to a three-line clamp). The surface is full-height regardless, so these
-// only size the cards themselves.
-const COMPACT_HEIGHT: f32 = 64.0;
+// Cards size themselves to their content with even padding; none have a fixed
+// height. The surface is full-height regardless, and the rendered stack reports
+// the extent its cards occupy. Only the avatar/cover dimensions are fixed.
 const COMPACT_ICON_SIZE: f32 = 36.0;
 
-const MESSAGE_HEIGHT: f32 = 110.0;
-const MESSAGE_HEIGHT_ACTIONS: f32 = 150.0;
 const MESSAGE_ICON_SIZE: f32 = 44.0;
 
 const MEDIA_COVER_HEIGHT: f32 = 120.0;
-const MEDIA_HEIGHT: f32 = 216.0;
-const MEDIA_HEIGHT_ACTIONS: f32 = 272.0;
 
 /// A burst of notifications (e.g. several `notify-send`s at once) produces a
 /// rapid sequence of change events. Coalescing them into a single `sync` avoids
@@ -249,20 +242,6 @@ enum NotificationLayout {
 /// toasts (e.g. `Claude Code`, `Ghostty`), which read best compact.
 const DEFAULT_LAYOUT: NotificationLayout = NotificationLayout::Compact;
 
-impl NotificationLayout {
-  /// The rendered height (fixed layouts) or minimum height (the message layout,
-  /// which grows with its body). Used to size the card itself.
-  fn height(self, notification: &Notification) -> f32 {
-    match self {
-      NotificationLayout::Compact => COMPACT_HEIGHT,
-      NotificationLayout::Message if has_actions(notification) => MESSAGE_HEIGHT_ACTIONS,
-      NotificationLayout::Message => MESSAGE_HEIGHT,
-      NotificationLayout::Media if has_actions(notification) => MEDIA_HEIGHT_ACTIONS,
-      NotificationLayout::Media => MEDIA_HEIGHT,
-    }
-  }
-}
-
 /// A rule mapping a notification onto a layout. The pattern is tested against
 /// both the app name and the summary; the rule applies if either matches. More
 /// conditions can be added here later.
@@ -312,10 +291,6 @@ fn pick_layout(notification: &Notification) -> NotificationLayout {
     .find(|rule| rule.matches(notification))
     .map(|rule| rule.layout)
     .unwrap_or(DEFAULT_LAYOUT)
-}
-
-fn has_actions(notification: &Notification) -> bool {
-  notification.actions.iter().any(|action| action.key != "default")
 }
 
 fn window_options(display_id: DisplayId, height: Pixels) -> WindowOptions {
@@ -490,10 +465,10 @@ impl NotificationsView {
   }
 
   /// The shared card chrome: background, urgency border, and the whole-card
-  /// click / right-click-to-dismiss handlers. Each layout sizes the card (fixed
-  /// or content-driven) and fills it with its own content. `flex_none` keeps the
-  /// card at its natural height in the stack so its bounds can be measured to
-  /// size the surface, rather than being shrunk to fit the current window.
+  /// click / right-click-to-dismiss handlers. Each layout fills the card with its
+  /// own content, which sizes the card via even padding. `flex_none` keeps the
+  /// card at its natural content height in the stack so its bounds can be
+  /// measured to size the surface, rather than being shrunk to fit the window.
   fn card_base(&self, notification: &Notification, cx: &mut Context<Self>) -> Stateful<Div> {
     let id = notification.id;
     let has_default = notification.actions.iter().any(|action| action.key == "default");
@@ -646,13 +621,12 @@ impl NotificationsView {
 
     self
       .card_base(notification, cx)
-      .h(px(COMPACT_HEIGHT))
       .child(
         h_flex()
-          .size_full()
+          .w_full()
           .items_center()
           .gap_3()
-          .px_3()
+          .p_3()
           .child(render_avatar(notification, COMPACT_ICON_SIZE))
           .child(
             v_flex()
@@ -684,11 +658,8 @@ impl NotificationsView {
   }
 
   fn render_message(&self, notification: &Notification, cx: &mut Context<Self>) -> Stateful<Div> {
-    // The message card grows with its (wrapping) body. The per-layout height is
-    // only a floor so short messages still read as a comfortable card. The floor
-    // lives on the content rather than the card so it doesn't fight the `max_h`
-    // the enter/exit reflow animation drives — see [`Self::render_card`].
-    let min_height = NotificationLayout::Message.height(notification);
+    // The message card sizes to its (wrapping) body — up to the three-line clamp
+    // below — with even padding all around.
     let buttons = self.prominent_buttons(notification, cx);
 
     self
@@ -696,7 +667,6 @@ impl NotificationsView {
       .child(
         v_flex()
           .w_full()
-          .min_h(px(min_height))
           .gap_3()
           .p_3()
           .child(
@@ -761,21 +731,18 @@ impl NotificationsView {
   }
 
   fn render_media(&self, notification: &Notification, cx: &mut Context<Self>) -> Stateful<Div> {
-    let height = NotificationLayout::Media.height(notification);
     let buttons = self.prominent_buttons(notification, cx);
 
     self
       .card_base(notification, cx)
-      .h(px(height))
       .child(
         v_flex()
-          .size_full()
+          .w_full()
           .child(render_cover(notification))
           .child(
             v_flex()
-              .flex_1()
               .w_full()
-              .justify_between()
+              .gap_3()
               .p_3()
               .child(
                 v_flex()
