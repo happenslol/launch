@@ -425,14 +425,36 @@ impl PolkitDialog {
               .child("Authentication Required"),
           )
           .when(!self.message.is_empty(), |this| {
-            this.child(
-              div()
-                .text_sm()
-                .text_color(rgba(0xFFFFFFAA))
-                .child(self.message.clone()),
-            )
+            this.child(self.render_message())
           }),
       )
+  }
+
+  /// Renders the polkit message. When it embeds a command (polkit quotes it as
+  /// `` `cmd' ``) the command is pulled out and shown as a middle-ellipsized
+  /// monospace code block, since it is typically a long store path whose
+  /// meaningful tail (the binary and its arguments) must stay visible.
+  fn render_message(&self) -> gpui::AnyElement {
+    let muted = |text: String| {
+      div()
+        .text_sm()
+        .text_color(rgba(0xFFFFFFAA))
+        .child(text)
+    };
+
+    match split_command(&self.message) {
+      Some((prefix, command, suffix)) => {
+        let prefix = prefix.trim_end();
+        let suffix = suffix.trim_start();
+        v_flex()
+          .gap_1()
+          .when(!prefix.is_empty(), |this| this.child(muted(prefix.to_owned())))
+          .child(command_chip(command.trim()))
+          .when(!suffix.is_empty(), |this| this.child(muted(suffix.to_owned())))
+          .into_any_element()
+      }
+      None => muted(self.message.to_string()).into_any_element(),
+    }
   }
 
   fn render_body(&self, can_submit: bool) -> gpui::AnyElement {
@@ -522,6 +544,51 @@ impl PolkitDialog {
         )
       })
   }
+}
+
+/// Splits a polkit message around a command quoted GNU-style as `` `cmd' ``,
+/// returning `(prefix, command, suffix)`. Returns `None` if no such command is
+/// present, so the caller can render the message verbatim.
+fn split_command(message: &str) -> Option<(&str, &str, &str)> {
+  let open = message.find('`')?;
+  let after = &message[open + 1..];
+  let close = after.find('\'')?;
+  Some((&message[..open], &after[..close], &after[close + 1..]))
+}
+
+/// A monospace, code-styled chip for the command being authorized. The command
+/// is middle-ellipsized so both the store path prefix and the trailing binary +
+/// arguments remain readable; `truncate` is a pixel-level safety net for very
+/// narrow widths.
+fn command_chip(command: &str) -> impl IntoElement {
+  div()
+    .w_full()
+    .truncate()
+    .px_2()
+    .py_1()
+    .rounded_md()
+    .bg(rgba(0xFFFFFF14))
+    .font_family("Iosevka")
+    .text_xs()
+    .text_color(rgba(0xFFFFFFDD))
+    .child(ellipsize_middle(command, 40))
+}
+
+/// Shortens `text` to at most `max_chars` by dropping the middle and inserting
+/// an ellipsis, keeping more of the tail than the head.
+fn ellipsize_middle(text: &str, max_chars: usize) -> String {
+  let count = text.chars().count();
+  if count <= max_chars {
+    return text.to_owned();
+  }
+
+  let budget = max_chars.saturating_sub(1);
+  let tail = (budget * 2) / 3;
+  let head = budget - tail;
+
+  let head_str: String = text.chars().take(head).collect();
+  let tail_str: String = text.chars().skip(count - tail).collect();
+  format!("{head_str}…{tail_str}")
 }
 
 fn status_row(leading: gpui::AnyElement, label: &'static str) -> gpui::Div {

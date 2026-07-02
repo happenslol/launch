@@ -13,11 +13,12 @@ use std::process::Stdio;
 use std::sync::Mutex;
 
 use anyhow::Result;
-use async_process::{ChildStdin, ChildStdout, Command};
+use async_net::unix::UnixStream;
+use async_process::Command;
 use flume::{Receiver, Sender};
 use futures::{
   FutureExt as _, StreamExt as _,
-  io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+  io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader},
   select_biased,
 };
 use gpui::{App, AsyncApp, SharedString};
@@ -28,7 +29,13 @@ use zvariant::Type;
 use crate::dbus::GlobalDbusConnection;
 use crate::util::ResultExt;
 
-const OBJECT_PATH: &str = "/tech/opencreek/launch/PolkitAgent";
+const OBJECT_PATH: &str = "/lol/happens/launch/PolkitAgent";
+
+/// Socket exposed by modern polkit (>=126). Connecting to it makes systemd
+/// socket-activate `polkit-agent-helper-1 --socket-activated` as root, avoiding
+/// the need for a setuid helper binary. This is what upstream `libpolkit-agent`
+/// prefers, falling back to spawning the setuid helper if the socket is absent.
+const AGENT_HELPER_SOCKET: &str = "/run/polkit/agent-helper.socket";
 
 /// A message from the agent (running on the D-Bus executor) to the UI event
 /// loop on the foreground thread.
@@ -196,11 +203,51 @@ impl PolkitAgent {
     *self.attempt() = attempt;
   }
 
-  /// Runs a single `polkit-agent-helper-1` invocation to completion. The helper
-  /// owns one polkit cookie, so a wrong password ends the attempt with
-  /// [`PolkitError::Failed`]; polkit then decides whether to reissue a fresh
-  /// cookie for another try.
+  /// Runs the PAM conversation to completion. Prefers the socket-activated
+  /// helper, falling back to spawning the setuid helper, mirroring what
+  /// `libpolkit-agent` does. Either transport consumes one polkit cookie, so a
+  /// wrong password ends the attempt with [`PolkitError::Failed`]; polkit then
+  /// decides whether to reissue a fresh cookie for another try.
   async fn authenticate(
+    &self,
+    cookie: &str,
+    username: &str,
+    cancel_rx: &Receiver<()>,
+  ) -> Result<(), PolkitError> {
+    match UnixStream::connect(AGENT_HELPER_SOCKET).await {
+      Ok(stream) => {
+        self
+          .authenticate_via_socket(stream, cookie, username, cancel_rx)
+          .await
+      }
+      Err(error) => {
+        debug!(?error, "agent helper socket unavailable, spawning setuid helper");
+        self
+          .authenticate_via_helper(cookie, username, cancel_rx)
+          .await
+      }
+    }
+  }
+
+  /// Socket transport: systemd runs `polkit-agent-helper-1 --socket-activated`
+  /// as root when we connect, and identifies us via the connection's peer
+  /// credentials, so no setuid binary is involved. The username is sent first,
+  /// then [`Self::converse`] sends the cookie and drives PAM.
+  async fn authenticate_via_socket(
+    &self,
+    stream: UnixStream,
+    cookie: &str,
+    username: &str,
+    cancel_rx: &Receiver<()>,
+  ) -> Result<(), PolkitError> {
+    let mut writer = stream.clone();
+    write_line(&mut writer, username).await?;
+    self.converse(stream, &mut writer, cookie, cancel_rx).await
+  }
+
+  /// Legacy transport: spawn the setuid helper with the username as an argument
+  /// and drive PAM over its stdio.
+  async fn authenticate_via_helper(
     &self,
     cookie: &str,
     username: &str,
@@ -220,7 +267,7 @@ impl PolkitAgent {
     let mut stdin = child.stdin.take().ok_or(PolkitError::Failed)?;
     let stdout = child.stdout.take().ok_or(PolkitError::Failed)?;
 
-    let result = self.converse(cookie, &mut stdin, stdout, cancel_rx).await;
+    let result = self.converse(stdout, &mut stdin, cookie, cancel_rx).await;
 
     // Sending EOF lets a helper that is still blocked reading a prompt unwind
     // cleanly; a cancelled attempt is killed outright. Helpers that reached a
@@ -233,16 +280,23 @@ impl PolkitAgent {
     result
   }
 
-  async fn converse(
+  /// Drives the PAM conversation over an already-established transport: sends the
+  /// cookie, then relays prompts to the UI and responses back until the helper
+  /// reports `SUCCESS`/`FAILURE`.
+  async fn converse<R, W>(
     &self,
+    reader: R,
+    writer: &mut W,
     cookie: &str,
-    stdin: &mut ChildStdin,
-    stdout: ChildStdout,
     cancel_rx: &Receiver<()>,
-  ) -> Result<(), PolkitError> {
-    write_line(stdin, cookie).await?;
+  ) -> Result<(), PolkitError>
+  where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+  {
+    write_line(writer, cookie).await?;
 
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = BufReader::new(reader).lines();
 
     loop {
       let line = select_biased! {
@@ -251,7 +305,7 @@ impl PolkitAgent {
       };
 
       let Some(line) = line else {
-        warn!("polkit helper exited without a verdict");
+        warn!("polkit helper closed the connection without a verdict");
         return Err(PolkitError::Failed);
       };
 
@@ -260,15 +314,16 @@ impl PolkitAgent {
         PolkitError::Failed
       })?;
 
-      let line = line.trim();
-      let (prefix, text) = line.split_once(' ').unwrap_or((line, ""));
-      let text = text.trim();
+      // The helper C-escapes message text (matching g_strescape); undo it before
+      // display. The leading keyword is plain ASCII and unaffected.
+      let line = unescape(&line);
+      let (keyword, text) = line.split_once(' ').unwrap_or((line.as_str(), ""));
 
-      match prefix {
+      match keyword {
         "PAM_PROMPT_ECHO_OFF" | "PAM_PROMPT_ECHO_ON" => {
-          let echo = prefix == "PAM_PROMPT_ECHO_ON";
+          let echo = keyword == "PAM_PROMPT_ECHO_ON";
           let secret = self.request_secret(text, echo, cancel_rx).await?;
-          write_line(stdin, &secret).await?;
+          write_line(writer, &secret).await?;
         }
         "PAM_ERROR_MSG" => {
           if !text.is_empty() {
@@ -322,17 +377,66 @@ impl PolkitAgent {
   }
 }
 
-async fn write_line(stdin: &mut ChildStdin, line: &str) -> Result<(), PolkitError> {
+async fn write_line<W: AsyncWrite + Unpin>(
+  writer: &mut W,
+  line: &str,
+) -> Result<(), PolkitError> {
   let write = async {
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await
+    writer.write_all(line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await
   };
 
   write.await.map_err(|error| {
     error!(?error, "failed to write to polkit helper");
     PolkitError::Failed
   })
+}
+
+/// Reverses the C-style escaping the polkit helper applies to PAM message text
+/// (the inverse of glib's `g_strescape`, which the agent side undoes with
+/// `g_strcompress`). Only affects display text; control keywords never contain
+/// escapes.
+fn unescape(input: &str) -> String {
+  let mut out = String::with_capacity(input.len());
+  let mut chars = input.chars();
+
+  while let Some(ch) = chars.next() {
+    if ch != '\\' {
+      out.push(ch);
+      continue;
+    }
+
+    match chars.next() {
+      Some('n') => out.push('\n'),
+      Some('r') => out.push('\r'),
+      Some('t') => out.push('\t'),
+      Some('b') => out.push('\u{8}'),
+      Some('f') => out.push('\u{c}'),
+      Some('v') => out.push('\u{b}'),
+      Some('\\') => out.push('\\'),
+      Some('"') => out.push('"'),
+      Some(first @ '0'..='7') => {
+        let mut value = first as u32 - '0' as u32;
+        for _ in 0..2 {
+          match chars.clone().next() {
+            Some(digit @ '0'..='7') => {
+              value = value * 8 + (digit as u32 - '0' as u32);
+              chars.next();
+            }
+            _ => break,
+          }
+        }
+        if let Some(decoded) = char::from_u32(value) {
+          out.push(decoded);
+        }
+      }
+      Some(other) => out.push(other),
+      None => out.push('\\'),
+    }
+  }
+
+  out
 }
 
 /// Picks the username the helper should authenticate against. Mirrors GNOME
