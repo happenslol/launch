@@ -24,6 +24,7 @@ mod network;
 mod niri;
 mod notification_osd;
 mod picker;
+mod polkit;
 mod power;
 mod scrollbar;
 mod submenu;
@@ -226,6 +227,7 @@ fn run_app(
       niri::init(cx);
       workspace_osd::init(cx);
       notification_osd::init(cx);
+      polkit::init(cx);
       InputState::init(cx);
       load_embedded_fonts(cx).unwrap();
 
