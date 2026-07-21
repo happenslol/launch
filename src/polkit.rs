@@ -22,6 +22,7 @@ use crate::dbus::polkit::{self, AgentEvent};
 use crate::icon::{Icon, IconName, Spinner};
 use crate::input::input;
 use crate::input::state::{Escape as InputEscape, InputEvent, InputState};
+use crate::launcher::Launcher;
 use crate::util::{ResultExt, h_flex, v_flex};
 
 const CONTEXT: &str = "polkit_dialog";
@@ -46,6 +47,8 @@ async fn run(receiver: Receiver<AgentEvent>, cx: &mut AsyncApp) {
   while let Ok(event) = receiver.recv_async().await {
     match event {
       AgentEvent::Begin { message, cancel } => {
+        set_launcher_keyboard_suspended(cx, true);
+
         let reused = window.is_some_and(|handle| {
           handle
             .update(cx, |dialog, window, cx| {
@@ -97,9 +100,27 @@ async fn run(receiver: Receiver<AgentEvent>, cx: &mut AsyncApp) {
             .update(cx, |dialog, _window, cx| dialog.start_exit(cx))
             .log_err();
         }
+        set_launcher_keyboard_suspended(cx, false);
       }
     }
   }
+}
+
+/// Suspends or restores keyboard interactivity on any open launcher windows so
+/// the polkit dialog can hold exclusive keyboard focus. See
+/// [`Launcher::set_keyboard_suspended`] for why this is necessary.
+fn set_launcher_keyboard_suspended(cx: &mut AsyncApp, suspended: bool) {
+  cx.update(|cx| {
+    for handle in cx.windows() {
+      if let Some(launcher) = handle.downcast::<Launcher>() {
+        launcher
+          .update(cx, |launcher, window, _cx| {
+            launcher.set_keyboard_suspended(suspended, window);
+          })
+          .log_err();
+      }
+    }
+  });
 }
 
 fn open_window(

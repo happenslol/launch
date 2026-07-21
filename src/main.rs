@@ -262,7 +262,7 @@ fn run_app(
 fn open_launcher_window(cx: &mut App, panel: Option<String>, no_keyboard_capture: bool) {
   if let Err(err) = cx.open_window(
     Launcher::get_window_options(no_keyboard_capture),
-    move |window, cx| cx.new(move |cx| Launcher::new(window, cx, panel)),
+    move |window, cx| cx.new(move |cx| Launcher::new(window, cx, panel, no_keyboard_capture)),
   ) {
     error!(?err, "Failed to launch");
   }
