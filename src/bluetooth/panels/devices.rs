@@ -147,6 +147,32 @@ impl DeviceEntryInner {
       }
     });
 
+    let paired_listener = cx.spawn_in(window, {
+      let device = device.clone();
+      async move |this, cx| {
+        let paired_stream = cx
+          .background_spawn({
+            let device = device.clone();
+            async move { device.listen_paired_changed().await }
+          })
+          .await;
+
+        let Ok(paired_stream) = paired_stream else {
+          return;
+        };
+
+        futures::pin_mut!(paired_stream);
+
+        while let Some(new_paired) = paired_stream.next().await {
+          let _ = this.update(cx, |this, cx| {
+            this.device.paired = new_paired;
+            cx.emit(DeviceStateChanged);
+            cx.notify();
+          });
+        }
+      }
+    });
+
     let battery_listener = cx.spawn_in(window, {
       let device = device.clone();
       async move |this, cx| {
@@ -199,6 +225,7 @@ impl DeviceEntryInner {
 
     self._property_listeners.push(alias_listener);
     self._property_listeners.push(connected_listener);
+    self._property_listeners.push(paired_listener);
     self._property_listeners.push(battery_listener);
     self._property_listeners.push(rssi_listener);
   }
@@ -212,6 +239,7 @@ pub struct BluetoothDevicesPanel {
   adapter_powered: Option<bool>,
   is_discovering: bool,
   _device_updates_task: Option<Task<()>>,
+  _device_removals_task: Option<Task<()>>,
   _discovering_listener: Option<Task<()>>,
   _powered_listener: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
@@ -262,6 +290,7 @@ impl BluetoothDevicesPanel {
       adapter_powered: None,
       is_discovering: false,
       _device_updates_task: None,
+      _device_removals_task: None,
       _discovering_listener: None,
       _powered_listener: None,
       _subscriptions: subscriptions,
@@ -282,6 +311,8 @@ impl BluetoothDevicesPanel {
         let device = entry.read(cx).device.clone();
         if let Some(bluetooth_entry) = this.devices.iter_mut().find(|e| e.entry == *entry) {
           bluetooth_entry.search_string = format!("{} {}", device.name, device.address);
+          bluetooth_entry.is_connected = device.connected;
+          bluetooth_entry.is_paired = device.paired;
         }
         picker.update(cx, |picker, cx| {
           picker.set_items(this.devices.clone(), window, cx);
@@ -379,6 +410,7 @@ impl BluetoothDevicesPanel {
           });
 
           this._device_updates_task = Some(this.listen_for_device_updates(window, cx));
+          this._device_removals_task = Some(this.listen_for_device_removals(window, cx));
           this._discovering_listener = Some(this.listen_for_discovering_changes(window, cx));
           this._powered_listener = Some(this.listen_for_powered_changes(window, cx));
 
@@ -445,6 +477,46 @@ impl BluetoothDevicesPanel {
             }
           });
         }
+      }
+    })
+  }
+
+  fn listen_for_device_removals(&self, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
+    use futures::pin_mut;
+
+    let Some(bluez) = self.bluez.clone() else {
+      return Task::ready(());
+    };
+
+    cx.spawn_in(window, async move |this, cx| {
+      let interfaces_removed_result = cx
+        .background_spawn({
+          let bluez = bluez.clone();
+          async move { bluez.interfaces_removed().await }
+        })
+        .await;
+
+      let Ok(interfaces_removed) = interfaces_removed_result else {
+        return;
+      };
+
+      pin_mut!(interfaces_removed);
+
+      while let Some(path) = interfaces_removed.next().await {
+        let _ = this.update_in(cx, |this, window, cx| {
+          let before = this.devices.len();
+          this
+            .devices
+            .retain(|entry| entry.entry.read(cx).device.object_path() != &path);
+
+          if this.devices.len() != before {
+            let picker = this.picker.clone();
+            picker.update(cx, |picker, cx| {
+              picker.set_items(this.devices.clone(), window, cx);
+            });
+            cx.notify();
+          }
+        });
       }
     })
   }

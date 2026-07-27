@@ -90,6 +90,27 @@ impl BlueZ {
       Some((path, is_device))
     }))
   }
+
+  pub async fn interfaces_removed(
+    &self,
+  ) -> Result<impl Stream<Item = OwnedObjectPath> + use<>> {
+    use zbus::fdo;
+
+    let object_manager = fdo::ObjectManagerProxy::builder(&self.conn)
+      .destination("org.bluez")?
+      .path("/")?
+      .build()
+      .await?;
+
+    let stream = object_manager.receive_interfaces_removed().await?;
+    Ok(stream.filter_map(|signal| async move {
+      let args = signal.args().ok()?;
+      if !args.interfaces.iter().any(|i| i.as_str() == "org.bluez.Device1") {
+        return None;
+      }
+      Some(args.object_path.clone().into())
+    }))
+  }
 }
 
 #[derive(Clone)]
@@ -228,7 +249,6 @@ impl Device {
     Ok(())
   }
 
-  #[allow(dead_code)]
   pub fn object_path(&self) -> &OwnedObjectPath {
     &self.path
   }
@@ -240,6 +260,11 @@ impl Device {
 
   pub async fn listen_connected_changed(&self) -> Result<impl Stream<Item = bool> + use<>> {
     let stream = self.device_proxy.receive_connected_changed().await;
+    Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
+  }
+
+  pub async fn listen_paired_changed(&self) -> Result<impl Stream<Item = bool> + use<>> {
+    let stream = self.device_proxy.receive_paired_changed().await;
     Ok(stream.filter_map(|signal| async move { signal.get().await.ok() }))
   }
 
