@@ -3,6 +3,7 @@ pub mod bluez;
 pub mod logind;
 pub mod networkmanager;
 pub mod notifications;
+pub mod polkit;
 pub mod status_notifier;
 
 use futures::FutureExt;

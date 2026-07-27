@@ -93,16 +93,21 @@ pub struct Launcher {
   tray_bounds: HashMap<String, BoundsHandle>,
   tray_focus_handle: FocusHandle,
   selected_tray_index: Option<usize>,
+  keyboard_interactivity: KeyboardInteractivity,
   pub(crate) _subscriptions: Vec<Subscription>,
 }
 
 impl Launcher {
-  pub fn get_window_options(no_keyboard_capture: bool) -> WindowOptions {
-    let keyboard_interactivity = if no_keyboard_capture {
+  fn keyboard_interactivity(no_keyboard_capture: bool) -> KeyboardInteractivity {
+    if no_keyboard_capture {
       KeyboardInteractivity::OnDemand
     } else {
       KeyboardInteractivity::Exclusive
-    };
+    }
+  }
+
+  pub fn get_window_options(no_keyboard_capture: bool) -> WindowOptions {
+    let keyboard_interactivity = Self::keyboard_interactivity(no_keyboard_capture);
 
     WindowOptions {
       titlebar: None,
@@ -125,7 +130,12 @@ impl Launcher {
     }
   }
 
-  pub fn new(window: &mut Window, cx: &mut Context<Self>, panel: Option<String>) -> Self {
+  pub fn new(
+    window: &mut Window,
+    cx: &mut Context<Self>,
+    panel: Option<String>,
+    no_keyboard_capture: bool,
+  ) -> Self {
     cx.bind_keys([
       KeyBinding::new("escape", Quit, Some(CONTEXT)),
       KeyBinding::new("shift-escape", GoBack, Some(CONTEXT)),
@@ -328,6 +338,7 @@ impl Launcher {
       tray_bounds: HashMap::new(),
       tray_focus_handle,
       selected_tray_index: None,
+      keyboard_interactivity: Self::keyboard_interactivity(no_keyboard_capture),
       color_result: None,
       timestamp_result: None,
       fend_result: None,
@@ -337,6 +348,19 @@ impl Launcher {
     }
   }
 
+  /// Yields or reclaims the launcher's layer-shell keyboard focus. The polkit
+  /// dialog is an exclusive-keyboard layer surface on the same layer as the
+  /// launcher; compositors keep keyboard focus on whichever exclusive surface was
+  /// mapped first (the launcher), so the launcher must drop its interactivity
+  /// while the dialog is up and restore it when the dialog closes.
+  pub fn set_keyboard_suspended(&self, suspended: bool, window: &Window) {
+    let interactivity = if suspended {
+      KeyboardInteractivity::None
+    } else {
+      self.keyboard_interactivity
+    };
+    window.set_keyboard_interactivity(interactivity);
+  }
 
   fn format_color(color: &csscolorparser::Color, format: &str) -> Option<String> {
     match format {

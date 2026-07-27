@@ -24,6 +24,7 @@ mod network;
 mod niri;
 mod notification_osd;
 mod picker;
+mod polkit;
 mod power;
 mod scrollbar;
 mod submenu;
@@ -226,6 +227,7 @@ fn run_app(
       niri::init(cx);
       workspace_osd::init(cx);
       notification_osd::init(cx);
+      polkit::init(cx);
       InputState::init(cx);
       load_embedded_fonts(cx).unwrap();
 
@@ -260,7 +262,7 @@ fn run_app(
 fn open_launcher_window(cx: &mut App, panel: Option<String>, no_keyboard_capture: bool) {
   if let Err(err) = cx.open_window(
     Launcher::get_window_options(no_keyboard_capture),
-    move |window, cx| cx.new(move |cx| Launcher::new(window, cx, panel)),
+    move |window, cx| cx.new(move |cx| Launcher::new(window, cx, panel, no_keyboard_capture)),
   ) {
     error!(?err, "Failed to launch");
   }
