@@ -17,6 +17,7 @@ mod input;
 mod instance;
 mod launcher;
 mod llm;
+mod lock;
 mod logging;
 mod markdown;
 mod matcher;
@@ -74,6 +75,18 @@ enum Command {
     #[arg(short = 'n', long = "count", default_value_t = 10)]
     count: u32,
   },
+  /// Lock the screen
+  Lock,
+}
+
+/// What the app does once it is up.
+enum Startup {
+  /// Open the launcher, on a specific panel if one was named.
+  Launcher { panel: Option<String> },
+  /// Only run the background services.
+  Daemon,
+  /// Lock the screen right away.
+  Lock,
 }
 
 fn main() -> Result<()> {
@@ -89,12 +102,18 @@ fn main() -> Result<()> {
     return print_recent_notifications(*count);
   }
 
-  let daemon_only = matches!(args.command, Some(Command::Daemon));
+  let startup = match args.command {
+    Some(Command::Daemon) => Startup::Daemon,
+    Some(Command::Lock) => Startup::Lock,
+    // Handled above; it never reaches the app.
+    Some(Command::Notifications { .. }) => return Ok(()),
+    None => Startup::Launcher { panel: args.panel },
+  };
 
   if args.foreground {
     let listener = instance::force_acquire()?;
     let receiver = instance::listen(listener);
-    run_app(args.panel, args.no_keyboard_capture, receiver, daemon_only);
+    run_app(startup, args.no_keyboard_capture, receiver);
     return Ok(());
   }
 
@@ -102,18 +121,25 @@ fn main() -> Result<()> {
 
   match role {
     Role::Client(mut stream) => {
-      let response = if daemon_only {
-        info!("Daemon already running, checking version");
-        instance::send_version_check(&mut stream)
-      } else {
-        info!("Sending open message to background process");
-        instance::send_open(&mut stream, args.panel.clone())
+      let response = match &startup {
+        Startup::Daemon => {
+          info!("Daemon already running, checking version");
+          instance::send_version_check(&mut stream)
+        }
+        Startup::Lock => {
+          info!("Sending lock message to background process");
+          instance::send_lock(&mut stream)
+        }
+        Startup::Launcher { panel } => {
+          info!("Sending open message to background process");
+          instance::send_open(&mut stream, panel.clone())
+        }
       };
       drop(stream);
 
       let listener = match response {
         Ok(Response::Accepted) => {
-          if daemon_only {
+          if matches!(startup, Startup::Daemon) {
             info!("Same-version daemon already running");
           } else {
             info!("Background process accepted request");
@@ -130,12 +156,11 @@ fn main() -> Result<()> {
         }
       };
 
-      let panel = if daemon_only { None } else { args.panel };
-      fork_and_run(listener, panel, args.no_keyboard_capture, daemon_only);
+      fork_and_run(listener, startup, args.no_keyboard_capture);
     }
     Role::Server(listener) => {
       info!("No existing instance, daemonizing");
-      fork_and_run(listener, args.panel, args.no_keyboard_capture, daemon_only);
+      fork_and_run(listener, startup, args.no_keyboard_capture);
     }
   }
 
@@ -183,9 +208,8 @@ fn print_recent_notifications(count: u32) -> Result<()> {
 
 fn fork_and_run(
   listener: std::os::unix::net::UnixListener,
-  panel: Option<String>,
+  startup: Startup,
   no_keyboard_capture: bool,
-  daemon_only: bool,
 ) {
   if let Fork::Child = fork::fork().expect("Failed to fork") {
     if fork::setsid().is_err() {
@@ -200,16 +224,11 @@ fn fork_and_run(
     }
 
     let receiver = instance::listen(listener);
-    run_app(panel, no_keyboard_capture, receiver, daemon_only);
+    run_app(startup, no_keyboard_capture, receiver);
   }
 }
 
-fn run_app(
-  panel: Option<String>,
-  no_keyboard_capture: bool,
-  receiver: Receiver<Message>,
-  daemon_only: bool,
-) {
+fn run_app(startup: Startup, no_keyboard_capture: bool, receiver: Receiver<Message>) {
   Application::with_platform(gpui_linux::current_platform(false))
     .with_assets(Assets)
     .with_quit_mode(QuitMode::Explicit)
@@ -228,11 +247,14 @@ fn run_app(
       workspace_osd::init(cx);
       notification_osd::init(cx);
       polkit::init(cx);
+      lock::init(cx);
       InputState::init(cx);
       load_embedded_fonts(cx).unwrap();
 
-      if !daemon_only {
-        open_launcher_window(cx, panel, no_keyboard_capture);
+      match startup {
+        Startup::Launcher { panel } => open_launcher_window(cx, panel, no_keyboard_capture),
+        Startup::Lock => lock::lock(cx),
+        Startup::Daemon => {}
       }
 
       cx.spawn(async move |cx| {
@@ -245,12 +267,20 @@ fn run_app(
                   .windows()
                   .iter()
                   .any(|w| w.downcast::<Launcher>().is_some());
-                if has_launcher {
+                if lock::is_locked() {
+                  // The compositor would hide it, and it would still be there
+                  // after unlocking.
+                  debug!("Skipping open, session is locked");
+                } else if has_launcher {
                   debug!("Skipping open, launcher window already exists");
                 } else {
                   open_launcher_window(cx, panel, no_keyboard_capture);
                 }
               });
+            }
+            Message::Lock => {
+              debug!("Processing lock message");
+              cx.update(lock::lock);
             }
           }
         }

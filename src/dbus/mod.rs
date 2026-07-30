@@ -1,5 +1,6 @@
 pub mod application;
 pub mod bluez;
+pub mod fprintd;
 pub mod logind;
 pub mod networkmanager;
 pub mod notifications;

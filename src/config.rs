@@ -17,6 +17,7 @@ use crate::util::ResultExt;
 #[serde(default)]
 pub struct Config {
   pub notifications: NotificationsConfig,
+  pub lock: LockConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -25,6 +26,28 @@ pub struct NotificationsConfig {
   /// Name of the output that notifications are shown on, e.g. `"DP-1"` or
   /// `"HDMI-A-1"`. When unset, the first available display is used.
   pub display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct LockConfig {
+  /// Name of the PAM service the lock screen authenticates against, i.e. the
+  /// file in `/etc/pam.d`. When that file is missing a known interactive service
+  /// is used instead, since PAM denies services it has no configuration for.
+  pub pam_service: String,
+  /// Whether to verify fingerprints through fprintd next to the password. The
+  /// PAM service should not include `pam_fprintd` when this is on, as only one
+  /// client at a time can use the reader.
+  pub fingerprint: bool,
+}
+
+impl Default for LockConfig {
+  fn default() -> Self {
+    Self {
+      pam_service: "launch".to_owned(),
+      fingerprint: true,
+    }
+  }
 }
 
 struct GlobalConfig(Entity<ConfigState>);
@@ -195,6 +218,21 @@ mod tests {
   fn empty_config_uses_defaults() {
     let config = parse("");
     assert_eq!(config.notifications.display, None);
+    assert_eq!(config.lock, LockConfig::default());
+  }
+
+  #[test]
+  fn reads_lock_section() {
+    let config = parse("[lock]\npam_service = \"swaylock\"\nfingerprint = false\n");
+    assert_eq!(config.lock.pam_service, "swaylock");
+    assert!(!config.lock.fingerprint);
+  }
+
+  #[test]
+  fn partial_lock_section_keeps_other_defaults() {
+    let config = parse("[lock]\nfingerprint = false\n");
+    assert_eq!(config.lock.pam_service, LockConfig::default().pam_service);
+    assert!(!config.lock.fingerprint);
   }
 
   #[test]
