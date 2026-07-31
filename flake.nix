@@ -53,6 +53,7 @@
 
         security.pam.services.launch = {
           # we go through systemd for the fprint service, so no fprintAuth here
+          fprintAuth = lib.mkForce false;
           enableGnomeKeyring = lib.mkDefault config.services.gnome.gnome-keyring.enable;
         };
 
