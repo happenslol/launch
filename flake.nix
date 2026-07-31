@@ -10,6 +10,7 @@
   };
 
   outputs = {
+    self,
     nixpkgs,
     crane,
     fenix,
@@ -19,6 +20,57 @@
     perSystem = f:
       nixpkgs.lib.foldAttrs nixpkgs.lib.mergeAttrs {}
       (map (s: nixpkgs.lib.mapAttrs (_: v: {${s} = v;}) (f s)) systems);
+
+    nixosModule = {
+      config,
+      lib,
+      pkgs,
+      ...
+    }: let
+      cfg = config.programs.launch;
+    in {
+      options.programs.launch = {
+        enable = lib.mkEnableOption "launch desktop environment";
+
+        package = lib.mkOption {
+          type = lib.types.package;
+          default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          defaultText = lib.literalExpression "launch.packages.\${system}.default";
+          description = "The launch package to use.";
+        };
+
+        autostart = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = ''Start the daemon with the graphical session.'';
+        };
+      };
+
+      config = lib.mkIf cfg.enable {
+        environment.systemPackages = [cfg.package];
+        security.polkit.enable = true;
+        services.upower.enable = lib.mkDefault true;
+
+        security.pam.services.launch = {
+          # we go through systemd for the fprint service, so no fprintAuth here
+          enableGnomeKeyring = lib.mkDefault config.services.gnome.gnome-keyring.enable;
+        };
+
+        systemd.user.services.launch = lib.mkIf cfg.autostart {
+          description = "launch desktop environment";
+          partOf = ["graphical-session.target"];
+          after = ["graphical-session.target"];
+          wantedBy = ["graphical-session.target"];
+
+          serviceConfig = {
+            Type = "simple";
+            # systemd service has to be a foreground process
+            ExecStart = "${cfg.package}/bin/launch --foreground daemon";
+            Restart = "on-failure";
+          };
+        };
+      };
+    };
   in
     perSystem (system: let
       pkgs = import nixpkgs {
@@ -75,6 +127,7 @@
       package = craneLib.buildPackage (args
         // {
           inherit cargoArtifacts;
+          meta.mainProgram = "launch";
           postInstall = ''
             wrapProgram "$out/bin/launch" --prefix LD_LIBRARY_PATH : "${libraryPath}"
 
@@ -112,5 +165,13 @@
       };
 
       packages.default = package;
-    });
+    })
+    // {
+      overlays.default = final: _prev: {
+        launch = self.packages.${final.stdenv.hostPlatform.system}.default;
+      };
+
+      nixosModules.default = nixosModule;
+      nixosModules.launch = nixosModule;
+    };
 }
