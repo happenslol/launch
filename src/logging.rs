@@ -1,8 +1,10 @@
 use std::fs;
 use std::io;
+use std::path::PathBuf;
 
 use tracing::level_filters::LevelFilter;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
+use tracing_subscriber::{fmt, layer::SubscriberExt, reload, util::SubscriberInitExt};
 
 #[cfg(debug_assertions)]
 const DEFAULT_LOG_LEVEL: &str = "debug";
@@ -10,12 +12,25 @@ const DEFAULT_LOG_LEVEL: &str = "debug";
 #[cfg(not(debug_assertions))]
 const DEFAULT_LOG_LEVEL: &str = "info";
 
-/// Sets up logging to `$XDG_STATE_HOME/launch/log` and stderr.
-///
-/// Writes go out synchronously. `tracing_appender::non_blocking` would hand them
-/// to a worker thread, and threads don't survive the `fork` that daemonizes us -
-/// which silently swallowed everything the daemon ever logged.
-pub fn init() {
+/// Must be held for the entire runtime to ensure all logs are flushed before exit.
+#[must_use]
+pub struct Guard {
+  _file: WorkerGuard,
+  _stderr: WorkerGuard,
+}
+
+/// Replaces the writer of one layer, boxed so callers never have to name the
+/// layer and subscriber types a [`reload::Handle`] is generic over.
+type ReloadWriter = Box<dyn Fn(NonBlocking) -> Result<(), reload::Error>>;
+
+/// Swaps out the writers the subscriber logs through, which is what
+/// [`reinit_after_fork`] needs to give them new worker threads.
+pub struct Reload {
+  file: ReloadWriter,
+  stderr: ReloadWriter,
+}
+
+pub fn init() -> (Guard, Reload) {
   let filter = tracing_subscriber::EnvFilter::try_from_env(format!(
     "{}_LOG",
     env!("CARGO_CRATE_NAME").to_uppercase()
@@ -43,20 +58,75 @@ pub fn init() {
       .add_directive(LevelFilter::WARN.into())
   });
 
-  let log_dir = dirs::state_dir()
-    .expect("Failed to get state dir")
-    .join(env!("CARGO_CRATE_NAME"))
-    .join("log");
+  let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender());
+  let (file_layer, file_handle) =
+    reload::Layer::new(fmt::layer().with_writer(file_writer).with_ansi(false));
 
-  fs::create_dir_all(&log_dir).expect("Failed to create log directory");
-
-  let appender = tracing_appender::rolling::daily(&log_dir, "launch.log");
-  let file_layer = fmt::layer().with_writer(appender).with_ansi(false);
-  let stderr_layer = fmt::layer().with_writer(io::stderr).with_ansi(true);
+  let (stderr_writer, stderr_guard) = tracing_appender::non_blocking(io::stderr());
+  let (stderr_layer, stderr_handle) =
+    reload::Layer::new(fmt::layer().with_writer(stderr_writer).with_ansi(true));
 
   tracing_subscriber::registry()
     .with(filter)
     .with(file_layer)
     .with(stderr_layer)
     .init();
+
+  let reload = Reload {
+    file: Box::new(move |writer| {
+      file_handle.reload(fmt::layer().with_writer(writer).with_ansi(false))
+    }),
+    stderr: Box::new(move |writer| {
+      stderr_handle.reload(fmt::layer().with_writer(writer).with_ansi(true))
+    }),
+  };
+
+  let guard = Guard {
+    _file: file_guard,
+    _stderr: stderr_guard,
+  };
+
+  (guard, reload)
+}
+
+/// Gives the log writers fresh worker threads, to be called in the child right
+/// after daemonizing.
+///
+/// `fork` carries only the calling thread into the child, so the threads
+/// `tracing_appender` started in the parent don't exist there and everything the
+/// daemon logs would queue up unwritten. The subscriber itself is plain data and
+/// comes across fine; only the writers underneath it have to be replaced, and
+/// the parent's [`Guard`] has to be forgotten rather than dropped, since it
+/// would wait on threads that were never here.
+pub fn reinit_after_fork(reload: &Reload) -> Guard {
+  let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender());
+  let (stderr_writer, stderr_guard) = tracing_appender::non_blocking(io::stderr());
+
+  // Nothing can be logged about a failure to install the log writers, so this
+  // is one of the few places that has to write to stderr directly.
+  if let Err(error) = (reload.file)(file_writer) {
+    eprintln!("Failed to reinstall the log file writer: {error}");
+  }
+
+  if let Err(error) = (reload.stderr)(stderr_writer) {
+    eprintln!("Failed to reinstall the stderr writer: {error}");
+  }
+
+  Guard {
+    _file: file_guard,
+    _stderr: stderr_guard,
+  }
+}
+
+fn file_appender() -> tracing_appender::rolling::RollingFileAppender {
+  let log_dir = log_dir();
+  fs::create_dir_all(&log_dir).expect("Failed to create log directory");
+  tracing_appender::rolling::daily(&log_dir, "launch.log")
+}
+
+fn log_dir() -> PathBuf {
+  dirs::state_dir()
+    .expect("Failed to get state dir")
+    .join(env!("CARGO_CRATE_NAME"))
+    .join("log")
 }

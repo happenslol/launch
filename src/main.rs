@@ -37,7 +37,7 @@ mod wayland;
 mod workspace_osd;
 mod xdg;
 
-use std::process;
+use std::{mem, process};
 
 use anyhow::Result;
 use clap::Parser;
@@ -90,7 +90,7 @@ enum Startup {
 }
 
 fn main() -> Result<()> {
-  logging::init();
+  let (guard, reload) = logging::init();
   let args = Args::try_parse()?;
 
   match buildid::build_id() {
@@ -156,11 +156,11 @@ fn main() -> Result<()> {
         }
       };
 
-      fork_and_run(listener, startup, args.no_keyboard_capture);
+      fork_and_run(listener, startup, args.no_keyboard_capture, guard, reload);
     }
     Role::Server(listener) => {
       info!("No existing instance, daemonizing");
-      fork_and_run(listener, startup, args.no_keyboard_capture);
+      fork_and_run(listener, startup, args.no_keyboard_capture, guard, reload);
     }
   }
 
@@ -210,8 +210,16 @@ fn fork_and_run(
   listener: std::os::unix::net::UnixListener,
   startup: Startup,
   no_keyboard_capture: bool,
+  guard: logging::Guard,
+  reload: logging::Reload,
 ) {
   if let Fork::Child = fork::fork().expect("Failed to fork") {
+    // The log writers' worker threads stayed behind in the parent. Its guard
+    // would wait on threads that don't exist here, so drop it on the floor and
+    // start writers of our own.
+    mem::forget(guard);
+    let _guard = logging::reinit_after_fork(&reload);
+
     if fork::setsid().is_err() {
       eprintln!("Failed to setsid: {}", std::io::Error::last_os_error());
       process::exit(1);
