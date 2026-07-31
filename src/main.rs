@@ -242,6 +242,8 @@ fn run_app(startup: Startup, no_keyboard_capture: bool, receiver: Receiver<Messa
     .with_assets(Assets)
     .with_quit_mode(QuitMode::Explicit)
     .run(move |cx| {
+      load_embedded_fonts(cx).unwrap();
+
       tokio::init(cx);
       wayland::init(cx).unwrap();
       matcher::init(cx);
@@ -259,7 +261,6 @@ fn run_app(startup: Startup, no_keyboard_capture: bool, receiver: Receiver<Messa
       polkit::init(cx);
       lock::init(cx);
       InputState::init(cx);
-      load_embedded_fonts(cx).unwrap();
 
       match startup {
         Startup::Launcher { panel } => open_launcher_window(cx, panel, no_keyboard_capture),
