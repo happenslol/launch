@@ -81,6 +81,14 @@ fn verify(
   context.authenticate(Flag::NONE).map_err(failure_message)?;
   context.acct_mgmt(Flag::NONE).map_err(failure_message)?;
 
+  // Refresh the credentials the session is already holding - Kerberos tickets
+  // and the like - which is what a locker is expected to do on unlock. Stacks
+  // without such modules make this a no-op, and a failure says nothing about
+  // the password that was just accepted, so it must not fail the unlock.
+  if let Err(error) = context.reinitialize_credentials(Flag::NONE) {
+    warn!(?error, "Failed to refresh credentials after authenticating");
+  }
+
   Ok(())
 }
 

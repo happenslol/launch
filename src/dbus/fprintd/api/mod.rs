@@ -60,4 +60,9 @@ pub trait Device {
   /// Either `"press"` or `"swipe"`.
   #[zbus(property, name = "scan-type")]
   fn scan_type(&self) -> zbus::Result<String>;
+
+  /// Whether a finger is on the sensor right now. Reported during an operation,
+  /// and only by drivers that track finger status at all.
+  #[zbus(property, name = "finger-present")]
+  fn finger_present(&self) -> zbus::Result<bool>;
 }

@@ -90,7 +90,7 @@ enum Startup {
 }
 
 fn main() -> Result<()> {
-  let _guard = logging::init();
+  logging::init();
   let args = Args::try_parse()?;
 
   match buildid::build_id() {

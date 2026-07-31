@@ -200,6 +200,14 @@ impl FingerprintReader {
     }))
   }
 
+  /// Follows whether a finger is on the sensor while an operation runs. Drivers
+  /// that don't track finger status simply never report one, so silence here is
+  /// not evidence that nobody is touching the reader.
+  pub async fn listen_finger_present(&self) -> Result<impl Stream<Item = bool> + use<>> {
+    let changes = self.proxy.receive_finger_present_changed().await;
+    Ok(changes.filter_map(|change| async move { change.get().await.log_err() }))
+  }
+
   pub async fn stop_verification(&self) -> Result<()> {
     self
       .proxy
