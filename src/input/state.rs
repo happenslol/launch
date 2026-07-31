@@ -1335,8 +1335,12 @@ impl InputState {
   }
 
   /// Returns the true to let InputElement to render cursor, when Input is focused and current BlinkCursor is visible.
+  ///
+  /// A disabled input keeps its focus so it can carry on where it left off, but
+  /// shows no caret: there is nothing to type into it.
   pub fn show_cursor(&self, window: &Window, cx: &App) -> bool {
-    self.focus_handle.is_focused(window)
+    !self.disabled
+      && self.focus_handle.is_focused(window)
       && self.blink_cursor.read(cx).visible()
       && window.is_window_active()
   }

@@ -32,8 +32,18 @@ pub enum AuthEvent {
   /// An error message from a module, e.g. a failed previous attempt.
   Error(SharedString),
   /// The attempt ended. `Ok(())` means the password was accepted and the account
-  /// is in good standing; the error carries the reason, phrased for display.
-  Finished(Result<(), SharedString>),
+  /// is in good standing.
+  Finished(Result<(), AuthFailure>),
+}
+
+/// Why an attempt didn't go through.
+pub enum AuthFailure {
+  /// The password was wrong. There is nothing to say about it that the field the
+  /// password was typed into doesn't already show.
+  Rejected,
+  /// Something else stood in the way, e.g. an expired account or a stack that
+  /// can't run. Carries the reason, phrased for display.
+  Error(SharedString),
 }
 
 /// Verifies `password` for `username`, reporting progress over the returned
@@ -66,7 +76,7 @@ fn verify(
   username: &str,
   password: String,
   events: Sender<AuthEvent>,
-) -> Result<(), SharedString> {
+) -> Result<(), AuthFailure> {
   let conversation = Conversation {
     username: username.to_owned(),
     password,
@@ -75,11 +85,11 @@ fn verify(
 
   let mut context = Context::new(service, Some(username), conversation).map_err(|error| {
     error!(?error, service, "Failed to start PAM transaction");
-    SharedString::from("Authentication is unavailable")
+    AuthFailure::Error("Authentication is unavailable".into())
   })?;
 
-  context.authenticate(Flag::NONE).map_err(failure_message)?;
-  context.acct_mgmt(Flag::NONE).map_err(failure_message)?;
+  context.authenticate(Flag::NONE).map_err(failure)?;
+  context.acct_mgmt(Flag::NONE).map_err(failure)?;
 
   // Refresh the credentials the session is already holding - Kerberos tickets
   // and the like - which is what a locker is expected to do on unlock. Stacks
@@ -92,10 +102,8 @@ fn verify(
   Ok(())
 }
 
-/// Turns a PAM failure into something worth putting on a lock screen.
-fn failure_message(error: pam_client2::Error) -> SharedString {
-  // A rejected password is the one failure that isn't worth spelling out: PAM's
-  // own wording for it ("Authentication failure") reads like a malfunction.
+/// Sorts a PAM failure into the everyday one and the rest.
+fn failure(error: pam_client2::Error) -> AuthFailure {
   let rejected = matches!(
     error.code(),
     ErrorCode::AUTH_ERR | ErrorCode::CRED_INSUFFICIENT | ErrorCode::MAXTRIES
@@ -103,11 +111,11 @@ fn failure_message(error: pam_client2::Error) -> SharedString {
 
   if rejected {
     debug!(?error, "Password rejected");
-    return "Incorrect password".into();
+    return AuthFailure::Rejected;
   }
 
   warn!(?error, "Authentication failed");
-  error.to_string().into()
+  AuthFailure::Error(error.to_string().into())
 }
 
 /// Picks the service to authenticate against: the configured one when PAM has a

@@ -39,14 +39,15 @@ use chrono::{DateTime, Local, Timelike as _};
 use futures::future::Shared;
 use futures::{FutureExt as _, StreamExt as _, select_biased, stream};
 use gpui::{
-  AnyElement, App, AsyncApp, Context, Entity, EntityId, EventEmitter, Focusable, FontWeight,
-  Global, ImageSource, IntoElement, MouseButton, ObjectFit, Pixels, Render, Resource, SharedString,
-  Styled, Subscription, Task, WeakEntity, Window, div, img, prelude::*, px, rems, rgb, rgba,
+  AnyElement, App, AsyncApp, Context, Div, Entity, EntityId, EventEmitter, Focusable, FontWeight,
+  Global, ImageSource, IntoElement, MouseButton, ObjectFit, Pixels, Rems, Render, Resource,
+  SharedString, Styled, Subscription, Task, WeakEntity, Window, div, img, prelude::*, px, rems,
+  rgb, rgba,
 };
 use tracing::{debug, error, info, warn};
 use uzers::os::unix::UserExt as _;
 
-use crate::config::{ConfigState, LockConfig};
+use crate::config::{ConfigState, LockConfig, config_dir};
 use crate::dbus::GlobalDbusConnection;
 use crate::dbus::fprintd::{FingerprintReader, VerifyStatus};
 use crate::dbus::logind::{Session, SessionRequest};
@@ -55,7 +56,7 @@ use crate::icon::{Icon, IconName, Spinner};
 use crate::input::input;
 use crate::input::state::{InputEvent, InputState};
 use crate::launcher::Launcher;
-use crate::lock::pam::AuthEvent;
+use crate::lock::pam::{AuthEvent, AuthFailure};
 use crate::util::{ResultExt, h_flex, v_flex};
 
 /// The clock only shows hours and minutes, but is checked every second so it
@@ -75,6 +76,29 @@ const FINGERPRINT_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The clock is a copy of the desktop one from the `status` overlay, which the
 /// lock surfaces cover up: same corner, same formats, same weights, same wash.
+const AVATAR_SIZE: Pixels = px(104.);
+
+/// The password field and the icons that flank it. The icons are sized in rems
+/// so they track the text.
+const FIELD_TEXT_SIZE: Pixels = px(20.);
+const FIELD_ICON_SIZE: Rems = rems(1.4);
+
+/// How far the password field fades while it takes no input.
+const FIELD_DISABLED_OPACITY: f32 = 0.6;
+
+/// The colour a turned-down attempt is reported in, as the message and as the
+/// outline of the field it came from.
+const ERROR_COLOR: u32 = 0xE07070;
+
+/// How long the field stays outlined after an attempt is turned down. Long
+/// enough to be noticed, short enough to be gone by the time the next one is
+/// typed.
+const REJECTION_HIGHLIGHT: Duration = Duration::from_secs(3);
+
+/// What a profile picture in the config directory can be called. The first one
+/// that exists wins, so a user with several only sees one of them.
+const AVATAR_NAMES: &[&str] = &["profile.png", "profile.jpg", "profile.webp"];
+
 const TIME_FORMAT: &str = "%H:%M";
 const DATE_FORMAT: &str = "%a, %e %b";
 const CLOCK_OPACITY: f32 = 0.35;
@@ -311,9 +335,14 @@ fn current_user() -> Option<LockUser> {
   })
 }
 
-/// Looks for a user picture in the places desktops agree on.
+/// Looks for a user picture: one dropped into the config directory first, then
+/// the places desktops agree on.
 fn find_avatar(username: &str) -> Option<PathBuf> {
   let mut candidates = Vec::new();
+
+  if let Some(directory) = config_dir() {
+    candidates.extend(AVATAR_NAMES.iter().map(|name| directory.join(name)));
+  }
 
   if let Some(home) = dirs::home_dir() {
     candidates.push(home.join(".face"));
@@ -348,6 +377,9 @@ pub struct Lock {
   authenticating: bool,
   /// Why the last attempt failed, if it did.
   error: Option<SharedString>,
+  /// Whether an attempt was turned down just now, which the field is outlined
+  /// for. Outlives neither [`REJECTION_HIGHLIGHT`] nor the next attempt.
+  rejected: bool,
   /// Whatever PAM had to say during an attempt.
   hint: Option<SharedString>,
   fingerprint_state: FingerprintState,
@@ -359,6 +391,7 @@ pub struct Lock {
   _clock: Task<()>,
   _battery: Task<()>,
   _auth: Option<Task<()>>,
+  _rejection: Option<Task<()>>,
   /// Never cleared from within the task itself: dropping a task from its own
   /// body would cancel the future that is running.
   _fingerprint: Option<Task<()>>,
@@ -390,6 +423,7 @@ impl Lock {
       fingerprint_enabled: config.fingerprint,
       authenticating: false,
       error: None,
+      rejected: false,
       hint: None,
       fingerprint_state: FingerprintState::Off,
       fingerprint: None,
@@ -398,6 +432,7 @@ impl Lock {
       _clock: cx.spawn(async move |this, cx| tick_clock(this, cx).await),
       _battery: cx.spawn(async move |this, cx| watch_battery(connection, this, cx).await),
       _auth: None,
+      _rejection: None,
       _fingerprint: None,
       _finger_present: None,
     }
@@ -453,9 +488,16 @@ impl Lock {
         self.unlock(cx);
         true
       }
-      AuthEvent::Finished(Err(message)) => {
+      AuthEvent::Finished(Err(failure)) => {
         self.authenticating = false;
-        self.error = Some(message);
+
+        // A wrong password is answered by the outline alone; anything else is
+        // rare enough, and odd enough, to be worth spelling out.
+        if let AuthFailure::Error(message) = failure {
+          self.error = Some(message);
+        }
+
+        self.reject(cx);
         self.clear_password(cx);
         true
       }
@@ -465,10 +507,32 @@ impl Lock {
     finished
   }
 
+  /// Turns an attempt down by outlining the field for as long as
+  /// [`REJECTION_HIGHLIGHT`]. That is the whole of what a rejection says: the
+  /// user knows what they just tried. A second one restarts the outline, so it
+  /// always tracks the most recent attempt.
+  fn reject(&mut self, cx: &mut Context<Self>) {
+    self.rejected = true;
+    cx.notify();
+
+    self._rejection = Some(cx.spawn(async move |this, cx| {
+      cx.background_executor().timer(REJECTION_HIGHLIGHT).await;
+
+      this
+        .update(cx, |this, cx| {
+          this.rejected = false;
+          cx.notify();
+        })
+        .log_err();
+    }));
+  }
+
   /// Mirrors the typed password onto the other screens and drops the last
   /// error, so typing again starts from a clean slate.
   fn password_changed(&mut self, value: SharedString, source: EntityId, cx: &mut Context<Self>) {
-    if self.error.take().is_some() {
+    // Emptying the field is what a rejection does to it, and the message saying
+    // why has to outlive that. Only something actually typed clears it.
+    if !value.is_empty() && self.error.take().is_some() {
       cx.notify();
     }
 
@@ -853,7 +917,7 @@ async fn verify_once(
       match update.status {
         VerifyStatus::Match => outcome = Some(Attempt::Matched),
         VerifyStatus::NoMatch => {
-          lock.error = Some("Fingerprint not recognized".into());
+          lock.reject(cx);
           outcome = Some(Attempt::Rejected);
         }
         VerifyStatus::Retry(hint) => lock.error = Some(hint),
@@ -979,6 +1043,7 @@ impl Render for LockScreen {
     let battery = lock.battery;
     let hint = lock.hint.clone();
     let error = lock.error.clone();
+    let rejected = lock.rejected;
 
     div()
       .size_full()
@@ -1008,15 +1073,21 @@ impl Render for LockScreen {
               .gap_1()
               .child(
                 div()
-                  .text_size(px(17.))
-                  .font_weight(FontWeight::MEDIUM)
+                  .text_size(px(22.))
+                  .font_weight(FontWeight::BOLD)
                   .child(display_name.clone()),
               )
               .when(display_name != username, |this| {
                 this.child(div().text_sm().text_color(rgba(0xFFFFFFAA)).child(username))
               }),
           )
-          .child(self.render_password(authenticating, fingerprint))
+          // The field sits a little further from the name than the rest of the
+          // column is spaced, so the two don't read as one block.
+          .child(
+            self
+              .render_password(authenticating, fingerprint, rejected)
+              .mt_2(),
+          )
           .when_some(hint, |this, hint| {
             this.child(hint_row(
               Icon::new(IconName::Asterisk)
@@ -1027,7 +1098,7 @@ impl Render for LockScreen {
             ))
           })
           .when_some(error, |this, error| {
-            this.child(div().text_sm().text_color(rgb(0xE07070)).child(error))
+            this.child(div().text_sm().text_color(rgb(ERROR_COLOR)).child(error))
           }),
       )
       .when(self.clock, |this| this.child(render_clock(now, battery)))
@@ -1068,35 +1139,38 @@ impl LockScreen {
     &self,
     authenticating: bool,
     fingerprint: FingerprintState,
-  ) -> impl IntoElement {
+    rejected: bool,
+  ) -> Div {
     let leading = if authenticating {
       Spinner::new()
+        .size(FIELD_ICON_SIZE)
         .color(rgb(0x888888).into())
         .into_any_element()
     } else {
       Icon::new(IconName::Lock)
-        .size(rems(0.95))
+        .size(FIELD_ICON_SIZE)
         .text_color(rgba(0xFFFFFF66))
         .into_any_element()
     };
 
-    let reading = fingerprint == FingerprintState::Reading;
+    let disabled = authenticating || fingerprint == FingerprintState::Reading;
 
     h_flex()
       .w_full()
-      .gap_2()
-      .px_3()
-      .py_2()
+      .gap_3()
+      .px_4()
+      .py_3()
+      .text_size(FIELD_TEXT_SIZE)
       .rounded_lg()
       .bg(rgba(0xFFFFFF0F))
       .border_1()
-      .border_color(rgba(0xFFFFFF1F))
+      .map(|this| match rejected {
+        true => this.border_color(rgb(ERROR_COLOR)),
+        false => this.border_color(rgba(0xFFFFFF1F)),
+      })
+      .when(disabled, |this| this.opacity(FIELD_DISABLED_OPACITY))
       .child(leading)
-      .child(
-        input(&self.password)
-          .flex_grow()
-          .disabled(authenticating || reading),
-      )
+      .child(input(&self.password).flex_grow().disabled(disabled))
       .when_some(render_fingerprint(fingerprint), |this, indicator| {
         this.child(indicator)
       })
@@ -1148,7 +1222,7 @@ fn render_clock(now: DateTime<Local>, battery: Option<f64>) -> impl IntoElement 
 
 fn render_avatar(avatar: Option<PathBuf>, initial: SharedString) -> AnyElement {
   let frame = div()
-    .size(px(72.))
+    .size(AVATAR_SIZE)
     .flex_none()
     .rounded_full()
     .overflow_hidden()
@@ -1160,15 +1234,18 @@ fn render_avatar(avatar: Option<PathBuf>, initial: SharedString) -> AnyElement {
   match avatar {
     Some(path) => frame
       .child(
+        // The frame's `overflow_hidden` doesn't round what the image paints;
+        // the radius has to be on the image itself.
         img(ImageSource::Resource(Resource::Path(path.into())))
           .size_full()
+          .rounded_full()
           .object_fit(ObjectFit::Cover),
       )
       .into_any_element(),
     None => frame
       .child(
         div()
-          .text_size(px(28.))
+          .text_size(px(40.))
           .text_color(rgba(0xFFFFFFCC))
           .child(initial),
       )
@@ -1185,12 +1262,13 @@ fn render_fingerprint(state: FingerprintState) -> Option<AnyElement> {
     FingerprintState::Off | FingerprintState::Starting => None,
     FingerprintState::Waiting => Some(
       Icon::new(IconName::Fingerprint)
-        .size(rems(0.95))
+        .size(FIELD_ICON_SIZE)
         .text_color(rgba(0xFFFFFF66))
         .into_any_element(),
     ),
     FingerprintState::Reading => Some(
       Spinner::new()
+        .size(FIELD_ICON_SIZE)
         .color(rgba(0xFFFFFFAA).into())
         .into_any_element(),
     ),

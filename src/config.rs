@@ -208,8 +208,15 @@ fn ensure_file(path: &Path) -> Result<()> {
   Ok(())
 }
 
+/// The directory the config file lives in. It doubles as a drop-off point for
+/// things the user supplies as files rather than settings, such as the profile
+/// picture the lock screen shows.
+pub fn config_dir() -> Option<PathBuf> {
+  dirs::config_dir().map(|dir| dir.join("launch"))
+}
+
 fn config_path() -> Option<PathBuf> {
-  dirs::config_dir().map(|dir| dir.join("launch").join("config.toml"))
+  config_dir().map(|dir| dir.join("config.toml"))
 }
 
 #[cfg(test)]
