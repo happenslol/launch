@@ -67,7 +67,11 @@
             Type = "simple";
             # systemd service has to be a foreground process
             ExecStart = "${cfg.package}/bin/launch --foreground daemon";
-            Restart = "on-failure";
+
+            # We want other processes to be able to take over the socket
+            # manually, so we have to prevent the systemd service from
+            # restarting automatically.
+            Restart = "no";
           };
         };
       };
