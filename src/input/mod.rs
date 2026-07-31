@@ -29,6 +29,13 @@ pub struct Input {
   disabled: bool,
 }
 
+impl Input {
+  pub fn disabled(mut self, disabled: bool) -> Self {
+    self.disabled = disabled;
+    self
+  }
+}
+
 impl Styled for Input {
   fn style(&mut self) -> &mut StyleRefinement {
     &mut self.style

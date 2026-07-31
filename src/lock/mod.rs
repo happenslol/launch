@@ -30,16 +30,18 @@
 
 mod pam;
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Local, Timelike as _};
-use futures::{FutureExt as _, StreamExt as _, select_biased};
+use futures::future::Shared;
+use futures::{FutureExt as _, StreamExt as _, select_biased, stream};
 use gpui::{
   AnyElement, App, AsyncApp, Context, Entity, EntityId, EventEmitter, Focusable, FontWeight,
-  Global, ImageSource, IntoElement, MouseButton, ObjectFit, Render, Resource, SharedString, Styled,
-  Subscription, Task, WeakEntity, Window, div, img, prelude::*, px, rems, rgb, rgba,
+  Global, ImageSource, IntoElement, MouseButton, ObjectFit, Pixels, Render, Resource, SharedString,
+  Styled, Subscription, Task, WeakEntity, Window, div, img, prelude::*, px, rems, rgb, rgba,
 };
 use tracing::{debug, error, info, warn};
 use uzers::os::unix::UserExt as _;
@@ -48,6 +50,7 @@ use crate::config::{ConfigState, LockConfig};
 use crate::dbus::GlobalDbusConnection;
 use crate::dbus::fprintd::{FingerprintReader, VerifyStatus};
 use crate::dbus::logind::{Session, SessionRequest};
+use crate::dbus::upower::Battery;
 use crate::icon::{Icon, IconName, Spinner};
 use crate::input::input;
 use crate::input::state::{InputEvent, InputState};
@@ -70,8 +73,13 @@ const MAX_FINGERPRINT_FAILURES: u32 = 5;
 /// promising a finger prompt that will never arrive.
 const FINGERPRINT_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The clock is a copy of the desktop one from the `status` overlay, which the
+/// lock surfaces cover up: same corner, same formats, same weights, same wash.
 const TIME_FORMAT: &str = "%H:%M";
-const DATE_FORMAT: &str = "%A, %-d %B";
+const DATE_FORMAT: &str = "%a, %e %b";
+const CLOCK_OPACITY: f32 = 0.35;
+const CLOCK_MARGIN_RIGHT: Pixels = px(10.);
+const CLOCK_MARGIN_BOTTOM: Pixels = px(5.);
 
 /// Mirrors the lock state for readers outside the app's foreground thread.
 static LOCKED: AtomicBool = AtomicBool::new(false);
@@ -117,11 +125,22 @@ pub fn lock(cx: &mut App) {
 
   close_launcher_windows(cx);
 
+  // `lock_session` creates one surface per display, walking the same list
+  // `clock_display` just read, in the same order. Nothing can reorder or resize
+  // it in between - both run on this thread without yielding - so counting the
+  // callbacks is what tells a surface which display it belongs to. The window
+  // itself can't say: it learns its output from a Wayland event that hasn't
+  // arrived yet while it is being built.
+  let clock_display = clock_display(cx);
+  let screen = Cell::new(0usize);
+
   let result = cx.lock_session({
     let lock = lock.clone();
     move |window, cx| {
+      let index = screen.replace(screen.get() + 1);
+      let clock = clock_display.is_none_or(|display| display == index);
       let lock = lock.clone();
-      cx.new(|cx| LockScreen::new(lock, window, cx))
+      cx.new(move |cx| LockScreen::new(lock, clock, window, cx))
     }
   });
 
@@ -306,7 +325,7 @@ fn find_avatar(username: &str) -> Option<PathBuf> {
   candidates.into_iter().find(|path| path.is_file())
 }
 
-/// What the fingerprint reader is up to, so the hint row can show it.
+/// What the fingerprint reader is up to, so the password field can show it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FingerprintState {
   /// There is no reader to use, or it gave up.
@@ -317,18 +336,6 @@ enum FingerprintState {
   Waiting,
   /// A finger is on the sensor and being read.
   Reading,
-}
-
-impl FingerprintState {
-  /// Whether the reader is in play at all.
-  fn is_live(self) -> bool {
-    !matches!(self, Self::Off)
-  }
-
-  /// Whether the reader is busy with something, rather than waiting on the user.
-  fn is_working(self) -> bool {
-    matches!(self, Self::Starting | Self::Reading)
-  }
 }
 
 /// Shared state of one lock session, rendered by a [`LockScreen`] per output.
@@ -344,13 +351,13 @@ pub struct Lock {
   /// Whatever PAM had to say during an attempt.
   hint: Option<SharedString>,
   fingerprint_state: FingerprintState,
-  /// What the reader wants from the user, e.g. to present a finger or to try
-  /// again after an unusable scan.
-  fingerprint_hint: Option<SharedString>,
   /// The claimed reader, while fingerprint verification is running.
   fingerprint: Option<FingerprintReader>,
   now: DateTime<Local>,
+  /// Charge left in percent, on machines that have a battery.
+  battery: Option<f64>,
   _clock: Task<()>,
+  _battery: Task<()>,
   _auth: Option<Task<()>>,
   /// Never cleared from within the task itself: dropping a task from its own
   /// body would cancel the future that is running.
@@ -375,6 +382,8 @@ impl Lock {
     let pam_service = pam::resolve_service(&config.pam_service);
     debug!(service = %pam_service, "Authenticating against PAM service");
 
+    let connection = GlobalDbusConnection::system(cx);
+
     Self {
       user,
       pam_service,
@@ -383,10 +392,11 @@ impl Lock {
       error: None,
       hint: None,
       fingerprint_state: FingerprintState::Off,
-      fingerprint_hint: None,
       fingerprint: None,
       now: Local::now(),
+      battery: None,
       _clock: cx.spawn(async move |this, cx| tick_clock(this, cx).await),
+      _battery: cx.spawn(async move |this, cx| watch_battery(connection, this, cx).await),
       _auth: None,
       _fingerprint: None,
       _finger_present: None,
@@ -411,12 +421,6 @@ impl Lock {
 
     self.authenticating = true;
     self.error = None;
-
-    // Clearing through the model keeps every screen in step.
-    cx.emit(LockEvent::Password {
-      value: SharedString::default(),
-      source: None,
-    });
     cx.notify();
 
     let events = pam::authenticate(&self.pam_service, &self.user.name, password);
@@ -452,6 +456,7 @@ impl Lock {
       AuthEvent::Finished(Err(message)) => {
         self.authenticating = false;
         self.error = Some(message);
+        self.clear_password(cx);
         true
       }
     };
@@ -473,17 +478,21 @@ impl Lock {
     });
   }
 
+  /// Empties the field on every screen. Sourceless, so none of them skips it.
+  fn clear_password(&mut self, cx: &mut Context<Self>) {
+    cx.emit(LockEvent::Password {
+      value: SharedString::default(),
+      source: None,
+    });
+  }
+
   fn start_fingerprint(&mut self, cx: &mut Context<Self>) {
     let connection = GlobalDbusConnection::system(cx);
 
     // Claiming a reader takes a moment - fprintd is activated on demand and the
-    // device has to be opened - so say so from the start instead of leaving the
-    // card looking password-only until it is ready.
-    self.set_fingerprint(
-      FingerprintState::Starting,
-      Some("Starting the fingerprint reader…".into()),
-      cx,
-    );
+    // device has to be opened - and it may not pan out at all, so nothing is
+    // shown until it does.
+    self.set_fingerprint(FingerprintState::Starting, cx);
 
     self._fingerprint = Some(cx.spawn(async move |this, cx| {
       let setup = match connection.await {
@@ -499,7 +508,7 @@ impl Lock {
         ReaderSetup::Unavailable => {
           this
             .update(cx, |this, cx| {
-              this.set_fingerprint(FingerprintState::Off, None, cx);
+              this.set_fingerprint(FingerprintState::Off, cx);
             })
             .log_err();
           return;
@@ -507,11 +516,7 @@ impl Lock {
         ReaderSetup::Unresponsive => {
           this
             .update(cx, |this, cx| {
-              this.set_fingerprint(
-                FingerprintState::Off,
-                Some("The fingerprint reader isn't responding".into()),
-                cx,
-              );
+              this.fingerprint_failed("The fingerprint reader isn't responding".into(), cx);
             })
             .log_err();
           return;
@@ -535,20 +540,21 @@ impl Lock {
     }));
   }
 
-  fn set_fingerprint(
-    &mut self,
-    state: FingerprintState,
-    hint: Option<SharedString>,
-    cx: &mut Context<Self>,
-  ) {
+  fn set_fingerprint(&mut self, state: FingerprintState, cx: &mut Context<Self>) {
     self.fingerprint_state = state;
-    self.fingerprint_hint = hint;
     cx.notify();
   }
 
+  /// Takes the reader off the screen and says why, in the same place a rejected
+  /// password lands.
+  fn fingerprint_failed(&mut self, message: SharedString, cx: &mut Context<Self>) {
+    self.error = Some(message);
+    self.set_fingerprint(FingerprintState::Off, cx);
+  }
+
   /// Follows the reader's own view of whether a finger is on the sensor, so the
-  /// hint spins while one is being read instead of for the whole time the lock
-  /// screen waits.
+  /// indicator spins while one is being read instead of for the whole time the
+  /// lock screen waits.
   fn watch_finger_present(&mut self, reader: FingerprintReader, cx: &mut Context<Self>) {
     self._finger_present = Some(cx.spawn(async move |this, cx| {
       let changes = match reader.listen_finger_present().await {
@@ -577,7 +583,7 @@ impl Lock {
 
   /// Moves only between waiting and reading. A reader that has stopped, or that
   /// hasn't finished starting, shouldn't be brought back to life by a stray
-  /// property change, and the hint text belongs to the verification.
+  /// property change.
   fn set_finger_present(&mut self, present: bool, cx: &mut Context<Self>) {
     let state = match (self.fingerprint_state, present) {
       (FingerprintState::Waiting, true) => FingerprintState::Reading,
@@ -593,12 +599,8 @@ impl Lock {
   /// so keeping it would lock out `pam_fprintd` and every other user of the
   /// reader.
   fn release_fingerprint(&mut self, cx: &mut Context<Self>) {
-    // Nothing is listening for a finger from here on. A reader that stopped with
-    // something to say has already put itself in [`FingerprintState::Off`], and
-    // that message is worth keeping.
-    if self.fingerprint_state.is_live() {
-      self.set_fingerprint(FingerprintState::Off, None, cx);
-    }
+    // Nothing is listening for a finger from here on, so stop asking for one.
+    self.set_fingerprint(FingerprintState::Off, cx);
 
     let Some(reader) = self.fingerprint.take() else {
       return;
@@ -635,6 +637,53 @@ async fn tick_clock(lock: WeakEntity<Lock>, cx: &mut AsyncApp) {
       }
 
       lock.now = now;
+      cx.notify();
+    });
+
+    if updated.is_err() {
+      break;
+    }
+  }
+}
+
+/// Keeps [`Lock::battery`] current. Machines without a battery never report one,
+/// and the clock then shows the time alone.
+async fn watch_battery(
+  connection: Shared<Task<Option<zbus::Connection>>>,
+  lock: WeakEntity<Lock>,
+  cx: &mut AsyncApp,
+) {
+  let Some(connection) = connection.await else {
+    warn!("System bus unavailable, the lock screen won't show the battery");
+    return;
+  };
+
+  let battery = match Battery::find(&connection).await {
+    Ok(Some(battery)) => battery,
+    Ok(None) => return,
+    Err(error) => {
+      warn!(?error, "Failed to look up the battery");
+      return;
+    }
+  };
+
+  let changes = match battery.listen().await {
+    Ok(changes) => changes,
+    Err(error) => {
+      warn!(?error, "Failed to follow the battery charge");
+      return;
+    }
+  };
+
+  // Subscribed before the first read, so a change that lands in between is not
+  // lost.
+  let initial = stream::iter(battery.percentage().await.log_err());
+  let percentages = initial.chain(changes);
+  futures::pin_mut!(percentages);
+
+  while let Some(percentage) = percentages.next().await {
+    let updated = lock.update(cx, |lock, cx| {
+      lock.battery = Some(percentage);
       cx.notify();
     });
 
@@ -746,11 +795,7 @@ async fn verify_fingerprints(reader: FingerprintReader, lock: WeakEntity<Lock>, 
           debug!(failures, "Giving up on fingerprint verification");
           lock
             .update(cx, |lock, cx| {
-              lock.set_fingerprint(
-                FingerprintState::Off,
-                Some("Too many attempts, use your password".into()),
-                cx,
-              );
+              lock.fingerprint_failed("Too many attempts, use your password".into(), cx);
             })
             .log_err();
           break;
@@ -782,11 +827,7 @@ async fn verify_once(
       warn!("Timed out starting fingerprint verification");
       lock
         .update(cx, |lock, cx| {
-          lock.set_fingerprint(
-            FingerprintState::Off,
-            Some("The fingerprint reader isn't responding".into()),
-            cx,
-          );
+          lock.fingerprint_failed("The fingerprint reader isn't responding".into(), cx);
         })
         .log_err();
       return Attempt::Failed;
@@ -796,11 +837,7 @@ async fn verify_once(
   // Only now is the reader actually listening, so this is where asking for a
   // finger becomes honest - for the first attempt as well as every retry.
   let armed = lock.update(cx, |lock, cx| {
-    lock.set_fingerprint(
-      FingerprintState::Waiting,
-      Some(reader.scan_type.prompt()),
-      cx,
-    );
+    lock.set_fingerprint(FingerprintState::Waiting, cx);
   });
 
   if armed.is_err() {
@@ -819,9 +856,9 @@ async fn verify_once(
           lock.error = Some("Fingerprint not recognized".into());
           outcome = Some(Attempt::Rejected);
         }
-        VerifyStatus::Retry(hint) => lock.fingerprint_hint = Some(hint),
+        VerifyStatus::Retry(hint) => lock.error = Some(hint),
         VerifyStatus::Failed(message) => {
-          lock.set_fingerprint(FingerprintState::Off, Some(message), cx);
+          lock.fingerprint_failed(message, cx);
           outcome = Some(Attempt::Failed);
         }
       }
@@ -851,11 +888,15 @@ async fn verify_once(
 pub struct LockScreen {
   lock: Entity<Lock>,
   password: Entity<InputState>,
+  /// Whether this is the screen the clock goes on. Decided when the surface is
+  /// created: the lock surfaces are made in one go, and outputs attached later
+  /// get none.
+  clock: bool,
   _subscriptions: Vec<Subscription>,
 }
 
 impl LockScreen {
-  fn new(lock: Entity<Lock>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+  fn new(lock: Entity<Lock>, clock: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let password = cx.new(|cx| {
       InputState::new(window, cx)
         .masked(true)
@@ -888,6 +929,7 @@ impl LockScreen {
     Self {
       lock,
       password,
+      clock,
       _subscriptions: subscriptions,
     }
   }
@@ -933,18 +975,18 @@ impl Render for LockScreen {
     let initial = lock.user.initial.clone();
     let avatar = lock.user.avatar.clone();
     let authenticating = lock.authenticating;
-    let fingerprint_working = lock.fingerprint_state.is_working();
-    let fingerprint_hint = lock.fingerprint_hint.clone();
+    let fingerprint = lock.fingerprint_state;
+    let battery = lock.battery;
     let hint = lock.hint.clone();
     let error = lock.error.clone();
 
     div()
       .size_full()
+      .relative()
       .flex()
       .flex_col()
       .items_center()
       .justify_center()
-      .gap(px(56.))
       .bg(rgb(0x0D0D0D))
       .text_color(rgb(0xFFFFFF))
       .on_mouse_down(
@@ -954,18 +996,11 @@ impl Render for LockScreen {
           window.focus(&this.password.focus_handle(cx), cx);
         }),
       )
-      .child(render_clock(now))
       .child(
         v_flex()
           .items_center()
           .gap_4()
           .w(px(360.))
-          .p_6()
-          .rounded_xl()
-          .bg(rgba(0x1D1D1DF5))
-          .border_1()
-          .border_color(rgba(0xFFFFFF15))
-          .shadow_lg()
           .child(render_avatar(avatar, initial))
           .child(
             v_flex()
@@ -981,10 +1016,7 @@ impl Render for LockScreen {
                 this.child(div().text_sm().text_color(rgba(0xFFFFFFAA)).child(username))
               }),
           )
-          .child(self.render_password(authenticating))
-          .when_some(fingerprint_hint, |this, hint| {
-            this.child(render_fingerprint_hint(fingerprint_working, hint))
-          })
+          .child(self.render_password(authenticating, fingerprint))
           .when_some(hint, |this, hint| {
             this.child(hint_row(
               Icon::new(IconName::Asterisk)
@@ -998,13 +1030,45 @@ impl Render for LockScreen {
             this.child(div().text_sm().text_color(rgb(0xE07070)).child(error))
           }),
       )
+      .when(self.clock, |this| this.child(render_clock(now, battery)))
   }
+}
+
+/// Which display the clock goes on, as an index into [`App::displays`]. It
+/// belongs on the primary display, the same one the desktop clock uses; `None`
+/// puts it on every screen, which is what happens when no primary display is
+/// configured or the configured one isn't attached - a clock nobody asked to
+/// hide beats no clock at all.
+fn clock_display(cx: &App) -> Option<usize> {
+  let primary = ConfigState::get(cx).primary_display?;
+
+  let index = cx
+    .displays()
+    .iter()
+    .position(|display| display.name() == Some(primary.as_str()));
+
+  if index.is_none() {
+    warn!(
+      display = %primary,
+      "Configured primary display not found, showing the clock on every screen"
+    );
+  }
+
+  index
 }
 
 impl LockScreen {
   /// The password field stays mounted while authenticating, so it keeps keyboard
-  /// focus; only the leading icon turns into a spinner.
-  fn render_password(&self, authenticating: bool) -> impl IntoElement {
+  /// focus and holds on to what was typed; only the leading icon turns into a
+  /// spinner.
+  ///
+  /// Typing is off while either check is mid-flight, since a rejected attempt
+  /// empties the field and would take anything typed since with it.
+  fn render_password(
+    &self,
+    authenticating: bool,
+    fingerprint: FingerprintState,
+  ) -> impl IntoElement {
     let leading = if authenticating {
       Spinner::new()
         .color(rgb(0x888888).into())
@@ -1016,35 +1080,69 @@ impl LockScreen {
         .into_any_element()
     };
 
+    let reading = fingerprint == FingerprintState::Reading;
+
     h_flex()
       .w_full()
       .gap_2()
       .px_3()
       .py_2()
       .rounded_lg()
-      .bg(rgba(0x00000055))
+      .bg(rgba(0xFFFFFF0F))
       .border_1()
       .border_color(rgba(0xFFFFFF1F))
       .child(leading)
-      .child(input(&self.password).flex_grow())
+      .child(
+        input(&self.password)
+          .flex_grow()
+          .disabled(authenticating || reading),
+      )
+      .when_some(render_fingerprint(fingerprint), |this, indicator| {
+        this.child(indicator)
+      })
   }
 }
 
-fn render_clock(now: DateTime<Local>) -> impl IntoElement {
+/// The desktop clock, as it looks when the `status` overlay draws it - the lock
+/// surfaces cover that up, so this stands in for it.
+fn render_clock(now: DateTime<Local>, battery: Option<f64>) -> impl IntoElement {
+  let time = now.format(TIME_FORMAT).to_string();
+  let date = now.format(DATE_FORMAT).to_string().to_uppercase();
+
   v_flex()
-    .items_center()
-    .gap_2()
+    .absolute()
+    .bottom(CLOCK_MARGIN_BOTTOM)
+    .right(CLOCK_MARGIN_RIGHT)
+    .items_end()
+    .font_family("Noto Sans")
+    .opacity(CLOCK_OPACITY)
+    .when_some(battery, |this, percentage| {
+      this.child(
+        div()
+          .text_size(rems(2.))
+          .line_height(rems(1.6))
+          .font_weight(FontWeight::SEMIBOLD)
+          .child(format!("{percentage:.0}")),
+      )
+    })
     .child(
-      div()
-        .text_size(px(80.))
-        .font_weight(FontWeight::LIGHT)
-        .child(now.format(TIME_FORMAT).to_string()),
-    )
-    .child(
-      div()
-        .text_size(px(18.))
-        .text_color(rgba(0xFFFFFFAA))
-        .child(now.format(DATE_FORMAT).to_string()),
+      h_flex()
+        .items_end()
+        .gap_2()
+        .child(
+          div()
+            .text_size(rems(1.4))
+            .line_height(rems(1.95))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(date),
+        )
+        .child(
+          div()
+            .text_size(rems(3.5))
+            .line_height(rems(3.5))
+            .font_weight(FontWeight::BOLD)
+            .child(time),
+        ),
     )
 }
 
@@ -1078,22 +1176,25 @@ fn render_avatar(avatar: Option<PathBuf>, initial: SharedString) -> AnyElement {
   }
 }
 
-/// Spins while the reader is busy - starting up, or reading a finger that is on
-/// the sensor - and shows a plain icon while it is merely waiting for one, so an
-/// idle lock screen doesn't animate for hours.
-fn render_fingerprint_hint(working: bool, hint: SharedString) -> impl IntoElement {
-  let leading = if working {
-    Spinner::new()
-      .color(rgba(0xFFFFFF88).into())
-      .into_any_element()
-  } else {
-    Icon::new(IconName::Fingerprint)
-      .size(rems(0.95))
-      .text_color(rgba(0xFFFFFF88))
-      .into_any_element()
-  };
-
-  hint_row(leading, hint)
+/// Shows a reader that is armed, spinning while a finger is actually on the
+/// sensor so an idle lock screen doesn't animate for hours. A reader that is
+/// still starting up, or that isn't there at all, shows nothing rather than
+/// offering a way in that may never work.
+fn render_fingerprint(state: FingerprintState) -> Option<AnyElement> {
+  match state {
+    FingerprintState::Off | FingerprintState::Starting => None,
+    FingerprintState::Waiting => Some(
+      Icon::new(IconName::Fingerprint)
+        .size(rems(0.95))
+        .text_color(rgba(0xFFFFFF66))
+        .into_any_element(),
+    ),
+    FingerprintState::Reading => Some(
+      Spinner::new()
+        .color(rgba(0xFFFFFFAA).into())
+        .into_any_element(),
+    ),
+  }
 }
 
 fn hint_row(leading: AnyElement, hint: SharedString) -> impl IntoElement {

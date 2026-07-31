@@ -26,34 +26,6 @@ const ANY_FINGER: &str = "any";
 /// only root has by default.
 const CURRENT_USER: &str = "";
 
-/// How a reader wants to be given a finger, which is all the difference between
-/// the two prompts we can show.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ScanType {
-  Press,
-  Swipe,
-}
-
-impl ScanType {
-  fn parse(scan_type: &str) -> Self {
-    match scan_type {
-      "swipe" => Self::Swipe,
-      "press" => Self::Press,
-      other => {
-        warn!(scan_type = other, "Unknown fingerprint scan type");
-        Self::Press
-      }
-    }
-  }
-
-  pub fn prompt(self) -> SharedString {
-    match self {
-      Self::Press => "Place your finger on the reader".into(),
-      Self::Swipe => "Swipe your finger on the reader".into(),
-    }
-  }
-}
-
 /// What the reader reported about a running verification.
 pub enum VerifyStatus {
   /// The finger matched one of the enrolled prints.
@@ -109,7 +81,6 @@ impl VerifyUpdate {
 pub struct FingerprintReader {
   proxy: api::DeviceProxy<'static>,
   pub name: SharedString,
-  pub scan_type: ScanType,
 }
 
 impl FingerprintReader {
@@ -147,16 +118,10 @@ impl FingerprintReader {
     }
 
     let name = proxy.name().await.log_err().unwrap_or_default();
-    let scan_type = proxy
-      .scan_type()
-      .await
-      .log_err()
-      .map_or(ScanType::Press, |scan_type| ScanType::parse(&scan_type));
 
     Ok(Some(Self {
       proxy,
       name: name.into(),
-      scan_type,
     }))
   }
 

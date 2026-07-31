@@ -204,10 +204,11 @@ impl NotificationOsd {
 }
 
 /// Resolves the display to show notifications on, returning its id and height.
-/// Uses the configured output name when set and present, otherwise falls back to
-/// the first display.
+/// Uses the output the notification section names, else the primary display, and
+/// falls back to the first display when neither is set or attached.
 fn target_display(cx: &App) -> Option<(DisplayId, Pixels)> {
-  let configured = ConfigState::get(cx).notifications.display;
+  let config = ConfigState::get(cx);
+  let configured = config.notifications.display.or(config.primary_display);
   let displays = cx.displays();
 
   if let Some(name) = configured {

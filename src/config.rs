@@ -16,6 +16,11 @@ use crate::util::ResultExt;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Config {
+  /// Name of the output that carries whatever there is only one of, e.g.
+  /// `"eDP-1"` or `"HDMI-A-1"`. Sections that place something on a screen fall
+  /// back to this when they name no output of their own. Being a plain key, it
+  /// has to appear above the first `[section]` in the file.
+  pub primary_display: Option<String>,
   pub notifications: NotificationsConfig,
   pub lock: LockConfig,
 }
@@ -24,7 +29,8 @@ pub struct Config {
 #[serde(default)]
 pub struct NotificationsConfig {
   /// Name of the output that notifications are shown on, e.g. `"DP-1"` or
-  /// `"HDMI-A-1"`. When unset, the first available display is used.
+  /// `"HDMI-A-1"`. When unset, [`Config::primary_display`] is used, and failing
+  /// that the first available display.
   pub display: Option<String>,
 }
 
@@ -217,8 +223,16 @@ mod tests {
   #[test]
   fn empty_config_uses_defaults() {
     let config = parse("");
+    assert_eq!(config.primary_display, None);
     assert_eq!(config.notifications.display, None);
     assert_eq!(config.lock, LockConfig::default());
+  }
+
+  #[test]
+  fn reads_primary_display() {
+    let config = parse("primary_display = \"eDP-1\"\n[notifications]\n");
+    assert_eq!(config.primary_display.as_deref(), Some("eDP-1"));
+    assert_eq!(config.notifications.display, None);
   }
 
   #[test]
