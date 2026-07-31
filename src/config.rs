@@ -13,18 +13,73 @@ use crate::util::ResultExt;
 /// The file is parsed with `toml_edit` so that a future settings GUI can edit
 /// it while preserving comments and formatting. All fields default so a missing
 /// or partial file still produces a usable config.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Config {
+  /// Name of the output that carries whatever there is only one of, e.g.
+  /// `"eDP-1"` or `"HDMI-A-1"`. Sections that place something on a screen fall
+  /// back to this when they name no output of their own. Being a plain key, it
+  /// has to appear above the first `[section]` in the file.
+  pub primary_display: Option<String>,
   pub notifications: NotificationsConfig,
+  pub status: StatusConfig,
+  pub lock: LockConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct NotificationsConfig {
   /// Name of the output that notifications are shown on, e.g. `"DP-1"` or
-  /// `"HDMI-A-1"`. When unset, the first available display is used.
+  /// `"HDMI-A-1"`. When unset, [`Config::primary_display`] is used, and failing
+  /// that the first available display.
   pub display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct StatusConfig {
+  /// Whether to show the clock at all - both the desktop overlay and the copy
+  /// the lock screen draws while it covers that overlay up.
+  pub enabled: bool,
+  /// Name of the output the clock is shown on. When unset,
+  /// [`Config::primary_display`] is used, and failing that the first available
+  /// display.
+  pub display: Option<String>,
+  /// How strongly the clock is drawn, from invisible at `0.0` to solid white at
+  /// `1.0`. It sits over whatever is on screen, so it is meant to be faint.
+  pub opacity: f32,
+}
+
+impl Default for StatusConfig {
+  fn default() -> Self {
+    Self {
+      enabled: true,
+      display: None,
+      opacity: 0.35,
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct LockConfig {
+  /// Name of the PAM service the lock screen authenticates against, i.e. the
+  /// file in `/etc/pam.d`. When that file is missing a known interactive service
+  /// is used instead, since PAM denies services it has no configuration for.
+  pub pam_service: String,
+  /// Whether to verify fingerprints through fprintd next to the password. The
+  /// PAM service should not include `pam_fprintd` when this is on, as only one
+  /// client at a time can use the reader.
+  pub fingerprint: bool,
+}
+
+impl Default for LockConfig {
+  fn default() -> Self {
+    Self {
+      pam_service: "launch".to_owned(),
+      fingerprint: true,
+    }
+  }
 }
 
 struct GlobalConfig(Entity<ConfigState>);
@@ -179,8 +234,15 @@ fn ensure_file(path: &Path) -> Result<()> {
   Ok(())
 }
 
+/// The directory the config file lives in. It doubles as a drop-off point for
+/// things the user supplies as files rather than settings, such as the profile
+/// picture the lock screen shows.
+pub fn config_dir() -> Option<PathBuf> {
+  dirs::config_dir().map(|dir| dir.join("launch"))
+}
+
 fn config_path() -> Option<PathBuf> {
-  dirs::config_dir().map(|dir| dir.join("launch").join("config.toml"))
+  config_dir().map(|dir| dir.join("config.toml"))
 }
 
 #[cfg(test)]
@@ -194,7 +256,46 @@ mod tests {
   #[test]
   fn empty_config_uses_defaults() {
     let config = parse("");
+    assert_eq!(config.primary_display, None);
     assert_eq!(config.notifications.display, None);
+    assert_eq!(config.status, StatusConfig::default());
+    assert_eq!(config.lock, LockConfig::default());
+  }
+
+  #[test]
+  fn reads_status_section() {
+    let config = parse("[status]\nenabled = false\ndisplay = \"DP-1\"\nopacity = 0.5\n");
+    assert!(!config.status.enabled);
+    assert_eq!(config.status.display.as_deref(), Some("DP-1"));
+    assert_eq!(config.status.opacity, 0.5);
+  }
+
+  #[test]
+  fn partial_status_section_keeps_other_defaults() {
+    let config = parse("[status]\nopacity = 0.1\n");
+    assert!(config.status.enabled);
+    assert_eq!(config.status.opacity, 0.1);
+  }
+
+  #[test]
+  fn reads_primary_display() {
+    let config = parse("primary_display = \"eDP-1\"\n[notifications]\n");
+    assert_eq!(config.primary_display.as_deref(), Some("eDP-1"));
+    assert_eq!(config.notifications.display, None);
+  }
+
+  #[test]
+  fn reads_lock_section() {
+    let config = parse("[lock]\npam_service = \"swaylock\"\nfingerprint = false\n");
+    assert_eq!(config.lock.pam_service, "swaylock");
+    assert!(!config.lock.fingerprint);
+  }
+
+  #[test]
+  fn partial_lock_section_keeps_other_defaults() {
+    let config = parse("[lock]\nfingerprint = false\n");
+    assert_eq!(config.lock.pam_service, LockConfig::default().pam_service);
+    assert!(!config.lock.fingerprint);
   }
 
   #[test]

@@ -56,6 +56,7 @@
           wireplumber
           pulseaudio
           fontconfig
+          pam
         ];
       };
 

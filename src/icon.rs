@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use gpui::{
-  Animation, AnimationExt, App, Hsla, IntoElement, RenderOnce, SharedString, StyleRefinement,
+  Animation, AnimationExt, App, Hsla, IntoElement, Rems, RenderOnce, SharedString, StyleRefinement,
   Styled, Transformation, Window, div, percentage, prelude::*, rems, rgb, svg,
 };
 
@@ -169,15 +169,24 @@ impl RenderOnce for Icon {
 #[derive(IntoElement)]
 pub struct Spinner {
   color: Option<Hsla>,
+  size: Rems,
 }
 
 impl Spinner {
   pub fn new() -> Self {
-    Self { color: None }
+    Self {
+      color: None,
+      size: rems(1.0),
+    }
   }
 
   pub fn color(mut self, color: Hsla) -> Self {
     self.color = Some(color);
+    self
+  }
+
+  pub fn size(mut self, size: Rems) -> Self {
+    self.size = size;
     self
   }
 }
@@ -186,7 +195,7 @@ impl RenderOnce for Spinner {
   fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
     svg()
       .path(IconName::Loader.path())
-      .size(rems(1.0))
+      .size(self.size)
       .flex_none()
       .when_some(self.color, |this, color| this.text_color(color))
       .with_animation(

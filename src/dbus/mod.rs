@@ -1,10 +1,12 @@
 pub mod application;
 pub mod bluez;
+pub mod fprintd;
 pub mod logind;
 pub mod networkmanager;
 pub mod notifications;
 pub mod polkit;
 pub mod status_notifier;
+pub mod upower;
 
 use futures::FutureExt;
 use futures::future::Shared;

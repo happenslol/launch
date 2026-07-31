@@ -22,7 +22,7 @@
 - [x] submenu experiments
 - [ ] replace --no-daemon with --foreground
 - [ ] clipboard entries above 10mb
-- [ ] screen lock
+- [x] screen lock
 - [ ] tray host
 - [ ] notifications
 - [ ] calc result history/panel

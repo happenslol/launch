@@ -7,11 +7,25 @@ use crate::{
   dbus::{GlobalDbusConnection, logind::Logind},
   icon::IconName,
   launcher::{Launcher, RootItem},
+  lock,
   util::ResultExt,
 };
 
 pub fn get_items() -> Vec<RootItem> {
   vec![
+    RootItem::Action {
+      id: "lock",
+      icon: IconName::Lock,
+      name: "Lock Screen".into(),
+      description: "Lock the session".into(),
+      terms: vec!["lock".into(), "screen".into(), "session".into()],
+      action: Arc::new(|_launcher, _window, cx| {
+        // Locking closes this very window, so hop out of the launcher's update
+        // before doing it.
+        cx.spawn(async move |_launcher, cx| cx.update(lock::lock))
+          .detach();
+      }),
+    },
     RootItem::Action {
       id: "reboot",
       icon: IconName::Reload,

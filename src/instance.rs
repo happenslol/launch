@@ -17,6 +17,7 @@ struct Request {
   build_id: Option<Vec<u8>>,
   panel: Option<String>,
   open_window: bool,
+  lock: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -27,6 +28,7 @@ pub enum Response {
 
 pub enum Message {
   Open { panel: Option<String> },
+  Lock,
 }
 
 pub enum Role {
@@ -91,6 +93,19 @@ pub fn send_open(stream: &mut UnixStream, panel: Option<String>) -> Result<Respo
     build_id: current_build_id(),
     panel,
     open_window: true,
+    lock: false,
+  };
+  rmp_serde::encode::write(stream, &request)?;
+  let response: Response = rmp_serde::from_read(&*stream)?;
+  Ok(response)
+}
+
+pub fn send_lock(stream: &mut UnixStream) -> Result<Response> {
+  let request = Request {
+    build_id: current_build_id(),
+    panel: None,
+    open_window: false,
+    lock: true,
   };
   rmp_serde::encode::write(stream, &request)?;
   let response: Response = rmp_serde::from_read(&*stream)?;
@@ -102,6 +117,7 @@ pub fn send_version_check(stream: &mut UnixStream) -> Result<Response> {
     build_id: current_build_id(),
     panel: None,
     open_window: false,
+    lock: false,
   };
   rmp_serde::encode::write(stream, &request)?;
   let response: Response = rmp_serde::from_read(&*stream)?;
@@ -113,6 +129,7 @@ pub fn send_quit(stream: &mut UnixStream) -> Result<Response> {
     build_id: Some(vec![]),
     panel: None,
     open_window: false,
+    lock: false,
   };
   rmp_serde::encode::write(stream, &request)?;
   let response: Response = rmp_serde::from_read(&*stream)?;
@@ -148,6 +165,15 @@ pub fn listen(listener: UnixListener) -> Receiver<Message> {
       };
 
       if !version_matches {
+        // Quitting while we hold the session lock would leave the compositor
+        // locked with no client left to unlock it, so the takeover has to wait
+        // until the screen is unlocked.
+        if crate::lock::is_locked() {
+          tracing::warn!("New version detected, but the session is locked; staying alive");
+          let _ = rmp_serde::encode::write(&mut stream, &Response::Accepted);
+          continue;
+        }
+
         tracing::info!("New version detected, quitting to allow takeover");
         let _ = rmp_serde::encode::write(&mut stream, &Response::Quitting);
         process::exit(0);
@@ -163,6 +189,13 @@ pub fn listen(listener: UnixListener) -> Receiver<Message> {
           })
           .is_err()
         {
+          break;
+        }
+      }
+
+      if request.lock {
+        tracing::debug!("Received lock command");
+        if sender.send(Message::Lock).is_err() {
           break;
         }
       }
