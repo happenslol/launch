@@ -35,9 +35,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use chrono::{DateTime, Local, Timelike as _};
-use futures::future::Shared;
-use futures::{FutureExt as _, StreamExt as _, select_biased, stream};
+use futures::{FutureExt as _, StreamExt as _, select_biased};
 use gpui::{
   AnyElement, App, AsyncApp, Context, Div, Entity, EntityId, EventEmitter, Focusable, FontWeight,
   Global, ImageSource, IntoElement, MouseButton, ObjectFit, Pixels, Rems, Render, Resource,
@@ -51,17 +49,13 @@ use crate::config::{ConfigState, LockConfig, config_dir};
 use crate::dbus::GlobalDbusConnection;
 use crate::dbus::fprintd::{FingerprintReader, VerifyStatus};
 use crate::dbus::logind::{Session, SessionRequest};
-use crate::dbus::upower::Battery;
 use crate::icon::{Icon, IconName, Spinner};
 use crate::input::input;
 use crate::input::state::{InputEvent, InputState};
 use crate::launcher::Launcher;
 use crate::lock::pam::{AuthEvent, AuthFailure};
+use crate::status::{self, Clock};
 use crate::util::{ResultExt, h_flex, v_flex};
-
-/// The clock only shows hours and minutes, but is checked every second so it
-/// flips over roughly when it should.
-const CLOCK_TICK: Duration = Duration::from_secs(1);
 
 /// Consecutive unrecognized fingers after which verification stops and the user
 /// is pointed at their password, mirroring what `pam_fprintd` does.
@@ -74,8 +68,6 @@ const MAX_FINGERPRINT_FAILURES: u32 = 5;
 /// promising a finger prompt that will never arrive.
 const FINGERPRINT_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The clock is a copy of the desktop one from the `status` overlay, which the
-/// lock surfaces cover up: same corner, same formats, same weights, same wash.
 const AVATAR_SIZE: Pixels = px(104.);
 
 /// The password field and the icons that flank it. The icons are sized in rems
@@ -98,12 +90,6 @@ const REJECTION_HIGHLIGHT: Duration = Duration::from_secs(3);
 /// What a profile picture in the config directory can be called. The first one
 /// that exists wins, so a user with several only sees one of them.
 const AVATAR_NAMES: &[&str] = &["profile.png", "profile.jpg", "profile.webp"];
-
-const TIME_FORMAT: &str = "%H:%M";
-const DATE_FORMAT: &str = "%a, %e %b";
-const CLOCK_OPACITY: f32 = 0.35;
-const CLOCK_MARGIN_RIGHT: Pixels = px(10.);
-const CLOCK_MARGIN_BOTTOM: Pixels = px(5.);
 
 /// Mirrors the lock state for readers outside the app's foreground thread.
 static LOCKED: AtomicBool = AtomicBool::new(false);
@@ -145,7 +131,7 @@ pub fn lock(cx: &mut App) {
   };
 
   let config = ConfigState::get(cx).lock;
-  let lock = cx.new(|cx| Lock::new(user, config, cx));
+  let lock = cx.new(|_cx| Lock::new(user, config));
 
   close_launcher_windows(cx);
 
@@ -156,13 +142,14 @@ pub fn lock(cx: &mut App) {
   // itself can't say: it learns its output from a Wayland event that hasn't
   // arrived yet while it is being built.
   let clock_display = clock_display(cx);
+  let clock_enabled = ConfigState::get(cx).status.enabled;
   let screen = Cell::new(0usize);
 
   let result = cx.lock_session({
     let lock = lock.clone();
     move |window, cx| {
       let index = screen.replace(screen.get() + 1);
-      let clock = clock_display.is_none_or(|display| display == index);
+      let clock = clock_enabled && clock_display.is_none_or(|display| display == index);
       let lock = lock.clone();
       cx.new(move |cx| LockScreen::new(lock, clock, window, cx))
     }
@@ -385,11 +372,6 @@ pub struct Lock {
   fingerprint_state: FingerprintState,
   /// The claimed reader, while fingerprint verification is running.
   fingerprint: Option<FingerprintReader>,
-  now: DateTime<Local>,
-  /// Charge left in percent, on machines that have a battery.
-  battery: Option<f64>,
-  _clock: Task<()>,
-  _battery: Task<()>,
   _auth: Option<Task<()>>,
   _rejection: Option<Task<()>>,
   /// Never cleared from within the task itself: dropping a task from its own
@@ -411,11 +393,9 @@ pub enum LockEvent {
 impl EventEmitter<LockEvent> for Lock {}
 
 impl Lock {
-  fn new(user: LockUser, config: LockConfig, cx: &mut Context<Self>) -> Self {
+  fn new(user: LockUser, config: LockConfig) -> Self {
     let pam_service = pam::resolve_service(&config.pam_service);
     debug!(service = %pam_service, "Authenticating against PAM service");
-
-    let connection = GlobalDbusConnection::system(cx);
 
     Self {
       user,
@@ -427,10 +407,6 @@ impl Lock {
       hint: None,
       fingerprint_state: FingerprintState::Off,
       fingerprint: None,
-      now: Local::now(),
-      battery: None,
-      _clock: cx.spawn(async move |this, cx| tick_clock(this, cx).await),
-      _battery: cx.spawn(async move |this, cx| watch_battery(connection, this, cx).await),
       _auth: None,
       _rejection: None,
       _fingerprint: None,
@@ -688,75 +664,6 @@ impl Lock {
   }
 }
 
-/// Keeps [`Lock::now`] current, repainting only when the displayed minute
-/// actually changes.
-async fn tick_clock(lock: WeakEntity<Lock>, cx: &mut AsyncApp) {
-  loop {
-    cx.background_executor().timer(CLOCK_TICK).await;
-
-    let updated = lock.update(cx, |lock, cx| {
-      let now = Local::now();
-      if now.minute() == lock.now.minute() && now.hour() == lock.now.hour() {
-        return;
-      }
-
-      lock.now = now;
-      cx.notify();
-    });
-
-    if updated.is_err() {
-      break;
-    }
-  }
-}
-
-/// Keeps [`Lock::battery`] current. Machines without a battery never report one,
-/// and the clock then shows the time alone.
-async fn watch_battery(
-  connection: Shared<Task<Option<zbus::Connection>>>,
-  lock: WeakEntity<Lock>,
-  cx: &mut AsyncApp,
-) {
-  let Some(connection) = connection.await else {
-    warn!("System bus unavailable, the lock screen won't show the battery");
-    return;
-  };
-
-  let battery = match Battery::find(&connection).await {
-    Ok(Some(battery)) => battery,
-    Ok(None) => return,
-    Err(error) => {
-      warn!(?error, "Failed to look up the battery");
-      return;
-    }
-  };
-
-  let changes = match battery.listen().await {
-    Ok(changes) => changes,
-    Err(error) => {
-      warn!(?error, "Failed to follow the battery charge");
-      return;
-    }
-  };
-
-  // Subscribed before the first read, so a change that lands in between is not
-  // lost.
-  let initial = stream::iter(battery.percentage().await.log_err());
-  let percentages = initial.chain(changes);
-  futures::pin_mut!(percentages);
-
-  while let Some(percentage) = percentages.next().await {
-    let updated = lock.update(cx, |lock, cx| {
-      lock.battery = Some(percentage);
-      cx.notify();
-    });
-
-    if updated.is_err() {
-      break;
-    }
-  }
-}
-
 /// How setting up the fingerprint reader turned out.
 enum ReaderSetup {
   Ready(FingerprintReader),
@@ -970,7 +877,7 @@ impl LockScreen {
 
     window.focus(&password.focus_handle(cx), cx);
 
-    let subscriptions = vec![
+    let mut subscriptions = vec![
       cx.subscribe_in(
         &password,
         window,
@@ -989,6 +896,12 @@ impl LockScreen {
       ),
       cx.observe(&lock, |_this, _lock, cx| cx.notify()),
     ];
+
+    // Only the screen that draws the clock repaints when it ticks.
+    if clock {
+      let clock_state = Clock::global(cx);
+      subscriptions.push(cx.observe(&clock_state, |_this, _clock, cx| cx.notify()));
+    }
 
     Self {
       lock,
@@ -1033,14 +946,12 @@ impl LockScreen {
 impl Render for LockScreen {
   fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let lock = self.lock.read(cx);
-    let now = lock.now;
     let display_name = lock.user.display_name.clone();
     let username: SharedString = lock.user.name.clone().into();
     let initial = lock.user.initial.clone();
     let avatar = lock.user.avatar.clone();
     let authenticating = lock.authenticating;
     let fingerprint = lock.fingerprint_state;
-    let battery = lock.battery;
     let hint = lock.hint.clone();
     let error = lock.error.clone();
     let rejected = lock.rejected;
@@ -1101,27 +1012,28 @@ impl Render for LockScreen {
             this.child(div().text_sm().text_color(rgb(ERROR_COLOR)).child(error))
           }),
       )
-      .when(self.clock, |this| this.child(render_clock(now, battery)))
+      .when(self.clock, |this| this.child(self.render_clock(cx)))
   }
 }
 
 /// Which display the clock goes on, as an index into [`App::displays`]. It
-/// belongs on the primary display, the same one the desktop clock uses; `None`
-/// puts it on every screen, which is what happens when no primary display is
-/// configured or the configured one isn't attached - a clock nobody asked to
-/// hide beats no clock at all.
+/// belongs on the screen the overlay it stands in for uses. `None` puts it on
+/// every screen, which is what happens when no display is configured or the
+/// configured one isn't attached - a clock nobody asked to hide beats no clock
+/// at all.
 fn clock_display(cx: &App) -> Option<usize> {
-  let primary = ConfigState::get(cx).primary_display?;
+  let config = ConfigState::get(cx);
+  let configured = config.status.display.or(config.primary_display)?;
 
   let index = cx
     .displays()
     .iter()
-    .position(|display| display.name() == Some(primary.as_str()));
+    .position(|display| display.name() == Some(configured.as_str()));
 
   if index.is_none() {
     warn!(
-      display = %primary,
-      "Configured primary display not found, showing the clock on every screen"
+      display = %configured,
+      "Configured clock display not found, showing the clock on every screen"
     );
   }
 
@@ -1175,49 +1087,19 @@ impl LockScreen {
         this.child(indicator)
       })
   }
-}
 
-/// The desktop clock, as it looks when the `status` overlay draws it - the lock
-/// surfaces cover that up, so this stands in for it.
-fn render_clock(now: DateTime<Local>, battery: Option<f64>) -> impl IntoElement {
-  let time = now.format(TIME_FORMAT).to_string();
-  let date = now.format(DATE_FORMAT).to_string().to_uppercase();
+  /// The desktop clock, which the lock surfaces cover up, drawn in the same
+  /// corner it would be in if they didn't.
+  fn render_clock(&self, cx: &App) -> Div {
+    let clock = Clock::global(cx);
+    let clock = clock.read(cx);
 
-  v_flex()
-    .absolute()
-    .bottom(CLOCK_MARGIN_BOTTOM)
-    .right(CLOCK_MARGIN_RIGHT)
-    .items_end()
-    .font_family("Noto Sans")
-    .opacity(CLOCK_OPACITY)
-    .when_some(battery, |this, percentage| {
-      this.child(
-        div()
-          .text_size(rems(2.))
-          .line_height(rems(1.6))
-          .font_weight(FontWeight::SEMIBOLD)
-          .child(format!("{percentage:.0}")),
-      )
-    })
-    .child(
-      h_flex()
-        .items_end()
-        .gap_2()
-        .child(
-          div()
-            .text_size(rems(1.4))
-            .line_height(rems(1.95))
-            .font_weight(FontWeight::SEMIBOLD)
-            .child(date),
-        )
-        .child(
-          div()
-            .text_size(rems(3.5))
-            .line_height(rems(3.5))
-            .font_weight(FontWeight::BOLD)
-            .child(time),
-        ),
+    status::render_clock_in_corner(
+      clock.now,
+      clock.battery,
+      ConfigState::get(cx).status.opacity,
     )
+  }
 }
 
 fn render_avatar(avatar: Option<PathBuf>, initial: SharedString) -> AnyElement {

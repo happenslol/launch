@@ -28,6 +28,7 @@ mod picker;
 mod polkit;
 mod power;
 mod scrollbar;
+mod status;
 mod submenu;
 mod tokio;
 mod tray_menu;
@@ -254,6 +255,7 @@ fn run_app(startup: Startup, no_keyboard_capture: bool, receiver: Receiver<Messa
       niri::init(cx);
       workspace_osd::init(cx);
       notification_osd::init(cx);
+      status::init(cx);
       polkit::init(cx);
       lock::init(cx);
       InputState::init(cx);

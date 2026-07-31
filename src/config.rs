@@ -13,7 +13,7 @@ use crate::util::ResultExt;
 /// The file is parsed with `toml_edit` so that a future settings GUI can edit
 /// it while preserving comments and formatting. All fields default so a missing
 /// or partial file still produces a usable config.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Config {
   /// Name of the output that carries whatever there is only one of, e.g.
@@ -22,6 +22,7 @@ pub struct Config {
   /// has to appear above the first `[section]` in the file.
   pub primary_display: Option<String>,
   pub notifications: NotificationsConfig,
+  pub status: StatusConfig,
   pub lock: LockConfig,
 }
 
@@ -32,6 +33,31 @@ pub struct NotificationsConfig {
   /// `"HDMI-A-1"`. When unset, [`Config::primary_display`] is used, and failing
   /// that the first available display.
   pub display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct StatusConfig {
+  /// Whether to show the clock at all - both the desktop overlay and the copy
+  /// the lock screen draws while it covers that overlay up.
+  pub enabled: bool,
+  /// Name of the output the clock is shown on. When unset,
+  /// [`Config::primary_display`] is used, and failing that the first available
+  /// display.
+  pub display: Option<String>,
+  /// How strongly the clock is drawn, from invisible at `0.0` to solid white at
+  /// `1.0`. It sits over whatever is on screen, so it is meant to be faint.
+  pub opacity: f32,
+}
+
+impl Default for StatusConfig {
+  fn default() -> Self {
+    Self {
+      enabled: true,
+      display: None,
+      opacity: 0.35,
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -232,7 +258,23 @@ mod tests {
     let config = parse("");
     assert_eq!(config.primary_display, None);
     assert_eq!(config.notifications.display, None);
+    assert_eq!(config.status, StatusConfig::default());
     assert_eq!(config.lock, LockConfig::default());
+  }
+
+  #[test]
+  fn reads_status_section() {
+    let config = parse("[status]\nenabled = false\ndisplay = \"DP-1\"\nopacity = 0.5\n");
+    assert!(!config.status.enabled);
+    assert_eq!(config.status.display.as_deref(), Some("DP-1"));
+    assert_eq!(config.status.opacity, 0.5);
+  }
+
+  #[test]
+  fn partial_status_section_keeps_other_defaults() {
+    let config = parse("[status]\nopacity = 0.1\n");
+    assert!(config.status.enabled);
+    assert_eq!(config.status.opacity, 0.1);
   }
 
   #[test]
