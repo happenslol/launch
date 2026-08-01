@@ -20,7 +20,9 @@
 //! ```sh
 //! export XDG_RUNTIME_DIR=/run/user/$(id -u)
 //! export WAYLAND_DISPLAY=$(systemctl --user show-environment | sed -n 's/^WAYLAND_DISPLAY=//p')
-//! pkill -x launch  # a daemon that is hung rather than dead still holds the lock
+//! # A daemon that is hung rather than dead still holds the lock. Matched on the
+//! # path because an installed build runs as `.launch-wrapped`, not `launch`.
+//! pkill -f 'bin/[.]?launch'
 //! launch lock
 //! ```
 //!
