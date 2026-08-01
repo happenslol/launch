@@ -48,7 +48,7 @@ use uzers::os::unix::UserExt as _;
 use crate::config::{ConfigState, LockConfig, config_dir};
 use crate::dbus::GlobalDbusConnection;
 use crate::dbus::fprintd::{FingerprintReader, VerifyStatus};
-use crate::dbus::logind::{Session, SessionRequest};
+use crate::dbus::logind::{Logind, Session, SessionRequest};
 use crate::icon::{Icon, IconName, Spinner};
 use crate::input::input;
 use crate::input::state::{InputEvent, InputState};
@@ -87,6 +87,13 @@ const ERROR_COLOR: u32 = 0xE07070;
 /// typed.
 const REJECTION_HIGHLIGHT: Duration = Duration::from_secs(3);
 
+/// Why the screen is holding sleep up, as `systemd-inhibit --list` shows it.
+const INHIBIT_REASON: &str = "Lock the screen before sleeping";
+
+/// How long the suspend is held after locking, for the request to get out to the
+/// compositor. logind allows `InhibitDelayMaxSec` for this, 5 seconds by default.
+const SLEEP_LOCK_GRACE: Duration = Duration::from_millis(250);
+
 /// What a profile picture in the config directory can be called. The first one
 /// that exists wins, so a user with several only sees one of them.
 const AVATAR_NAMES: &[&str] = &["profile.png", "profile.jpg", "profile.webp"];
@@ -109,6 +116,7 @@ impl Global for GlobalLock {}
 pub fn init(cx: &mut App) {
   cx.set_global(GlobalLock(None));
   watch_session_requests(cx);
+  watch_sleep(cx);
 }
 
 /// Locks the session, unless it already is.
@@ -248,6 +256,73 @@ fn watch_session_requests(cx: &mut App) {
     }
   })
   .detach();
+}
+
+/// Locks the screen before the system suspends, and puts the fingerprint reader
+/// back together after it wakes.
+///
+/// A sleep inhibitor is what buys the time to lock: logind holds the suspend
+/// until every delay lock is released, so the lock surfaces are up before the
+/// screen comes back on. This is the same thing `swayidle before-sleep` does,
+/// and it replaces the systemd unit ordered before `sleep.target` - which has no
+/// way of knowing whether the locker got anywhere before the machine went down.
+fn watch_sleep(cx: &mut App) {
+  let connection = GlobalDbusConnection::system(cx);
+
+  cx.spawn(async move |cx| {
+    let Some(connection) = connection.await else {
+      warn!("System bus unavailable, the screen won't lock before sleeping");
+      return;
+    };
+
+    let transitions = match Logind::listen_sleep(&connection).await {
+      Ok(transitions) => transitions,
+      Err(error) => {
+        error!(?error, "Failed to subscribe to sleep transitions");
+        return;
+      }
+    };
+
+    futures::pin_mut!(transitions);
+
+    let mut inhibitor = Logind::inhibit_sleep(&connection, INHIBIT_REASON)
+      .await
+      .log_err();
+
+    while let Some(sleeping) = transitions.next().await {
+      if sleeping {
+        debug!("System is going to sleep, locking");
+        cx.update(lock);
+
+        // Locking only queues the request; letting go of the inhibitor right
+        // here would race the suspend against it reaching the compositor. This
+        // is a fraction of what logind waits for.
+        cx.background_executor().timer(SLEEP_LOCK_GRACE).await;
+        drop(inhibitor.take());
+        continue;
+      }
+
+      debug!("System woke up");
+      inhibitor = Logind::inhibit_sleep(&connection, INHIBIT_REASON)
+        .await
+        .log_err();
+
+      cx.update(restart_fingerprint);
+    }
+  })
+  .detach();
+}
+
+/// Gives the fingerprint reader another go after a suspend. fprintd puts its
+/// readers to sleep along with the machine, which ends whatever verification was
+/// running and leaves the claim we hold pointing at a device that may not even
+/// come back under the same name.
+fn restart_fingerprint(cx: &mut App) {
+  let Some(lock) = cx.global::<GlobalLock>().0.clone() else {
+    return;
+  };
+
+  lock.update(cx, |lock, cx| lock.restart_fingerprint(cx));
 }
 
 /// Publishes the lock state to logind so `loginctl` and anything watching
@@ -526,7 +601,30 @@ impl Lock {
     });
   }
 
+  /// Starts over with the fingerprint reader, for when the one we were using is
+  /// no longer good - after a suspend, say. Whatever is held is handed back
+  /// first, in the same task, so the release can't land on top of the new claim.
+  fn restart_fingerprint(&mut self, cx: &mut Context<Self>) {
+    if !self.fingerprint_enabled {
+      return;
+    }
+
+    // Nothing that was said about the old reader still applies.
+    self.error = None;
+
+    let previous = self.fingerprint.take();
+    self.start_fingerprint_after(previous, cx);
+  }
+
   fn start_fingerprint(&mut self, cx: &mut Context<Self>) {
+    self.start_fingerprint_after(None, cx);
+  }
+
+  fn start_fingerprint_after(
+    &mut self,
+    previous: Option<FingerprintReader>,
+    cx: &mut Context<Self>,
+  ) {
     let connection = GlobalDbusConnection::system(cx);
 
     // Claiming a reader takes a moment - fprintd is activated on demand and the
@@ -535,6 +633,19 @@ impl Lock {
     self.set_fingerprint(FingerprintState::Starting, cx);
 
     self._fingerprint = Some(cx.spawn(async move |this, cx| {
+      if let Some(previous) = previous {
+        // Hand the old one back before asking for a device again: fprintd
+        // refuses a claim while one is outstanding, even one that no longer
+        // works.
+        if let Err(error) = previous.stop_verification().await {
+          debug!(?error, "No fingerprint verification left to stop");
+        }
+
+        if let Err(error) = previous.release().await {
+          debug!(?error, "Nothing left to release of the old reader");
+        }
+      }
+
       let setup = match connection.await {
         Some(connection) => claim_reader(&connection, cx).await,
         None => {

@@ -1,7 +1,9 @@
 mod api;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use futures::{Stream, StreamExt as _, stream};
+
+use crate::util::ResultExt;
 
 pub struct Logind;
 
@@ -23,7 +25,40 @@ impl Logind {
     proxy.suspend(true).await?;
     Ok(())
   }
+
+  /// Holds the system back from suspending until the returned lock is dropped,
+  /// which is how a locker gets the screen covered before the machine goes to
+  /// sleep. logind only waits so long - `InhibitDelayMaxSec`, 5 seconds by
+  /// default - and then suspends regardless.
+  ///
+  /// The lock is one use: it is gone once sleep has happened, and taking another
+  /// is what arms this for the next time.
+  pub async fn inhibit_sleep(conn: &zbus::Connection, why: &str) -> Result<SleepLock> {
+    let proxy = api::ManagerProxy::new(conn).await?;
+
+    let lock = proxy
+      .inhibit("sleep", "launch", why, "delay")
+      .await
+      .context("taking a sleep inhibitor lock")?;
+
+    Ok(SleepLock(lock))
+  }
+
+  /// Follows the system into and out of sleep: `true` arrives before suspending,
+  /// `false` after resuming.
+  pub async fn listen_sleep(conn: &zbus::Connection) -> Result<impl Stream<Item = bool> + use<>> {
+    let proxy = api::ManagerProxy::new(conn).await?;
+    let transitions = proxy.receive_prepare_for_sleep().await?;
+
+    Ok(
+      transitions
+        .filter_map(|signal| async move { signal.args().log_err().map(|args| args.start) }),
+    )
+  }
 }
+
+/// A held sleep inhibitor. Sleep is delayed for as long as this is alive.
+pub struct SleepLock(#[allow(dead_code)] zvariant::OwnedFd);
 
 /// A lock or unlock request logind forwarded to our session.
 #[derive(Clone, Copy, Debug)]
