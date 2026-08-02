@@ -39,25 +39,25 @@ use std::time::Duration;
 
 use futures::{FutureExt as _, StreamExt as _, select_biased};
 use gpui::{
-  AnyElement, App, AsyncApp, Context, Div, Entity, EntityId, EventEmitter, Focusable, FontWeight,
-  Global, ImageSource, IntoElement, MouseButton, ObjectFit, Pixels, Rems, Render, Resource,
-  SharedString, Styled, Subscription, Task, WeakEntity, Window, div, img, prelude::*, px, rems,
-  rgb, rgba,
+  App, AsyncApp, Context, Div, Entity, EntityId, EventEmitter, Focusable, Global, IntoElement,
+  MouseButton, Render, SharedString, Subscription, Task, WeakEntity, Window, prelude::*,
 };
 use tracing::{debug, error, info, warn};
 use uzers::os::unix::UserExt as _;
 
+use crate::auth_screen::{
+  AuthPrompt, AuthUser, FingerprintState, PasswordMirror, REJECTION_HIGHLIGHT,
+  apply_password_mirror, render_auth_screen,
+};
 use crate::config::{ConfigState, LockConfig, config_dir};
 use crate::dbus::GlobalDbusConnection;
 use crate::dbus::fprintd::{FingerprintReader, VerifyStatus};
 use crate::dbus::logind::{Logind, Session, SessionRequest};
-use crate::icon::{Icon, IconName, Spinner};
-use crate::input::input;
 use crate::input::state::{InputEvent, InputState};
 use crate::launcher::Launcher;
 use crate::lock::pam::{AuthEvent, AuthFailure};
-use crate::status::{self, Clock};
-use crate::util::{ResultExt, h_flex, v_flex};
+use crate::status::{self, Clock, clock_display};
+use crate::util::ResultExt;
 
 /// Consecutive unrecognized fingers after which verification stops and the user
 /// is pointed at their password, mirroring what `pam_fprintd` does.
@@ -70,35 +70,12 @@ const MAX_FINGERPRINT_FAILURES: u32 = 5;
 /// promising a finger prompt that will never arrive.
 const FINGERPRINT_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-const AVATAR_SIZE: Pixels = px(104.);
-
-/// The password field and the icons that flank it. The icons are sized in rems
-/// so they track the text.
-const FIELD_TEXT_SIZE: Pixels = px(20.);
-const FIELD_ICON_SIZE: Rems = rems(1.4);
-
-/// How far the password field fades while it takes no input.
-const FIELD_DISABLED_OPACITY: f32 = 0.6;
-
-/// The colour a turned-down attempt is reported in, as the message and as the
-/// outline of the field it came from.
-const ERROR_COLOR: u32 = 0xE07070;
-
-/// How long the field stays outlined after an attempt is turned down. Long
-/// enough to be noticed, short enough to be gone by the time the next one is
-/// typed.
-const REJECTION_HIGHLIGHT: Duration = Duration::from_secs(3);
-
 /// Why the screen is holding sleep up, as `systemd-inhibit --list` shows it.
 const INHIBIT_REASON: &str = "Lock the screen before sleeping";
 
 /// How long the suspend is held after locking, for the request to get out to the
 /// compositor. logind allows `InhibitDelayMaxSec` for this, 5 seconds by default.
 const SLEEP_LOCK_GRACE: Duration = Duration::from_millis(250);
-
-/// What a profile picture in the config directory can be called. The first one
-/// that exists wins, so a user with several only sees one of them.
-const AVATAR_NAMES: &[&str] = &["profile.png", "profile.jpg", "profile.webp"];
 
 /// Mirrors the lock state for readers outside the app's foreground thread.
 static LOCKED: AtomicBool = AtomicBool::new(false);
@@ -361,42 +338,13 @@ fn close_launcher_windows(cx: &mut App) {
   }
 }
 
-/// The user the lock screen authenticates, shown on it and handed to PAM.
-struct LockUser {
-  /// Login name; this is what PAM verifies the password for.
-  name: String,
-  display_name: SharedString,
-  /// First letter of the display name, for when there is no avatar to show.
-  initial: SharedString,
-  avatar: Option<PathBuf>,
-}
-
-fn current_user() -> Option<LockUser> {
+fn current_user() -> Option<AuthUser> {
   let user = uzers::get_user_by_uid(uzers::get_current_uid())?;
   let name = user.name().to_str()?.to_owned();
+  let gecos = user.gecos().to_str().unwrap_or_default().to_owned();
+  let avatar = find_avatar(&name);
 
-  // The GECOS field holds the full name in its first comma-separated part.
-  let display_name = user
-    .gecos()
-    .to_str()
-    .and_then(|gecos| gecos.split(',').next())
-    .map(str::trim)
-    .filter(|full_name| !full_name.is_empty())
-    .unwrap_or(&name)
-    .to_owned();
-
-  let initial = display_name
-    .chars()
-    .next()
-    .map(|first| first.to_uppercase().to_string())
-    .unwrap_or_default();
-
-  Some(LockUser {
-    avatar: find_avatar(&name),
-    display_name: display_name.into(),
-    initial: initial.into(),
-    name,
-  })
+  Some(AuthUser::from_passwd(name, &gecos, avatar))
 }
 
 /// Looks for a user picture: one dropped into the config directory first, then
@@ -405,35 +353,29 @@ fn find_avatar(username: &str) -> Option<PathBuf> {
   let mut candidates = Vec::new();
 
   if let Some(directory) = config_dir() {
-    candidates.extend(AVATAR_NAMES.iter().map(|name| directory.join(name)));
+    candidates.extend(
+      greet_ipc::user::CONFIG_AVATAR_NAMES
+        .iter()
+        .map(|name| directory.join(name)),
+    );
   }
 
   if let Some(home) = dirs::home_dir() {
-    candidates.push(home.join(".face"));
-    candidates.push(home.join(".face.icon"));
+    candidates.extend(
+      greet_ipc::user::HOME_AVATAR_NAMES
+        .iter()
+        .map(|name| home.join(name)),
+    );
   }
 
-  candidates.push(PathBuf::from("/var/lib/AccountsService/icons").join(username));
+  candidates.push(PathBuf::from(greet_ipc::user::ACCOUNTS_SERVICE_ICON_DIR).join(username));
 
   candidates.into_iter().find(|path| path.is_file())
 }
 
-/// What the fingerprint reader is up to, so the password field can show it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FingerprintState {
-  /// There is no reader to use, or it gave up.
-  Off,
-  /// Looking the reader up and claiming it.
-  Starting,
-  /// Armed, with nothing on the sensor.
-  Waiting,
-  /// A finger is on the sensor and being read.
-  Reading,
-}
-
 /// Shared state of one lock session, rendered by a [`LockScreen`] per output.
 pub struct Lock {
-  user: LockUser,
+  user: AuthUser,
   pam_service: SharedString,
   fingerprint_enabled: bool,
   /// Set while a password attempt is in flight. Further submissions are ignored
@@ -457,20 +399,10 @@ pub struct Lock {
   _finger_present: Option<Task<()>>,
 }
 
-/// Keeps the screens in step with each other.
-pub enum LockEvent {
-  /// The password was typed on `source`'s screen, or cleared when there is no
-  /// source, and the other screens should follow.
-  Password {
-    value: SharedString,
-    source: Option<EntityId>,
-  },
-}
-
-impl EventEmitter<LockEvent> for Lock {}
+impl EventEmitter<PasswordMirror> for Lock {}
 
 impl Lock {
-  fn new(user: LockUser, config: LockConfig) -> Self {
+  fn new(user: AuthUser, config: LockConfig) -> Self {
     let pam_service = pam::resolve_service(&config.pam_service);
     debug!(service = %pam_service, "Authenticating against PAM service");
 
@@ -589,7 +521,7 @@ impl Lock {
       cx.notify();
     }
 
-    cx.emit(LockEvent::Password {
+    cx.emit(PasswordMirror {
       value,
       source: Some(source),
     });
@@ -597,7 +529,7 @@ impl Lock {
 
   /// Empties the field on every screen. Sourceless, so none of them skips it.
   fn clear_password(&mut self, cx: &mut Context<Self>) {
-    cx.emit(LockEvent::Password {
+    cx.emit(PasswordMirror {
       value: SharedString::default(),
       source: None,
     });
@@ -1003,8 +935,8 @@ impl LockScreen {
       cx.subscribe_in(
         &lock,
         window,
-        |this, _lock, event: &LockEvent, window, cx| {
-          this.apply_lock_event(event, window, cx);
+        |this, _lock, event: &PasswordMirror, window, cx| {
+          apply_password_mirror(event, &this.password, cx.entity_id(), window, cx);
         },
       ),
       cx.observe(&lock, |_this, _lock, cx| cx.notify()),
@@ -1036,171 +968,38 @@ impl LockScreen {
       .lock
       .update(cx, |lock, cx| lock.password_changed(value, source, cx));
   }
-
-  fn apply_lock_event(&mut self, event: &LockEvent, window: &mut Window, cx: &mut Context<Self>) {
-    let LockEvent::Password { value, source } = event;
-
-    if *source == Some(cx.entity_id()) {
-      return;
-    }
-
-    // Comparing first also stops the mirroring from bouncing back and forth:
-    // setting the value emits another change on this screen.
-    if self.password.read(cx).value() == *value {
-      return;
-    }
-
-    self.password.update(cx, |password, cx| {
-      password.set_value(value.clone(), window, cx);
-    });
-  }
 }
 
 impl Render for LockScreen {
   fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let lock = self.lock.read(cx);
-    let display_name = lock.user.display_name.clone();
-    let username: SharedString = lock.user.name.clone().into();
-    let initial = lock.user.initial.clone();
-    let avatar = lock.user.avatar.clone();
-    let authenticating = lock.authenticating;
-    let fingerprint = lock.fingerprint_state;
-    let hint = lock.hint.clone();
-    let error = lock.error.clone();
-    let rejected = lock.rejected;
 
-    div()
-      .size_full()
-      .relative()
-      .flex()
-      .flex_col()
-      .items_center()
-      .justify_center()
-      .bg(rgb(0x0D0D0D))
-      .text_color(rgb(0xFFFFFF))
-      .on_mouse_down(
-        MouseButton::Left,
-        cx.listener(|this, _event, window, cx| {
-          // Clicking anywhere puts the keyboard back on the password field.
-          window.focus(&this.password.focus_handle(cx), cx);
-        }),
-      )
-      .child(
-        v_flex()
-          .items_center()
-          .gap_4()
-          .w(px(360.))
-          .child(render_avatar(avatar, initial))
-          .child(
-            v_flex()
-              .items_center()
-              .gap_1()
-              .child(
-                div()
-                  .text_size(px(22.))
-                  .font_weight(FontWeight::BOLD)
-                  .child(display_name.clone()),
-              )
-              .when(display_name != username, |this| {
-                this.child(div().text_sm().text_color(rgba(0xFFFFFFAA)).child(username))
-              }),
-          )
-          // The field sits a little further from the name than the rest of the
-          // column is spaced, so the two don't read as one block.
-          .child(
-            self
-              .render_password(authenticating, fingerprint, rejected)
-              .mt_2(),
-          )
-          .when_some(hint, |this, hint| {
-            this.child(hint_row(
-              Icon::new(IconName::Asterisk)
-                .size(rems(0.95))
-                .text_color(rgba(0xFFFFFF88))
-                .into_any_element(),
-              hint,
-            ))
-          })
-          .when_some(error, |this, error| {
-            this.child(div().text_sm().text_color(rgb(ERROR_COLOR)).child(error))
-          }),
-      )
-      .when(self.clock, |this| this.child(self.render_clock(cx)))
+    render_auth_screen(AuthPrompt {
+      user: &lock.user,
+      password: &self.password,
+      busy: lock.authenticating,
+      fingerprint: lock.fingerprint_state,
+      rejected: lock.rejected,
+      hint: lock.hint.clone(),
+      error: lock.error.clone(),
+      // The lock screen only ever waits on the password itself, which the
+      // field's own spinner already says.
+      status: None,
+      // There is one user and no way to change it.
+      below: None,
+    })
+    .on_mouse_down(
+      MouseButton::Left,
+      cx.listener(|this, _event, window, cx| {
+        // Clicking anywhere puts the keyboard back on the password field.
+        window.focus(&this.password.focus_handle(cx), cx);
+      }),
+    )
+    .when(self.clock, |this| this.child(self.render_clock(cx)))
   }
-}
-
-/// Which display the clock goes on, as an index into [`App::displays`]. It
-/// belongs on the screen the overlay it stands in for uses. `None` puts it on
-/// every screen, which is what happens when no display is configured or the
-/// configured one isn't attached - a clock nobody asked to hide beats no clock
-/// at all.
-fn clock_display(cx: &App) -> Option<usize> {
-  let config = ConfigState::get(cx);
-  let configured = config.status.display.or(config.primary_display)?;
-
-  let index = cx
-    .displays()
-    .iter()
-    .position(|display| display.name() == Some(configured.as_str()));
-
-  if index.is_none() {
-    warn!(
-      display = %configured,
-      "Configured clock display not found, showing the clock on every screen"
-    );
-  }
-
-  index
 }
 
 impl LockScreen {
-  /// The password field stays mounted while authenticating, so it keeps keyboard
-  /// focus and holds on to what was typed; only the leading icon turns into a
-  /// spinner.
-  ///
-  /// Typing is off while either check is mid-flight, since a rejected attempt
-  /// empties the field and would take anything typed since with it.
-  fn render_password(
-    &self,
-    authenticating: bool,
-    fingerprint: FingerprintState,
-    rejected: bool,
-  ) -> Div {
-    let leading = if authenticating {
-      Spinner::new()
-        .size(FIELD_ICON_SIZE)
-        .color(rgb(0x888888).into())
-        .into_any_element()
-    } else {
-      Icon::new(IconName::Lock)
-        .size(FIELD_ICON_SIZE)
-        .text_color(rgba(0xFFFFFF66))
-        .into_any_element()
-    };
-
-    let disabled = authenticating || fingerprint == FingerprintState::Reading;
-
-    h_flex()
-      .w_full()
-      .gap_3()
-      .px_4()
-      .py_3()
-      .text_size(FIELD_TEXT_SIZE)
-      .rounded_lg()
-      .bg(rgba(0xFFFFFF0F))
-      .border_1()
-      .map(|this| match rejected {
-        true => this.border_color(rgb(ERROR_COLOR)),
-        false => this.border_color(rgba(0xFFFFFF1F)),
-      })
-      .when(disabled, |this| this.opacity(FIELD_DISABLED_OPACITY))
-      .child(leading)
-      .child(input(&self.password).flex_grow().disabled(disabled))
-      .when_some(render_fingerprint(fingerprint), |this, indicator| {
-        this.child(indicator)
-      })
-  }
-
   /// The desktop clock, which the lock surfaces cover up, drawn in the same
   /// corner it would be in if they didn't.
   fn render_clock(&self, cx: &App) -> Div {
@@ -1213,70 +1012,4 @@ impl LockScreen {
       ConfigState::get(cx).status.opacity,
     )
   }
-}
-
-fn render_avatar(avatar: Option<PathBuf>, initial: SharedString) -> AnyElement {
-  let frame = div()
-    .size(AVATAR_SIZE)
-    .flex_none()
-    .rounded_full()
-    .overflow_hidden()
-    .bg(rgba(0xFFFFFF14))
-    .flex()
-    .items_center()
-    .justify_center();
-
-  match avatar {
-    Some(path) => frame
-      .child(
-        // The frame's `overflow_hidden` doesn't round what the image paints;
-        // the radius has to be on the image itself.
-        img(ImageSource::Resource(Resource::Path(path.into())))
-          .size_full()
-          .rounded_full()
-          .object_fit(ObjectFit::Cover),
-      )
-      .into_any_element(),
-    None => frame
-      .child(
-        div()
-          .text_size(px(40.))
-          .text_color(rgba(0xFFFFFFCC))
-          .child(initial),
-      )
-      .into_any_element(),
-  }
-}
-
-/// Shows a reader that is armed, spinning while a finger is actually on the
-/// sensor so an idle lock screen doesn't animate for hours. A reader that is
-/// still starting up, or that isn't there at all, shows nothing rather than
-/// offering a way in that may never work.
-fn render_fingerprint(state: FingerprintState) -> Option<AnyElement> {
-  match state {
-    FingerprintState::Off | FingerprintState::Starting => None,
-    FingerprintState::Waiting => Some(
-      Icon::new(IconName::Fingerprint)
-        .size(FIELD_ICON_SIZE)
-        .text_color(rgba(0xFFFFFF66))
-        .into_any_element(),
-    ),
-    FingerprintState::Reading => Some(
-      Spinner::new()
-        .size(FIELD_ICON_SIZE)
-        .color(rgba(0xFFFFFFAA).into())
-        .into_any_element(),
-    ),
-  }
-}
-
-fn hint_row(leading: AnyElement, hint: SharedString) -> impl IntoElement {
-  h_flex()
-    .w_full()
-    .gap_2()
-    .items_center()
-    .text_sm()
-    .text_color(rgba(0xFFFFFFAA))
-    .child(leading)
-    .child(div().flex_1().child(hint))
 }

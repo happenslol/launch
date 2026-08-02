@@ -6,6 +6,7 @@
 
 mod assets;
 mod audio;
+mod auth_screen;
 mod bluetooth;
 mod clipboard;
 mod config;

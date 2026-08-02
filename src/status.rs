@@ -47,9 +47,18 @@ const MARGIN_BOTTOM: Pixels = px(5.);
 const WIDTH: Pixels = px(400.);
 const HEIGHT: Pixels = px(140.);
 
-pub fn init(cx: &mut App) {
+/// Sets up the clock entity on its own, without the overlay window it is
+/// normally drawn in.
+///
+/// The greeter draws the clock into its own surfaces, and a second layer-shell
+/// window sitting alongside them would be both redundant and in the way.
+pub fn init_clock(cx: &mut App) {
   let clock = cx.new(Clock::new);
   cx.set_global(GlobalClock(clock));
+}
+
+pub fn init(cx: &mut App) {
+  init_clock(cx);
 
   let overlay = cx.new(StatusOverlay::new);
   cx.set_global(GlobalStatusOverlay(overlay));
@@ -245,6 +254,33 @@ impl StatusOverlay {
       debug!(?error, "Clock overlay was already gone");
     }
   }
+}
+
+/// Which display the clock goes on, as an index into [`App::displays`], for the
+/// screens that draw it themselves rather than through the overlay.
+///
+/// `None` puts it on every screen, which is what happens when no display is
+/// configured or the configured one isn't attached - a clock nobody asked to
+/// hide beats no clock at all. That is the one way this differs from
+/// [`target_display`], which always has to name a single output to put a window
+/// on.
+pub fn clock_display(cx: &App) -> Option<usize> {
+  let config = ConfigState::get(cx);
+  let configured = config.status.display.or(config.primary_display)?;
+
+  let index = cx
+    .displays()
+    .iter()
+    .position(|display| display.name() == Some(configured.as_str()));
+
+  if index.is_none() {
+    warn!(
+      display = %configured,
+      "Configured clock display not found, showing the clock on every screen"
+    );
+  }
+
+  index
 }
 
 /// The display the clock belongs on: the one the status section names, else the
