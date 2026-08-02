@@ -1,0 +1,26 @@
+[package]
+name = "greet-ipc"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/ipc.rs"
+
+[features]
+default = []
+# The greeter does its async IO over async-net, the daemon over tokio. Only the
+# read/write adapters differ; framing and serialization are shared.
+futures-io = ["dep:futures-util"]
+tokio = ["dep:tokio"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+futures-util = { version = "0.3", optional = true, default-features = false, features = [
+  "io",
+] }
+tokio = { version = "1.49", optional = true, default-features = false, features = [
+  "io-util",
+] }

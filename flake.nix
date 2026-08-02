@@ -105,6 +105,10 @@
       args = {
         inherit src;
         strictDeps = true;
+        # Build every workspace member, not just the root package. `launch` is
+        # both the workspace root and a member, so without this cargo would
+        # quietly build only it and leave the daemon uncompiled.
+        cargoExtraArgs = "--locked --workspace";
         nativeBuildInputs = with pkgs; [pkg-config mold makeWrapper];
         buildInputs = with pkgs; [
           rustPlatform.bindgenHook
@@ -132,6 +136,10 @@
           inherit cargoArtifacts;
           meta.mainProgram = "launch";
           postInstall = ''
+            # Only `launch` is wrapped. `launch-greetd` re-execs /proc/self/exe
+            # to spawn its session workers, and makeWrapper's shell shim would
+            # make that resolve to the wrapper rather than the binary. It needs
+            # no library path anyway - libpam comes in through RPATH.
             wrapProgram "$out/bin/launch" --prefix LD_LIBRARY_PATH : "${libraryPath}"
           '';
         });
@@ -156,7 +164,9 @@
       checks = {
         inherit package;
 
-        fmt = craneLib.cargoFmt (args // {inherit cargoArtifacts;});
+        # `cargo fmt` takes neither --locked nor --workspace, so the shared
+        # cargoExtraArgs has to be replaced rather than extended here.
+        fmt = craneLib.cargoFmt (args // {inherit cargoArtifacts;} // {cargoExtraArgs = "--all";});
         fmt-toml = craneLib.taploFmt {src = pkgs.lib.sources.sourceFilesBySuffices src [".toml"];};
         test = craneLib.cargoTest (args // {inherit cargoArtifacts;});
         clippy = craneLib.cargoClippy (args // {inherit cargoArtifacts cargoClippyExtraArgs;});
