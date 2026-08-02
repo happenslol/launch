@@ -118,15 +118,38 @@ pub fn reinit_after_fork(reload: &Reload) -> Guard {
   }
 }
 
-fn file_appender() -> tracing_appender::rolling::RollingFileAppender {
-  let log_dir = log_dir();
-  fs::create_dir_all(&log_dir).expect("Failed to create log directory");
-  tracing_appender::rolling::daily(&log_dir, "launch.log")
+/// The daily log file, or a sink when there is nowhere to put one.
+///
+/// The greeter runs as its own system user, whose home may be unwritable or, if
+/// `HOME` is unset, absent entirely - and this runs before anything has been
+/// drawn. Panicking there would take down the login screen and leave no log
+/// saying why, so a missing log directory degrades to stderr-only instead.
+///
+/// Boxed so the caller gets one type either way, which keeps the reload handles
+/// and [`Guard`] below unchanged.
+fn file_appender() -> Box<dyn io::Write + Send> {
+  let Some(log_dir) = log_dir() else {
+    // Too early for `tracing` - the subscriber this feeds isn't installed yet.
+    eprintln!("No state directory available, logging to stderr only");
+    return Box::new(io::sink());
+  };
+
+  if let Err(error) = fs::create_dir_all(&log_dir) {
+    eprintln!(
+      "Failed to create log directory {}, logging to stderr only: {error}",
+      log_dir.display()
+    );
+
+    return Box::new(io::sink());
+  }
+
+  Box::new(tracing_appender::rolling::daily(&log_dir, "launch.log"))
 }
 
-fn log_dir() -> PathBuf {
-  dirs::state_dir()
-    .expect("Failed to get state dir")
-    .join(env!("CARGO_CRATE_NAME"))
-    .join("log")
+fn log_dir() -> Option<PathBuf> {
+  Some(
+    dirs::state_dir()?
+      .join(env!("CARGO_CRATE_NAME"))
+      .join("log"),
+  )
 }
