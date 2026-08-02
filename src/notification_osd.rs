@@ -40,6 +40,18 @@ const MESSAGE_ICON_SIZE: f32 = 44.0;
 
 const MEDIA_COVER_HEIGHT: f32 = 120.0;
 
+/// The most lines a wrapping body is allowed to occupy before it is clamped and
+/// ellipsized. Past a few lines a toast is better truncated than turned into a
+/// wall of text.
+const BODY_MAX_LINES: usize = 3;
+
+/// A hard ceiling on a card's height. Every layout already bounds its own
+/// content — the text is flattened onto single lines and the wrapping body is
+/// clamped to [`BODY_MAX_LINES`] — so this never clips in practice; it is a
+/// backstop that keeps a card from taking over the screen if some future layout
+/// or an unforeseen input escapes those limits.
+const MAX_CARD_HEIGHT: f32 = 280.0;
+
 /// A burst of notifications (e.g. several `notify-send`s at once) produces a
 /// rapid sequence of change events. Coalescing them into a single `sync` avoids
 /// redundant content updates while the burst is still arriving.
@@ -324,6 +336,10 @@ struct CardState {
   /// Resolved once when the card is created or refreshed, rather than re-running
   /// the regex layout rules on every render frame.
   layout: NotificationLayout,
+  /// The notification's display text, flattened alongside `layout` so the render
+  /// path — which also runs for every frame of the enter/exit animation — never
+  /// re-walks the strings.
+  text: CardText,
   /// True once dismissed: the card stays in the stack, playing its fade/slide-out
   /// animation, until [`NotificationsView::remove_card`] drops it.
   leaving: bool,
@@ -333,10 +349,49 @@ impl CardState {
   fn new(notification: Notification) -> Self {
     Self {
       layout: pick_layout(&notification),
+      text: CardText::new(&notification),
       notification,
       leaving: false,
     }
   }
+}
+
+/// A notification's text with every hard line break removed. See [`single_line`]
+/// for why the cards never render the raw strings.
+struct CardText {
+  app_name: SharedString,
+  summary: SharedString,
+  body: SharedString,
+}
+
+impl CardText {
+  fn new(notification: &Notification) -> Self {
+    Self {
+      app_name: single_line(&notification.app_name),
+      summary: single_line(&notification.summary),
+      body: single_line(&notification.body),
+    }
+  }
+}
+
+/// Flattens text onto one line, collapsing every run of whitespace into a single
+/// space.
+///
+/// Notification summaries and bodies routinely arrive with hard line breaks in
+/// them. GPUI shapes text by splitting it on `\n` first and only then applies
+/// `truncate` and `line_clamp`, so each break yields a rendered line that neither
+/// limit bounds — a twelve-line body renders twelve lines tall no matter what the
+/// clamp says. Flattening up front is what makes those limits hold.
+fn single_line(text: &SharedString) -> SharedString {
+  // Cloning a `SharedString` is a refcount bump, so leave already-flat text —
+  // the common case — alone rather than rebuilding it.
+  let is_flat = !text.contains(|character: char| character.is_whitespace() && character != ' ')
+    && !text.contains("  ");
+  if is_flat {
+    return text.clone();
+  }
+
+  SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 struct NotificationsView {
@@ -381,6 +436,7 @@ impl NotificationsView {
       if let Some(card) = self.cards.iter_mut().find(|card| card.notification.id == notification.id)
       {
         card.layout = pick_layout(notification);
+        card.text = CardText::new(notification);
         card.notification = notification.clone();
         if card.leaving {
           // The notification came back before its exit finished; cancel removal.
@@ -433,9 +489,9 @@ impl NotificationsView {
   fn render_card(&self, card: &CardState, cx: &mut Context<Self>) -> AnyElement {
     let notification = &card.notification;
     let element = match card.layout {
-      NotificationLayout::Compact => self.render_compact(notification, cx),
-      NotificationLayout::Message => self.render_message(notification, cx),
-      NotificationLayout::Media => self.render_media(notification, cx),
+      NotificationLayout::Compact => self.render_compact(card, cx),
+      NotificationLayout::Message => self.render_message(card, cx),
+      NotificationLayout::Media => self.render_media(card, cx),
     };
 
     // Fade + slide along the right edge: in from the right on appear, back out
@@ -482,6 +538,7 @@ impl NotificationsView {
       .id(SharedString::from(format!("notif-{id}")))
       .flex_none()
       .w_full()
+      .max_h(px(MAX_CARD_HEIGHT))
       .overflow_hidden()
       .rounded_xl()
       .bg(rgba(0x1D1D1DF0))
@@ -617,7 +674,8 @@ impl NotificationsView {
       .collect()
   }
 
-  fn render_compact(&self, notification: &Notification, cx: &mut Context<Self>) -> Stateful<Div> {
+  fn render_compact(&self, card: &CardState, cx: &mut Context<Self>) -> Stateful<Div> {
+    let notification = &card.notification;
     let buttons = self.compact_buttons(notification, cx);
 
     self
@@ -640,15 +698,15 @@ impl NotificationsView {
                   .font_weight(FontWeight::BOLD)
                   .text_color(rgb(0xEEEEEE))
                   .truncate()
-                  .child(notification.summary.clone()),
+                  .child(card.text.summary.clone()),
               )
-              .when(!notification.body.is_empty(), |this| {
+              .when(!card.text.body.is_empty(), |this| {
                 this.child(
                   div()
                     .text_xs()
                     .text_color(rgba(0xFFFFFF99))
                     .truncate()
-                    .child(notification.body.clone()),
+                    .child(card.text.body.clone()),
                 )
               }),
           )
@@ -658,9 +716,10 @@ impl NotificationsView {
       )
   }
 
-  fn render_message(&self, notification: &Notification, cx: &mut Context<Self>) -> Stateful<Div> {
-    // The message card sizes to its (wrapping) body — up to the three-line clamp
-    // below — with even padding all around.
+  fn render_message(&self, card: &CardState, cx: &mut Context<Self>) -> Stateful<Div> {
+    // The message card sizes to its (wrapping) body — up to the clamp below —
+    // with even padding all around.
+    let notification = &card.notification;
     let buttons = self.prominent_buttons(notification, cx);
 
     self
@@ -693,7 +752,7 @@ impl NotificationsView {
                           .text_xs()
                           .text_color(rgba(0xFFFFFF80))
                           .truncate()
-                          .child(notification.app_name.clone()),
+                          .child(card.text.app_name.clone()),
                       )
                       .child(
                         div()
@@ -709,18 +768,22 @@ impl NotificationsView {
                       .font_weight(FontWeight::BOLD)
                       .text_color(rgb(0xF0F0F0))
                       .truncate()
-                      .child(notification.summary.clone()),
+                      .child(card.text.summary.clone()),
                   )
-                  .when(!notification.body.is_empty(), |this| {
+                  .when(!card.text.body.is_empty(), |this| {
                     this.child(
                       div()
                         .text_sm()
                         .text_color(rgba(0xFFFFFFAA))
                         .line_height(rems(1.3))
-                        // Grow with the body, but cap it: past ~3 lines a toast
-                        // is better truncated than turned into a wall of text.
-                        .line_clamp(3)
-                        .child(notification.body.clone()),
+                        // Grow with the body, but cap it at [`BODY_MAX_LINES`].
+                        // `text_ellipsis` is what ends the clamped text in an
+                        // ellipsis: on its own `line_clamp` just stops wrapping,
+                        // leaving the remainder to run off the last line and be
+                        // cut mid-word by the card's `overflow_hidden`.
+                        .line_clamp(BODY_MAX_LINES)
+                        .text_ellipsis()
+                        .child(card.text.body.clone()),
                     )
                   }),
               ),
@@ -731,7 +794,8 @@ impl NotificationsView {
       )
   }
 
-  fn render_media(&self, notification: &Notification, cx: &mut Context<Self>) -> Stateful<Div> {
+  fn render_media(&self, card: &CardState, cx: &mut Context<Self>) -> Stateful<Div> {
+    let notification = &card.notification;
     let buttons = self.prominent_buttons(notification, cx);
 
     self
@@ -748,13 +812,13 @@ impl NotificationsView {
               .child(
                 v_flex()
                   .gap(px(2.))
-                  .when(!notification.app_name.is_empty(), |this| {
+                  .when(!card.text.app_name.is_empty(), |this| {
                     this.child(
                       div()
                         .text_xs()
                         .text_color(rgba(0xFFFFFF80))
                         .truncate()
-                        .child(notification.app_name.clone()),
+                        .child(card.text.app_name.clone()),
                     )
                   })
                   .child(
@@ -763,15 +827,15 @@ impl NotificationsView {
                       .font_weight(FontWeight::BOLD)
                       .text_color(rgb(0xF0F0F0))
                       .truncate()
-                      .child(notification.summary.clone()),
+                      .child(card.text.summary.clone()),
                   )
-                  .when(!notification.body.is_empty(), |this| {
+                  .when(!card.text.body.is_empty(), |this| {
                     this.child(
                       div()
                         .text_sm()
                         .text_color(rgba(0xFFFFFFAA))
                         .truncate()
-                        .child(notification.body.clone()),
+                        .child(card.text.body.clone()),
                     )
                   }),
               )

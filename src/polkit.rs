@@ -16,7 +16,7 @@ use gpui::{
   actions, div, point, prelude::*, px, rems, rgb, rgba,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
 };
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::dbus::polkit::{self, AgentEvent};
 use crate::icon::{Icon, IconName, Spinner};
@@ -174,7 +174,10 @@ pub struct PolkitDialog {
   reply: Option<Sender<String>>,
   phase: Phase,
   error: Option<SharedString>,
-  info: Option<SharedString>,
+  /// Whether the helper is currently waiting on the fingerprint reader, which
+  /// the password field and the status row show an indicator for. See
+  /// [`Self::set_info`].
+  fingerprint: bool,
   submitting: bool,
   closing: bool,
   focus_handle: FocusHandle,
@@ -213,7 +216,7 @@ impl PolkitDialog {
       reply: None,
       phase: Phase::Waiting,
       error: None,
-      info: None,
+      fingerprint: false,
       submitting: false,
       closing: false,
       focus_handle,
@@ -237,7 +240,7 @@ impl PolkitDialog {
     self.reply = None;
     self.phase = Phase::Waiting;
     self.error = None;
-    self.info = None;
+    self.fingerprint = false;
     self.submitting = false;
     self.closing = false;
     self._exit_task = None;
@@ -260,6 +263,10 @@ impl PolkitDialog {
     self.prompt = prompt.clone();
     self.reply = Some(reply);
     self.submitting = false;
+    // Reaching a secret prompt means the reader is done with this attempt — in
+    // the usual stack `pam_fprintd` runs as `sufficient` ahead of `pam_unix`, so
+    // a prompt only arrives once it has given up.
+    self.fingerprint = false;
 
     let placeholder = match prompt.trim().trim_end_matches(':').trim() {
       "" => "Password".to_owned(),
@@ -281,8 +288,14 @@ impl PolkitDialog {
     cx.notify();
   }
 
+  /// PAM's informational text is not shown. The only module in a polkit stack
+  /// that emits any is `pam_fprintd`, whose messages ("place your finger on the
+  /// reader", "verification timed out") are long enough to overflow the card and
+  /// say little the indicator does not. The arrival of one is taken as the
+  /// reader being live instead, and the text goes to the log.
   fn set_info(&mut self, message: SharedString, cx: &mut Context<Self>) {
-    self.info = Some(message);
+    debug!(%message, "polkit helper info");
+    self.fingerprint = true;
     cx.notify();
   }
 
@@ -402,7 +415,6 @@ impl Render for PolkitDialog {
               .gap_4()
               .child(self.render_header())
               .child(self.render_body(can_submit))
-              .when_some(self.info.clone(), Self::render_info)
               .when_some(self.error.clone(), Self::render_error)
               .child(self.render_buttons(can_submit, cx)),
           )
@@ -488,13 +500,14 @@ impl PolkitDialog {
     }
 
     if !can_submit {
-      // Waiting for a prompt, or in a promptless flow (e.g. fingerprint) where
-      // the info line carries the instructions.
-      return status_row(
-        Spinner::new().color(rgb(0x888888).into()).into_any_element(),
-        "Waiting for authentication…",
-      )
-      .into_any_element();
+      // Waiting for a prompt, or in a promptless flow where the reader is what
+      // the helper is blocked on — in which case it, rather than a generic
+      // spinner, is what the row is waiting for.
+      let leading = match self.fingerprint {
+        true => fingerprint_indicator(),
+        false => Spinner::new().color(rgb(0x888888).into()).into_any_element(),
+      };
+      return status_row(leading, "Waiting for authentication…").into_any_element();
     }
 
     h_flex()
@@ -507,19 +520,8 @@ impl PolkitDialog {
       .border_color(rgba(0xFFFFFF1F))
       .child(Icon::new(IconName::Lock).size(rems(0.95)).text_color(rgba(0xFFFFFF66)))
       .child(input(&self.password).flex_grow())
+      .when(self.fingerprint, |this| this.child(fingerprint_indicator()))
       .into_any_element()
-  }
-
-  fn render_info(this: gpui::Div, info: SharedString) -> gpui::Div {
-    this.child(
-      h_flex()
-        .gap_2()
-        .items_center()
-        .text_sm()
-        .text_color(rgba(0xFFFFFFAA))
-        .child(Icon::new(IconName::Fingerprint).size(rems(0.95)).text_color(rgba(0xFFFFFF88)))
-        .child(div().flex_1().child(info)),
-    )
   }
 
   fn render_error(this: gpui::Div, error: SharedString) -> gpui::Div {
@@ -610,6 +612,17 @@ fn ellipsize_middle(text: &str, max_chars: usize) -> String {
   let head_str: String = text.chars().take(head).collect();
   let tail_str: String = text.chars().skip(count - tail).collect();
   format!("{head_str}…{tail_str}")
+}
+
+/// Marks the fingerprint reader as the thing being waited on. The helper
+/// protocol carries no reader state, only PAM's text, so unlike the lock screen
+/// there is no way to tell a finger actually being read from an idle sensor —
+/// hence one indicator rather than an icon that turns into a spinner.
+fn fingerprint_indicator() -> gpui::AnyElement {
+  Icon::new(IconName::Fingerprint)
+    .size(rems(0.95))
+    .text_color(rgba(0xFFFFFF88))
+    .into_any_element()
 }
 
 fn status_row(leading: gpui::AnyElement, label: &'static str) -> gpui::Div {
