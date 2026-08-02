@@ -33,7 +33,6 @@
 mod pam;
 
 use std::cell::Cell;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -43,13 +42,12 @@ use gpui::{
   MouseButton, Render, SharedString, Subscription, Task, WeakEntity, Window, prelude::*,
 };
 use tracing::{debug, error, info, warn};
-use uzers::os::unix::UserExt as _;
 
 use crate::auth_screen::{
   AuthPrompt, AuthUser, FingerprintState, PasswordMirror, REJECTION_HIGHLIGHT,
-  apply_password_mirror, render_auth_screen,
+  apply_password_mirror, current_user, render_auth_screen,
 };
-use crate::config::{ConfigState, LockConfig, config_dir};
+use crate::config::{ConfigState, LockConfig};
 use crate::dbus::GlobalDbusConnection;
 use crate::dbus::fprintd::{FingerprintReader, VerifyStatus};
 use crate::dbus::logind::{Logind, Session, SessionRequest};
@@ -336,41 +334,6 @@ fn close_launcher_windows(cx: &mut App) {
       debug!(?error, "Launcher window was already gone");
     }
   }
-}
-
-fn current_user() -> Option<AuthUser> {
-  let user = uzers::get_user_by_uid(uzers::get_current_uid())?;
-  let name = user.name().to_str()?.to_owned();
-  let gecos = user.gecos().to_str().unwrap_or_default().to_owned();
-  let avatar = find_avatar(&name);
-
-  Some(AuthUser::from_passwd(name, &gecos, avatar))
-}
-
-/// Looks for a user picture: one dropped into the config directory first, then
-/// the places desktops agree on.
-fn find_avatar(username: &str) -> Option<PathBuf> {
-  let mut candidates = Vec::new();
-
-  if let Some(directory) = config_dir() {
-    candidates.extend(
-      greet_ipc::user::CONFIG_AVATAR_NAMES
-        .iter()
-        .map(|name| directory.join(name)),
-    );
-  }
-
-  if let Some(home) = dirs::home_dir() {
-    candidates.extend(
-      greet_ipc::user::HOME_AVATAR_NAMES
-        .iter()
-        .map(|name| home.join(name)),
-    );
-  }
-
-  candidates.push(PathBuf::from(greet_ipc::user::ACCOUNTS_SERVICE_ICON_DIR).join(username));
-
-  candidates.into_iter().find(|path| path.is_file())
 }
 
 /// Shared state of one lock session, rendered by a [`LockScreen`] per output.

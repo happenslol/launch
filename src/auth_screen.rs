@@ -16,6 +16,9 @@ use gpui::{
   Rems, Resource, SharedString, Styled, Window, div, img, prelude::*, px, rems, rgb, rgba,
 };
 
+use uzers::os::unix::UserExt as _;
+
+use crate::config::config_dir;
 use crate::icon::{Icon, IconName, Spinner};
 use crate::input::input;
 use crate::input::state::InputState;
@@ -365,4 +368,41 @@ pub fn apply_password_mirror(
   password.update(cx, |password, cx| {
     password.set_value(event.value.clone(), window, cx);
   });
+}
+
+/// The user running this process, for the screens that only ever authenticate
+/// that one.
+pub fn current_user() -> Option<AuthUser> {
+  let user = uzers::get_user_by_uid(uzers::get_current_uid())?;
+  let name = user.name().to_str()?.to_owned();
+  let gecos = user.gecos().to_str().unwrap_or_default().to_owned();
+  let avatar = find_avatar(&name);
+
+  Some(AuthUser::from_passwd(name, &gecos, avatar))
+}
+
+/// Looks for a user picture: one dropped into the config directory first, then
+/// the places desktops agree on.
+pub fn find_avatar(username: &str) -> Option<PathBuf> {
+  let mut candidates = Vec::new();
+
+  if let Some(directory) = config_dir() {
+    candidates.extend(
+      greet_ipc::user::CONFIG_AVATAR_NAMES
+        .iter()
+        .map(|name| directory.join(name)),
+    );
+  }
+
+  if let Some(home) = dirs::home_dir() {
+    candidates.extend(
+      greet_ipc::user::HOME_AVATAR_NAMES
+        .iter()
+        .map(|name| home.join(name)),
+    );
+  }
+
+  candidates.push(PathBuf::from(greet_ipc::user::ACCOUNTS_SERVICE_ICON_DIR).join(username));
+
+  candidates.into_iter().find(|path| path.is_file())
 }

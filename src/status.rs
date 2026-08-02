@@ -190,7 +190,13 @@ impl StatusOverlay {
       cx.on_display_changed({
         let this = cx.weak_entity();
         move |cx| {
-          this.update(cx, |this, cx| this.sync(cx)).log_err();
+          // Deferred: this runs while the Wayland client's state is borrowed
+          // for the output event, and `sync` reads `cx.displays()` and may open
+          // a window, both of which borrow it again.
+          let this = this.clone();
+          cx.defer(move |cx| {
+            this.update(cx, |this, cx| this.sync(cx)).log_err();
+          });
         }
       }),
     ];

@@ -13,6 +13,7 @@ mod config;
 mod confirmation;
 mod db;
 mod dbus;
+mod greet;
 mod icon;
 mod input;
 mod instance;
@@ -79,6 +80,9 @@ enum Command {
   },
   /// Lock the screen
   Lock,
+  /// Show the login screen. Started by launch-greetd inside the greeter
+  /// session; --foreground and --no-keyboard-capture do not apply.
+  Greet,
 }
 
 /// What the app does once it is up.
@@ -104,9 +108,20 @@ fn main() -> Result<()> {
     return print_recent_notifications(*count);
   }
 
+  // Before instance::acquire(), deliberately. That binds the abstract socket
+  // named "launch", which is shared across the whole network namespace, so the
+  // greeter would either send nonsense to the logged-in user's daemon or, with
+  // --foreground, tell it to quit. It also must not daemonize: the compositor
+  // that started it tracks its lifetime.
+  if let Some(Command::Greet) = &args.command {
+    return run_greeter();
+  }
+
   let startup = match args.command {
     Some(Command::Daemon) => Startup::Daemon,
     Some(Command::Lock) => Startup::Lock,
+    // Handled above; it never reaches the app.
+    Some(Command::Greet) => return Ok(()),
     // Handled above; it never reaches the app.
     Some(Command::Notifications { .. }) => return Ok(()),
     None => Startup::Launcher { panel: args.panel },
@@ -236,6 +251,40 @@ fn fork_and_run(
     let receiver = instance::listen(listener);
     run_app(startup, no_keyboard_capture, receiver);
   }
+}
+
+/// Runs the login screen, and nothing else.
+///
+/// Five of the fifteen services [`run_app`] starts are wanted here, which is
+/// why this is a separate function rather than a branch inside it. Of the rest:
+/// the notification daemon would try to own a bus name and open the history
+/// database, the status overlay would open a second surface alongside the
+/// greeter's own, a polkit agent on a login screen is simply wrong, and the
+/// lock screen would subscribe to logind lock requests for the greeter's own
+/// session. The remainder - the launcher, its matcher, audio, the OSDs, niri
+/// IPC, the clipboard watcher - have no reachable entry point with no launcher
+/// window.
+///
+/// There is no [`Startup`] variant for this: `run_app` is never reached.
+fn run_greeter() -> Result<()> {
+  Application::with_platform(gpui_linux::current_platform(false))
+    .with_assets(Assets)
+    .with_quit_mode(QuitMode::Explicit)
+    .run(|cx| {
+      if let Err(error) = load_embedded_fonts(cx) {
+        error!(?error, "Failed to load embedded fonts");
+      }
+
+      config::init(cx);
+      // Only sets a global; the connection itself is lazy, and the clock uses
+      // it to show a battery if the greeter user can read upower.
+      dbus::init(cx);
+      status::init_clock(cx);
+      InputState::init(cx);
+      greet::start(cx);
+    });
+
+  Ok(())
 }
 
 fn run_app(startup: Startup, no_keyboard_capture: bool, receiver: Receiver<Message>) {
