@@ -191,7 +191,7 @@ pub enum SinkListEvent {
 
 #[derive(Debug, Clone)]
 pub enum SourceListEvent {
-  Added(SourceInfo),
+  Added(Box<SourceInfo>),
   Removed(SourceId),
   DefaultChanged(Option<SourceId>),
 }

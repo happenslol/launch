@@ -116,7 +116,7 @@ fn parse_menu_item(value: &zvariant::OwnedValue) -> Option<MenuItem> {
       if let Value::Dict(dict) = v {
         let mut map = HashMap::new();
         for (key, value) in dict.iter() {
-          if let Some(key_str) = <&str>::try_from(key).ok() {
+          if let Ok(key_str) = <&str>::try_from(key) {
             // Dict values from a{sv} are variant-wrapped, unwrap them
             let unwrapped = match value {
               Value::Value(inner) => inner.try_to_owned().ok()?,
@@ -163,10 +163,10 @@ fn parse_menu_item(value: &zvariant::OwnedValue) -> Option<MenuItem> {
 
   let mut child_items = Vec::new();
   for child_value in &raw_children {
-    if let Ok(owned) = child_value.try_to_owned() {
-      if let Some(item) = parse_menu_item(&owned) {
-        child_items.push(item);
-      }
+    if let Ok(owned) = child_value.try_to_owned()
+      && let Some(item) = parse_menu_item(&owned)
+    {
+      child_items.push(item);
     }
   }
 
@@ -370,7 +370,7 @@ impl TrayMenu {
     let id = item.id;
     let children = item.children.clone();
     let proxy = self.proxy.clone();
-    let parent_items = std::mem::replace(&mut self.items, Vec::new());
+    let parent_items = std::mem::take(&mut self.items);
     let parent_selection = self.selected_index;
 
     self.menu_stack.push((parent_items, parent_selection));
@@ -385,18 +385,17 @@ impl TrayMenu {
       let needs_update = proxy.about_to_show(id).await.unwrap_or(false);
       if needs_update {
         let layout = proxy.get_layout(id, -1, vec![]).await;
-        if let Ok((_revision, raw)) = layout {
-          if let Ok(new_items) = parse_layout(raw) {
-            this
-              .update_in(cx, |this, _window, cx| {
-                this.items = new_items;
-                let visible = visible_items(&this.items);
-                this.selected_index =
-                  first_selectable_index(&visible, None, Direction::Forward);
-                cx.notify();
-              })
-              .log_err();
-          }
+        if let Ok((_revision, raw)) = layout
+          && let Ok(new_items) = parse_layout(raw)
+        {
+          this
+            .update_in(cx, |this, _window, cx| {
+              this.items = new_items;
+              let visible = visible_items(&this.items);
+              this.selected_index = first_selectable_index(&visible, None, Direction::Forward);
+              cx.notify();
+            })
+            .log_err();
         }
       }
     })
@@ -571,18 +570,17 @@ impl Render for TrayMenu {
           .when(is_selected && enabled, |this| this.bg(rgba(0xFFFFFF0F)))
           .when(!enabled, |this| this.text_color(rgba(0xFFFFFF44)))
           .when(enabled, |this| {
-            this.cursor_pointer().on_mouse_move({
-              let index = index;
-              cx.listener(move |this, _, _, cx| {
+            this
+              .cursor_pointer()
+              .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if this.selected_index != Some(index) {
                   this.selected_index = Some(index);
                   cx.notify();
                 }
-              })
-            })
-            .on_click(cx.listener(move |this, _, window, cx| {
-              this.activate_item_at(index, window, cx);
-            }))
+              }))
+              .on_click(cx.listener(move |this, _, window, cx| {
+                this.activate_item_at(index, window, cx);
+              }))
           })
           .when(has_toggles, |this| {
             this.child(

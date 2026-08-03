@@ -161,6 +161,9 @@ impl std::fmt::Debug for TrayItem {
   }
 }
 
+// The `Item` prefix distinguishes these from the host-level registration
+// events the SNI spec also defines, so it is kept despite being shared.
+#[allow(clippy::enum_variant_names)]
 pub enum SystrayEvent {
   ItemAdded(TrayItem),
   ItemRemoved { address: String },
@@ -239,7 +242,7 @@ pub fn init(cx: &mut App) {
 }
 
 async fn run_host(entity: Entity<Systray>, cx: &mut gpui::AsyncApp) -> Result<()> {
-  let conn_task = cx.update(|cx| GlobalDbusConnection::session(cx));
+  let conn_task = cx.update(GlobalDbusConnection::session);
   let connection: zbus::Connection = conn_task
     .await
     .ok_or_else(|| anyhow::anyhow!("failed to get session bus connection"))?;
@@ -392,23 +395,21 @@ async fn run_host(entity: Entity<Systray>, cx: &mut gpui::AsyncApp) -> Result<()
           let emitter = iface_ref.signal_emitter();
 
           for item in &removed_items {
-            Watcher::emit_item_unregistered(&emitter, item)
-              .await
-              .log_err();
+            Watcher::emit_item_unregistered(emitter, item).await.log_err();
           }
 
           if !removed_items.is_empty() {
-            Watcher::registered_status_notifier_items_refresh(&emitter)
+            Watcher::registered_status_notifier_items_refresh(emitter)
               .await
               .log_err();
           }
 
           if removed_host {
-            Watcher::emit_host_unregistered(&emitter).await.log_err();
+            Watcher::emit_host_unregistered(emitter).await.log_err();
 
             let hosts_empty = watcher_hosts.lock().expect("mutex poisoned").is_empty();
             if hosts_empty {
-              Watcher::is_status_notifier_host_registered_refresh(&emitter)
+              Watcher::is_status_notifier_host_registered_refresh(emitter)
                 .await
                 .log_err();
             }
@@ -463,6 +464,8 @@ async fn listen_item_signals(
   let new_title = proxy.receive_new_title().await?;
   let new_status = proxy.receive_new_status().await?;
 
+  // Variants mirror the SNI signal names and their generated `api` types.
+  #[allow(clippy::enum_variant_names)]
   enum ItemSignal {
     NewIcon(#[allow(dead_code)] api::NewIcon),
     NewTitle(#[allow(dead_code)] api::NewTitle),

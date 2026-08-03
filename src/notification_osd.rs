@@ -615,7 +615,7 @@ impl NotificationsView {
     let id = notification.id;
     let has_default = notification.actions.iter().any(|action| action.key == "default");
     let border_color = match notification.urgency {
-      Urgency::Critical => rgba(0xE0524Fcc),
+      Urgency::Critical => rgba(0xE0524FCC),
       _ => rgba(0xFFFFFF15),
     };
 

@@ -16,17 +16,12 @@ const MARKDOWN_CONTEXT: &str = "markdown";
 
 actions!(markdown, [Copy, CopyRaw]);
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 enum SelectMode {
+  #[default]
   Character,
   Word { anchor_range: Range<usize> },
   Line { anchor_range: Range<usize> },
-}
-
-impl Default for SelectMode {
-  fn default() -> Self {
-    SelectMode::Character
-  }
 }
 
 #[derive(Clone, Default)]
@@ -468,15 +463,16 @@ fn offset_for_position(position: Point<Pixels>, blocks: &[(TextLayout, Range<usi
     // In the gap between the previous block and this one: snap to
     // the end of the previous block or the start of this one,
     // whichever is closer.
-    if let Some((prev_bottom, prev_end_offset)) = previous_block_end {
-      if position.y >= prev_bottom && position.y < block_top {
-        let mid = prev_bottom + (block_top - prev_bottom) / 2.0;
-        return if position.y < mid {
-          prev_end_offset
-        } else {
-          document_range.start
-        };
-      }
+    if let Some((prev_bottom, prev_end_offset)) = previous_block_end
+      && position.y >= prev_bottom
+      && position.y < block_top
+    {
+      let mid = prev_bottom + (block_top - prev_bottom) / 2.0;
+      return if position.y < mid {
+        prev_end_offset
+      } else {
+        document_range.start
+      };
     }
 
     if position.y >= block_top && position.y < block_bottom {

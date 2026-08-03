@@ -14,20 +14,11 @@ use futures::future::Shared;
 use gpui::{App, AppContext, AsyncApp, Global, Task};
 use tracing::error;
 
+#[derive(Default)]
 pub struct GlobalDbusConnection {
   system: Option<Shared<Task<Option<zbus::Connection>>>>,
   session: Option<Shared<Task<Option<zbus::Connection>>>>,
   _ticks: Vec<Task<()>>,
-}
-
-impl Default for GlobalDbusConnection {
-  fn default() -> Self {
-    Self {
-      system: None,
-      session: None,
-      _ticks: Vec::new(),
-    }
-  }
 }
 
 impl Global for GlobalDbusConnection {}

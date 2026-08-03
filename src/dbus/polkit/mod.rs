@@ -473,7 +473,7 @@ pub fn init(cx: &mut App, events: Sender<AgentEvent>) {
 
 async fn register(events: Sender<AgentEvent>, cx: &mut AsyncApp) -> Result<()> {
   let connection = cx
-    .update(|cx| GlobalDbusConnection::system(cx))
+    .update(GlobalDbusConnection::system)
     .await
     .ok_or_else(|| anyhow::anyhow!("system bus connection unavailable"))?;
 

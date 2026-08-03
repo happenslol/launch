@@ -1293,10 +1293,10 @@ impl WifiPanel {
 
 impl Focusable for WifiPanel {
   fn focus_handle(&self, cx: &App) -> FocusHandle {
-    if let Some((popup, _)) = &self.password_popup {
-      if !popup.read(cx).closing {
-        return popup.read(cx).focus_handle(cx);
-      }
+    if let Some((popup, _)) = &self.password_popup
+      && !popup.read(cx).closing
+    {
+      return popup.read(cx).focus_handle(cx);
     }
     if let Some((submenu, _)) = &self.action_submenu {
       submenu.read(cx).focus_handle(cx)

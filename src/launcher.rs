@@ -288,12 +288,12 @@ impl Launcher {
               let window_id = niri::find_window_by_app_id(&entry.appid, cx);
               let entry = entry.clone();
               cx.spawn_in(window, async move |_, cx| {
-                if let Some(conn) = conn_task.await {
-                  if dbus::application::activate(&conn, &app_id).await.is_ok() {
-                    debug!(app_id, "Launched via dbus activation");
-                    let _ = cx.update(|window, _| window.remove_window());
-                    return;
-                  }
+                if let Some(conn) = conn_task.await
+                  && dbus::application::activate(&conn, &app_id).await.is_ok()
+                {
+                  debug!(app_id, "Launched via dbus activation");
+                  let _ = cx.update(|window, _| window.remove_window());
+                  return;
                 }
                 if let Some(window_id) = window_id {
                   debug!(app_id = entry.appid.as_str(), "Falling back to niri focus");
@@ -747,7 +747,7 @@ impl Render for Launcher {
         self
           .tray_bounds
           .entry(item.address().to_string())
-          .or_insert_with(BoundsHandle::new)
+          .or_default()
           .clone()
       })
       .collect();

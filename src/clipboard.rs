@@ -200,24 +200,14 @@ impl ClipboardPanel {
       };
 
       let content = match content_type {
-        ContentType::Image => {
-          let image_entry = mime_data
-            .iter()
-            .find(|(mime, _)| mime.starts_with("image/"));
-
-          if let Some((mime, bytes)) = image_entry {
-            if let Some(format) = ImageFormat::from_mime_type(mime) {
-              Some(PreviewContent::Image(Arc::new(Image::from_bytes(
-                format,
-                bytes.clone(),
-              ))))
-            } else {
-              None
-            }
-          } else {
-            None
-          }
-        }
+        ContentType::Image => mime_data
+          .iter()
+          .find(|(mime, _)| mime.starts_with("image/"))
+          .and_then(|(mime, bytes)| {
+            ImageFormat::from_mime_type(mime).map(|format| {
+              PreviewContent::Image(Arc::new(Image::from_bytes(format, bytes.clone())))
+            })
+          }),
         _ => {
           let text = TEXT_MIME_TYPES
             .iter()
@@ -344,7 +334,7 @@ impl Render for ClipboardPanel {
       let needs_load = self
         .preview
         .as_ref()
-        .map_or(true, |preview| preview.item_id != item.id);
+        .is_none_or(|preview| preview.item_id != item.id);
 
       if needs_load {
         self.load_preview(item.id, item.content_type, window, cx);

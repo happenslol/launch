@@ -103,7 +103,7 @@ impl WorkspaceOsd {
       return;
     }
 
-    let persistent = dots.iter().any(|dot| *dot == DotState::Urgent);
+    let persistent = dots.contains(&DotState::Urgent);
     let count = dots.len();
 
     if let Some(window) = self.windows.get(output) {

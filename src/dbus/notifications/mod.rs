@@ -731,7 +731,7 @@ pub fn init(cx: &mut App) {
 }
 
 async fn run_server(entity: Entity<Notifications>, cx: &mut gpui::AsyncApp) -> Result<()> {
-  let connection_task = cx.update(|cx| GlobalDbusConnection::session(cx));
+  let connection_task = cx.update(GlobalDbusConnection::session);
   let connection = connection_task
     .await
     .ok_or_else(|| anyhow::anyhow!("failed to get session bus connection"))?;

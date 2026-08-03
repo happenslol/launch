@@ -178,10 +178,10 @@ pub fn get_icon(name: &str, theme_path: Option<&str>) -> Option<PathBuf> {
   }
 
   // SNI's IconThemePath should be searched before the standard XDG dirs
-  if let Some(theme_path) = theme_path {
-    if let Some(found) = find_in_theme_path(theme_path, name) {
-      return Some(found);
-    }
+  if let Some(theme_path) = theme_path
+    && let Some(found) = find_in_theme_path(theme_path, name)
+  {
+    return Some(found);
   }
 
   freedesktop_icons::lookup(name)

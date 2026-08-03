@@ -313,7 +313,7 @@ impl AudioSourcesPanel {
             SourceListEvent::Added(source_info) => {
               let _ = this.update_in(cx, |this, window, cx| {
                 let new_entry =
-                  SourceEntry::new(source_info, &this.favorites, &audio_state, window, cx);
+                  SourceEntry::new(*source_info, &this.favorites, &audio_state, window, cx);
                 this.subscribe_to_source_entry(&new_entry, window, cx);
                 this.sources.push(new_entry);
 

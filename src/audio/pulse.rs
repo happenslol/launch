@@ -920,7 +920,7 @@ impl PulseState {
       };
 
       this.sources.insert(info.index, managed.clone());
-      list_event = Some(SourceListEvent::Added(managed));
+      list_event = Some(SourceListEvent::Added(Box::new(managed)));
     }
 
     // Now send events after releasing the source borrow
