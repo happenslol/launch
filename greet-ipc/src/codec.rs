@@ -208,6 +208,7 @@ mod tests {
       Event::Failed {
         source: AuthSource::Password,
         failure: crate::AuthFailure::Rejected,
+        retry: true,
       },
       Event::Authenticated {
         via: AuthSource::Fingerprint,

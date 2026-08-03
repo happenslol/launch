@@ -240,13 +240,32 @@ impl Worker {
   /// Ends a worker that has not opened a session.
   ///
   /// Safe precisely because it hasn't: a worker still in its PAM conversation
-  /// owes no teardown. A `Cancel` message alone is not enough - a worker blocked
-  /// inside `pam_fprintd` is in libpam, not reading its socket - so this is the
-  /// escalation that always works.
+  /// owes no teardown. The same must never be done to one past `open_session`.
   pub fn kill_configuring(&self) {
     if let Err(error) = kill(self.pid, Signal::SIGKILL) {
       debug!(?error, pid = %self.pid, "Worker was already gone");
     }
+  }
+
+  /// Asks a configuring worker to stop, then makes it.
+  ///
+  /// The `Cancel` message is the step that matters: a worker parked in `recv`
+  /// returns from PAM and calls `pam_end` itself, releasing whatever its stack
+  /// claimed. One blocked inside `pam_fprintd` is in libpam rather than reading
+  /// its socket and will never see it, hence the signal.
+  ///
+  /// That signal is SIGKILL, with no SIGTERM step. greetd escalates
+  /// SIGTERM->SIGKILL, but a worker installs no SIGTERM handler, so both are
+  /// uncatchable terminations that run no PAM teardown - the polite step buys
+  /// nothing here beyond a second timer. fprintd releases the reader when its
+  /// D-Bus client disconnects, which a dying process does either way.
+  pub async fn cancel_configuring(&self, grace: std::time::Duration) {
+    if let Err(error) = self.send(&ParentToWorker::Cancel).await {
+      debug!(?error, pid = %self.pid, "Could not ask a worker to stop");
+    }
+
+    tokio::time::sleep(grace).await;
+    self.kill_configuring();
   }
 
   pub async fn recv(&self) -> Result<WorkerToParent> {

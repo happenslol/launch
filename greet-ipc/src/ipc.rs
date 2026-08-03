@@ -188,6 +188,15 @@ pub enum Event {
   Failed {
     source: AuthSource,
     failure: AuthFailure,
+    /// Whether this path is armed again and will send a fresh [`Event::Prompt`].
+    ///
+    /// A rejected password re-arms in place, so the greeter waits for the new
+    /// prompt; anything else leaves the path dead, and the greeter has to ask
+    /// for a whole new attempt. Without this the greeter would have to infer
+    /// which happened from the failure kind, and guessing wrong means either a
+    /// login screen waiting for a prompt nobody will send, or one that discards
+    /// a live fingerprint worker on every typo.
+    retry: bool,
   },
   /// PAM accepted. The greeter should send [`Request::StartSession`].
   Authenticated {

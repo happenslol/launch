@@ -81,34 +81,66 @@ async fn serve(stream: async_net::unix::UnixStream) -> Result<(), Box<dyn std::e
         for step in script() {
           std::thread::sleep(std::time::Duration::from_millis(700));
 
-          let event = match step.split_once(':') {
-            Some(("info", message)) => Event::Info {
+          // A step can be more than one frame, because some of the daemon's
+          // transitions are: it never reports a fingerprint path failing without
+          // also turning the indicator off, and a stub that sent one without the
+          // other would be testing a state the daemon cannot produce.
+          let events = match step.split_once(':') {
+            Some(("info", message)) => vec![Event::Info {
               source: AuthSource::Fingerprint,
               message: message.to_owned(),
-            },
-            Some(("error", message)) => Event::Error {
+            }],
+            Some(("error", message)) => vec![Event::Error {
               source: AuthSource::Password,
               message: message.to_owned(),
-            },
-            Some(("sessionfail", message)) => Event::SessionFailed {
+            }],
+            Some(("sessionfail", message)) => vec![Event::SessionFailed {
               message: message.to_owned(),
-            },
-            Some(("requestfail", message)) => Event::RequestFailed {
+            }],
+            Some(("requestfail", message)) => vec![Event::RequestFailed {
               message: message.to_owned(),
-            },
+            }],
+            // A fingerprint that failed to match, while the password worker
+            // carries on: the field must stay usable and keep its prompt.
+            Some(("fpfail", message)) => vec![
+              Event::Fingerprint {
+                state: FingerprintState::Off,
+              },
+              Event::Failed {
+                source: AuthSource::Fingerprint,
+                failure: AuthFailure::Error {
+                  message: message.to_owned(),
+                },
+                retry: false,
+              },
+            ],
             _ => match step.as_str() {
-              "reject" => Event::Failed {
+              // The dead-path half of rejection: the greeter should ask for a
+              // whole new attempt. Typing a wrong password exercises the other
+              // half, where the daemon re-arms and only a fresh prompt follows.
+              "reject" => vec![Event::Failed {
                 source: AuthSource::Password,
                 failure: AuthFailure::Rejected,
-              },
+                retry: false,
+              }],
+              // The reader giving up after too many failed matches.
+              "fpexhausted" => vec![
+                Event::Error {
+                  source: AuthSource::Fingerprint,
+                  message: "Too many attempts, use your password".to_owned(),
+                },
+                Event::Fingerprint {
+                  state: FingerprintState::Off,
+                },
+              ],
               // As though a finger landed on the reader: the greeter should go
               // straight to starting a session without anything being typed.
-              "win" => Event::Authenticated {
+              "win" => vec![Event::Authenticated {
                 via: AuthSource::Fingerprint,
-              },
-              "reading" => Event::Fingerprint {
+              }],
+              "reading" => vec![Event::Fingerprint {
                 state: FingerprintState::Reading,
-              },
+              }],
               other => {
                 eprintln!("   unknown script step {other:?}");
                 continue;
@@ -116,22 +148,45 @@ async fn serve(stream: async_net::unix::UnixStream) -> Result<(), Box<dyn std::e
             },
           };
 
-          send(&mut writer, event).await?;
+          for event in events {
+            send(&mut writer, event).await?;
+          }
         }
       }
-      Request::Password { value } => {
-        let event = match value.expose() == GOOD_PASSWORD {
-          true => Event::Authenticated {
-            via: AuthSource::Password,
-          },
-          false => Event::Failed {
-            source: AuthSource::Password,
-            failure: AuthFailure::Rejected,
-          },
-        };
+      Request::Password { value } => match value.expose() == GOOD_PASSWORD {
+        true => {
+          send(
+            &mut writer,
+            Event::Authenticated {
+              via: AuthSource::Password,
+            },
+          )
+          .await?
+        }
+        // Re-armed rather than abandoned, which is what the daemon does with a
+        // rejected password - so a fresh prompt has to follow, or the greeter
+        // would sit waiting for one.
+        false => {
+          send(
+            &mut writer,
+            Event::Failed {
+              source: AuthSource::Password,
+              failure: AuthFailure::Rejected,
+              retry: true,
+            },
+          )
+          .await?;
 
-        send(&mut writer, event).await?;
-      }
+          send(
+            &mut writer,
+            Event::Prompt {
+              source: AuthSource::Password,
+              echo: false,
+            },
+          )
+          .await?;
+        }
+      },
       Request::Cancel => {}
       Request::StartSession => send(&mut writer, Event::SessionStarted).await?,
     }

@@ -69,6 +69,41 @@ pub enum Phase {
   Unavailable(SharedString),
 }
 
+/// What a [`Event::Failed`] does to the password field.
+///
+/// Split out because getting it wrong is invisible: the difference between
+/// waiting for a prompt and asking for a new attempt is a login screen that
+/// looks completely normal and silently swallows everything typed into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rejection {
+  /// Nothing at all.
+  Ignore,
+  /// Say so, but leave the password field exactly as it is.
+  ShowOnly,
+  /// This path is armed again; the field goes live and waits for its prompt.
+  WaitForPrompt,
+  /// This path is dead; ask the daemon to start over.
+  NewAttempt,
+}
+
+fn rejection(phase: &Phase, source: AuthSource, retry: bool) -> Rejection {
+  match (phase, source) {
+    // The race is over and the session is on its way. A losing worker's
+    // complaint would only replace "Starting session" with an error for whatever
+    // is left of the login screen's life.
+    (Phase::Starting, _) => Rejection::Ignore,
+    // A fingerprint giving up leaves the password alone. In particular it must
+    // not clear `prompt_ready`: the password worker is still parked on its
+    // prompt, and pretending otherwise sends the next thing typed to
+    // `pending_password` to wait for a prompt that has already been and gone.
+    (_, AuthSource::Fingerprint) => Rejection::ShowOnly,
+    (_, AuthSource::Password) => match retry {
+      true => Rejection::WaitForPrompt,
+      false => Rejection::NewAttempt,
+    },
+  }
+}
+
 /// Shared state of the login screen, rendered by a [`GreetScreen`] per output.
 pub struct Greeter {
   client: Option<GreetClient>,
@@ -86,8 +121,12 @@ pub struct Greeter {
   primary_output: Option<SharedString>,
   /// Why the last attempt failed, if it did.
   error: Option<SharedString>,
-  /// Whatever PAM had to say during an attempt.
-  hint: Option<SharedString>,
+  /// Whatever PAM had to say during an attempt, and which worker said it.
+  ///
+  /// The source is kept because a hint outlives the thing that produced it:
+  /// "Swipe your finger" has to go when the reader does, or the screen ends up
+  /// asking for a finger nothing is listening for.
+  hint: Option<(AuthSource, SharedString)>,
   /// Whether an attempt was turned down just now, which the field is outlined
   /// for.
   rejected: bool,
@@ -267,8 +306,8 @@ impl Greeter {
 
       Event::Prompt { .. } => false,
 
-      Event::Info { message, .. } => {
-        self.hint = Some(message.into());
+      Event::Info { source, message } => {
+        self.hint = Some((source, message.into()));
         false
       }
 
@@ -279,24 +318,38 @@ impl Greeter {
 
       Event::Fingerprint { state } => {
         self.fingerprint = state.into();
+
+        // Whatever the reader last asked for is no longer being waited on.
+        if self.fingerprint == FingerprintState::Off
+          && matches!(self.hint, Some((AuthSource::Fingerprint, _)))
+        {
+          self.hint = None;
+        }
+
         false
       }
 
-      Event::Failed { source, failure } => {
-        self.prompt_ready = false;
-        self.pending_password = None;
-
-        match failure {
-          // The outlined field is the whole message.
-          AuthFailure::Rejected => self.reject(cx),
-          AuthFailure::Error { message } => self.error = Some(message.into()),
-        }
-
-        // A fingerprint giving up leaves the password alone, and vice versa; only
-        // a failure of the path being waited on returns the screen to the user.
-        if source == AuthSource::Password {
-          self.clear_password(cx);
-          self.begin(cx);
+      Event::Failed {
+        source,
+        failure,
+        retry,
+      } => {
+        match rejection(&self.phase, source, retry) {
+          Rejection::Ignore => {}
+          Rejection::ShowOnly => self.show_failure(failure, cx),
+          // The daemon re-armed this path and a fresh prompt is coming, so the
+          // field goes live without a new attempt - which would discard a
+          // fingerprint worker that is still running.
+          Rejection::WaitForPrompt => {
+            self.show_failure(failure, cx);
+            self.disarm_password(cx);
+            self.phase = Phase::Ready;
+          }
+          Rejection::NewAttempt => {
+            self.show_failure(failure, cx);
+            self.disarm_password(cx);
+            self.begin(cx);
+          }
         }
 
         false
@@ -335,6 +388,21 @@ impl Greeter {
         false
       }
     }
+  }
+
+  fn show_failure(&mut self, failure: AuthFailure, cx: &mut Context<Self>) {
+    match failure {
+      // The outlined field is the whole message.
+      AuthFailure::Rejected => self.reject(cx),
+      AuthFailure::Error { message } => self.error = Some(message.into()),
+    }
+  }
+
+  /// Forgets that a worker was waiting on the field, and empties it.
+  fn disarm_password(&mut self, cx: &mut Context<Self>) {
+    self.prompt_ready = false;
+    self.pending_password = None;
+    self.clear_password(cx);
   }
 
   /// Asks the daemon to start authenticating the selected user.
@@ -403,7 +471,7 @@ impl Greeter {
   }
 
   pub fn hint(&self) -> Option<SharedString> {
-    self.hint.clone()
+    self.hint.as_ref().map(|(_, message)| message.clone())
   }
 
   pub fn rejected(&self) -> bool {
@@ -743,5 +811,54 @@ impl Render for GreetScreen {
       }),
     )
     .when(self.clock, |this| this.child(self.render_clock(cx)))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// The invariant worth pinning: a fingerprint failure never disturbs the
+  /// password field. Everything else on this screen is visible when it breaks;
+  /// this is the one that looks fine and silently swallows what is typed.
+  #[test]
+  fn a_fingerprint_failure_leaves_the_password_field_alone() {
+    for retry in [true, false] {
+      assert_eq!(
+        rejection(&Phase::Ready, AuthSource::Fingerprint, retry),
+        Rejection::ShowOnly,
+        "with retry = {retry}"
+      );
+    }
+  }
+
+  #[test]
+  fn a_rejected_password_waits_for_the_re_armed_prompt() {
+    assert_eq!(
+      rejection(&Phase::Ready, AuthSource::Password, true),
+      Rejection::WaitForPrompt
+    );
+  }
+
+  #[test]
+  fn a_dead_password_path_asks_for_a_new_attempt() {
+    assert_eq!(
+      rejection(&Phase::Ready, AuthSource::Password, false),
+      Rejection::NewAttempt
+    );
+  }
+
+  /// The losing worker's failure can arrive after the winner authenticated.
+  #[test]
+  fn nothing_is_applied_once_the_session_is_starting() {
+    for source in [AuthSource::Password, AuthSource::Fingerprint] {
+      for retry in [true, false] {
+        assert_eq!(
+          rejection(&Phase::Starting, source, retry),
+          Rejection::Ignore,
+          "for {source:?} with retry = {retry}"
+        );
+      }
+    }
   }
 }
