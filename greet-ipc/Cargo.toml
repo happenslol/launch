@@ -28,3 +28,11 @@ tokio = { version = "1.49", optional = true, default-features = false, features 
 [dev-dependencies]
 async-net = "2"
 futures = "0.3"
+
+# Without this, `cargo test -p greet-ipc` tries to build the example against the
+# default feature set - which has no IO adapters at all - and fails to compile
+# rather than skipping it.
+[[example]]
+name = "stub-greetd"
+path = "examples/stub-greetd.rs"
+required-features = ["futures-io"]
