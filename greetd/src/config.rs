@@ -6,7 +6,6 @@
 
 use std::fmt;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Deserializer, de};
@@ -93,26 +92,6 @@ pub struct GeneralConfig {
   /// backend.
   #[serde(default = "wayland")]
   pub session_type: String,
-  /// How long the login screen gets to exit on its own after a session has been
-  /// scheduled, before it is asked and then made to.
-  ///
-  /// It normally goes when told - the greeter quits on `SessionStarted` - so this
-  /// only matters for one that has hung, which is exactly when the machine must
-  /// still manage to log in.
-  #[serde(default = "patience", with = "seconds")]
-  pub patience: Duration,
-}
-
-/// Durations are written as whole seconds in the file; nothing here needs finer
-/// granularity, and `10` reads better than a duration spelling.
-mod seconds {
-  use std::time::Duration;
-
-  use serde::{Deserialize, Deserializer};
-
-  pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
-    u64::deserialize(deserializer).map(Duration::from_secs)
-  }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,10 +126,6 @@ fn wayland() -> String {
   "wayland".to_owned()
 }
 
-fn patience() -> Duration {
-  Duration::from_secs(10)
-}
-
 fn fingerprint_service() -> String {
   "launch-greeter-fingerprint".to_owned()
 }
@@ -169,7 +144,6 @@ impl Default for GeneralConfig {
       source_profile: true,
       seat: seat0(),
       session_type: wayland(),
-      patience: patience(),
     }
   }
 }
@@ -359,19 +333,6 @@ mod tests {
   fn rejects_an_unparseable_vt() {
     let document = MINIMAL.replace("vt = 1", "vt = \"sideways\"");
     assert!(toml::from_str::<Config>(&document).is_err());
-  }
-
-  #[test]
-  fn reads_patience_as_whole_seconds() {
-    let document = format!("{MINIMAL}\n[general]\npatience = 25\n");
-    let config: Config = toml::from_str(&document).expect("parses");
-    assert_eq!(config.general.patience, Duration::from_secs(25));
-  }
-
-  #[test]
-  fn defaults_patience_when_the_section_is_absent() {
-    let config: Config = toml::from_str(MINIMAL).expect("parses");
-    assert_eq!(config.general.patience, Duration::from_secs(10));
   }
 
   #[test]

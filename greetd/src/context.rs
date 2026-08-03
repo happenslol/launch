@@ -39,10 +39,22 @@ const CANCEL_GRACE: Duration = Duration::from_millis(250);
 /// field forever.
 const MAX_FINGERPRINT_FAILURES: u32 = 5;
 
-/// How long the login screen gets between being asked to leave and being made
-/// to. Short, because by this point it has already ignored `SessionStarted` and
-/// a SIGTERM, and the user is looking at a screen that says it is logging them
-/// in.
+/// How long the login screen gets to exit on its own after a session has been
+/// scheduled, before it is asked and then made to.
+///
+/// Not configurable, because there is no machine for which a different number is
+/// right. It only has to cover a *cooperative* shutdown - gpui teardown, the
+/// compositor quitting, `pam_close_session` - which is well under a second even
+/// on a slow disk, and the timer is aborted the moment that happens. Erring long
+/// is nearly free: the only cost of a generous value is how long somebody stares
+/// at a wedged login screen in a case that should never happen. The cost of a
+/// value that is too short is real, so this is not it.
+const EVICTION_PATIENCE: Duration = Duration::from_secs(5);
+
+/// How long it gets between being asked to leave and being made to.
+///
+/// Shorter, because by this point it has ignored both `SessionStarted` and a
+/// SIGTERM, while the user reads a screen that says it is logging them in.
 const EVICTION_GRACE: Duration = Duration::from_secs(2);
 
 /// Where the last successful login is recorded, so the screen opens on the
@@ -967,8 +979,6 @@ impl Context {
   /// daemon with a timer wheel already running, and a signal handler racing the
   /// state it would have to inspect is the harder thing to get right.
   async fn evict_greeter(self: Rc<Self>) {
-    let patience = self.config.general.patience;
-
     // Taken from the session it is protecting rather than passed in, so the
     // schedule time lives in exactly one place.
     let Some(scheduled_at) = self
@@ -985,7 +995,7 @@ impl Context {
     // Measured from the schedule, which is the whole point. greetd measures from
     // when the attempt was created, so a user who took longer than the patience
     // to type their password had the SIGTERM step skipped entirely.
-    tokio::time::sleep(patience.saturating_sub(scheduled_at.elapsed())).await;
+    tokio::time::sleep(EVICTION_PATIENCE.saturating_sub(scheduled_at.elapsed())).await;
 
     let inner = self.inner.lock().await;
 
