@@ -14,10 +14,11 @@ use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 
 use anyhow::{Context as _, Result, bail};
 use nix::fcntl::{F_GETFD, F_SETFD, FdFlag, fcntl};
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::{ForkResult, Pid, fork};
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixDatagram;
-use tracing::warn;
+use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::config::VtSelection;
@@ -234,6 +235,18 @@ impl Worker {
       .await
       .context("writing to the worker")?;
     Ok(())
+  }
+
+  /// Ends a worker that has not opened a session.
+  ///
+  /// Safe precisely because it hasn't: a worker still in its PAM conversation
+  /// owes no teardown. A `Cancel` message alone is not enough - a worker blocked
+  /// inside `pam_fprintd` is in libpam, not reading its socket - so this is the
+  /// escalation that always works.
+  pub fn kill_configuring(&self) {
+    if let Err(error) = kill(self.pid, Signal::SIGKILL) {
+      debug!(?error, pid = %self.pid, "Worker was already gone");
+    }
   }
 
   pub async fn recv(&self) -> Result<WorkerToParent> {

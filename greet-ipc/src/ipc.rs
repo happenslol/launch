@@ -201,6 +201,13 @@ pub enum Event {
   SessionFailed {
     message: String,
   },
+  /// A request could not be carried out - it arrived in a state that made no
+  /// sense, or named something that does not exist. Surfaced rather than only
+  /// logged, so a greeter that has got out of step says so instead of sitting
+  /// there looking ready.
+  RequestFailed {
+    message: String,
+  },
 }
 
 #[cfg(test)]

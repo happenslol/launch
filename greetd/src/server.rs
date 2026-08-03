@@ -2,6 +2,7 @@
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use anyhow::{Context as _, Result};
 use nix::sys::stat::Mode;
@@ -98,6 +99,17 @@ pub async fn main(mut config: Config) -> Result<()> {
 
   let users = crate::users::to_ipc(&accounts, &avatars);
 
+  // The configured default only counts if it is actually on offer; otherwise the
+  // login screen would open on somebody it cannot authenticate.
+  let default_user = config
+    .users
+    .default
+    .as_ref()
+    .filter(|wanted| users.iter().any(|user| &user.name == *wanted))
+    .cloned()
+    .or_else(|| users.first().map(|user| user.name.clone()))
+    .unwrap_or_default();
+
   let terminal = terminal_mode(config.terminal.vt, config.terminal.switch)?;
   if let TerminalMode::Terminal { vt, .. } = &terminal {
     info!(vt, switch = config.terminal.switch, "Using VT");
@@ -109,7 +121,7 @@ pub async fn main(mut config: Config) -> Result<()> {
     wait_for_vt(&terminal)?;
   }
 
-  let context = Context::new(config, terminal.clone(), listener_path, users);
+  let context = Context::new(config, terminal.clone(), listener_path, users, default_user);
 
   if let Err(error) = context.greet().await {
     error!(?error, "Could not start the greeter");
@@ -123,7 +135,7 @@ pub async fn main(mut config: Config) -> Result<()> {
   Ok(())
 }
 
-async fn run_signal_loop(context: &std::rc::Rc<Context>, listener: Listener) {
+async fn run_signal_loop(context: &Rc<Context>, listener: Listener) {
   let mut child = match signal(SignalKind::child()) {
     Ok(stream) => stream,
     Err(error) => {
@@ -166,11 +178,8 @@ async fn run_signal_loop(context: &std::rc::Rc<Context>, listener: Listener) {
       }
       accepted = listener.listener.accept() => {
         match accepted {
-          // Serving the greeter is not wired up yet; the connection is closed
-          // so a client fails fast rather than waiting on a silent socket.
           Ok((stream, _)) => {
-            warn!("Rejecting a greeter connection: the protocol is not implemented yet");
-            drop(stream);
+            tokio::task::spawn_local(crate::client::serve(Rc::clone(context), stream));
           }
           Err(error) => warn!(?error, "Failed to accept a greeter connection"),
         }

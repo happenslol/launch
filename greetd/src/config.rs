@@ -52,6 +52,11 @@ pub struct GreeterConfig {
   /// PAM service for the greeter session. Its auth stack is never run, so it
   /// only needs an account and session half.
   pub service: String,
+  /// Output the prompt is drawn on, e.g. `"eDP-1"`. The greeter has no config
+  /// of its own to read this from, so it is told. `None` leaves the choice to
+  /// the greeter, which takes the first output.
+  #[serde(default)]
+  pub primary_output: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,6 +108,10 @@ pub struct UsersConfig {
   /// Accounts to hide even when their uid is in range.
   #[serde(default)]
   pub exclude: Vec<String>,
+  /// Account selected when the login screen appears. Falls back to the first
+  /// one on offer when unset or not among them.
+  #[serde(default)]
+  pub default: Option<String>,
 }
 
 fn yes() -> bool {
@@ -146,6 +155,7 @@ impl Default for UsersConfig {
       maximum_uid: max_uid(),
       include: Vec::new(),
       exclude: Vec::new(),
+      default: None,
     }
   }
 }

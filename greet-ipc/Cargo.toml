@@ -24,3 +24,7 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 tokio = { version = "1.49", optional = true, default-features = false, features = [
   "io-util",
 ] }
+
+[dev-dependencies]
+async-net = "2"
+futures = "0.3"

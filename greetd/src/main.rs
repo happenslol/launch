@@ -14,6 +14,7 @@
 //! Adapted from greetd (<https://git.sr.ht/~kennylevinsen/greetd>).
 
 mod avatars;
+mod client;
 mod config;
 mod context;
 mod server;

@@ -78,6 +78,23 @@ impl AuthUser {
   }
 }
 
+impl AuthUser {
+  /// Builds a user from what the login daemon reported.
+  ///
+  /// The display name arrives already resolved, because the daemon is the only
+  /// side that can read the passwd entry for accounts other than its own.
+  pub fn from_ipc(user: greet_ipc::IpcUser) -> Self {
+    let initial = greet_ipc::user::initial(&user.display_name);
+
+    Self {
+      name: user.name.into(),
+      display_name: user.display_name.into(),
+      initial: initial.into(),
+      avatar: user.avatar.map(Arc::from),
+    }
+  }
+}
+
 /// What the fingerprint reader is up to, so the password field can show it.
 ///
 /// The lock screen drives fprintd itself and sets this directly; the greeter is

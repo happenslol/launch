@@ -2600,6 +2600,8 @@ dependencies = [
 name = "greet-ipc"
 version = "0.1.0"
 dependencies = [
+ "async-net",
+ "futures",
  "futures-util",
  "serde",
  "serde_json",

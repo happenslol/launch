@@ -12,21 +12,28 @@
 //! keyboard. With exactly one input field in the process there is nothing to
 //! keep in step across surfaces, and no question of which output has focus.
 
+mod client;
+
+use std::time::Duration;
+
 use gpui::{
-  App, Bounds, Context, DisplayId, Entity, Focusable, Global, IntoElement, MouseButton, Render,
-  SharedString, Size, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds,
-  WindowHandle, WindowKind, WindowOptions, div,
+  App, Bounds, Context, DisplayId, Entity, EventEmitter, Focusable, Global, IntoElement,
+  MouseButton, Render, SharedString, Size, Styled, Subscription, Task, Window,
+  WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
   px,
 };
+use greet_ipc::{AuthFailure, AuthSource, Event, PROTOCOL_VERSION, Request, Secret};
 use tracing::{debug, error, info, warn};
 
 use crate::auth_screen::{
-  AuthPrompt, AuthUser, FingerprintState, REJECTION_HIGHLIGHT, current_user, render_auth_screen,
+  AuthPrompt, AuthUser, FingerprintState, PasswordMirror, REJECTION_HIGHLIGHT,
+  apply_password_mirror, render_auth_screen,
 };
 use crate::config::ConfigState;
+use crate::greet::client::{ClientEvent, GreetClient};
 use crate::input::state::{InputEvent, InputState};
 use crate::status::{self, Clock};
 use crate::util::ResultExt;
@@ -64,9 +71,19 @@ pub enum Phase {
 
 /// Shared state of the login screen, rendered by a [`GreetScreen`] per output.
 pub struct Greeter {
+  client: Option<GreetClient>,
   users: Vec<AuthUser>,
   selected: usize,
   phase: Phase,
+  /// Whether a worker is actually blocked waiting for the password. Typing can
+  /// beat the PAM stack to it, and answering a prompt that has not arrived is an
+  /// error, so the value waits here instead.
+  prompt_ready: bool,
+  /// A password typed before the prompt arrived.
+  pending_password: Option<Secret>,
+  /// Output the daemon says should carry the prompt, which the greeter has no
+  /// config of its own to learn from.
+  primary_output: Option<SharedString>,
   /// Why the last attempt failed, if it did.
   error: Option<SharedString>,
   /// Whatever PAM had to say during an attempt.
@@ -80,9 +97,21 @@ pub struct Greeter {
   /// What `screens` was built for, so a display change that changes nothing is
   /// not acted on.
   displays: Vec<DisplayId>,
+  /// How long to wait before the next attempt to reach the daemon.
+  retry_delay: Duration,
+  _events: Option<Task<()>>,
   _rejection: Option<Task<()>>,
+  _retry: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
+
+/// First delay before reconnecting, doubled on each failure up to
+/// [`RETRY_MAX`]. A login screen never stops trying: one that gives up is a
+/// machine nobody can log into.
+const RETRY_INITIAL: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(5);
+
+impl EventEmitter<PasswordMirror> for Greeter {}
 
 impl Greeter {
   fn new(cx: &mut Context<Self>) -> Self {
@@ -100,31 +129,273 @@ impl Greeter {
       }
     })];
 
-    // Until the daemon is wired up there is one user to show: whoever this
-    // process runs as.
-    let users = current_user().into_iter().collect();
-
-    Self {
-      users,
+    let mut this = Self {
+      client: None,
+      users: Vec::new(),
       selected: 0,
-      phase: Phase::Ready,
+      phase: Phase::Connecting,
+      prompt_ready: false,
+      pending_password: None,
+      primary_output: None,
       error: None,
       hint: None,
       rejected: false,
       fingerprint: FingerprintState::Off,
       screens: Vec::new(),
       displays: Vec::new(),
+      retry_delay: RETRY_INITIAL,
+      _events: None,
       _rejection: None,
+      _retry: None,
       _subscriptions: subscriptions,
+    };
+
+    this.connect(cx);
+    this
+  }
+
+  /// Opens the socket and starts folding what comes back into this state.
+  fn connect(&mut self, cx: &mut Context<Self>) {
+    let (sender, receiver) = flume::unbounded();
+
+    self.phase = Phase::Connecting;
+    self.prompt_ready = false;
+    self.client = Some(GreetClient::connect(sender, cx));
+
+    self._events = Some(cx.spawn(async move |this, cx| {
+      while let Ok(event) = receiver.recv_async().await {
+        let resync = match this.update(cx, |this, cx| this.handle(event, cx)) {
+          Ok(resync) => resync,
+          // The login screen is gone; nothing left to deliver to.
+          Err(_) => break,
+        };
+
+        // Outside the update above, deliberately: opening a window draws it, and
+        // that draw reads this entity.
+        if resync && let Some(entity) = this.upgrade() {
+          cx.update(|cx| sync_screens(&entity, cx));
+        }
+      }
+    }));
+
+    self.request(Request::Hello {
+      version: PROTOCOL_VERSION,
+    });
+  }
+
+  fn request(&self, request: Request) {
+    let Some(client) = &self.client else {
+      debug!("No connection to send a request on");
+      return;
+    };
+
+    client.send(request);
+  }
+
+  /// Folds one frame from the daemon into this state, returning whether the
+  /// surfaces need rebuilding.
+  fn handle(&mut self, event: ClientEvent, cx: &mut Context<Self>) -> bool {
+    let mut resync = false;
+
+    match event {
+      ClientEvent::Message(message) => resync = self.apply(message, cx),
+      ClientEvent::Disconnected(reason) => self.disconnected(reason, cx),
     }
+
+    cx.notify();
+    resync
+  }
+
+  fn apply(&mut self, message: Event, cx: &mut Context<Self>) -> bool {
+    match message {
+      Event::Welcome {
+        version,
+        users,
+        default_user,
+        fingerprint,
+        primary_output,
+      } => {
+        if version != PROTOCOL_VERSION {
+          warn!(
+            daemon = version,
+            greeter = PROTOCOL_VERSION,
+            "Protocol version mismatch"
+          );
+        }
+
+        info!(count = users.len(), default_user, "Accounts offered");
+
+        self.users = users.into_iter().map(AuthUser::from_ipc).collect();
+        self.selected = self
+          .users
+          .iter()
+          .position(|user| user.name == default_user)
+          .unwrap_or(0);
+
+        self.primary_output = primary_output.map(SharedString::from);
+        self.retry_delay = RETRY_INITIAL;
+        self.fingerprint = match fingerprint {
+          true => FingerprintState::Starting,
+          false => FingerprintState::Off,
+        };
+
+        self.begin(cx);
+
+        // The daemon may have named a different output than the one guessed
+        // before it answered.
+        true
+      }
+
+      // Only the password worker's prompts are answered from the field; the
+      // fingerprint worker never asks for anything typed.
+      Event::Prompt {
+        source: AuthSource::Password,
+        ..
+      } => {
+        self.prompt_ready = true;
+
+        match self.pending_password.take() {
+          Some(secret) => {
+            self.phase = Phase::Verifying;
+            self.request(Request::Password { value: secret });
+          }
+          None => self.phase = Phase::Ready,
+        }
+
+        false
+      }
+
+      Event::Prompt { .. } => false,
+
+      Event::Info { message, .. } => {
+        self.hint = Some(message.into());
+        false
+      }
+
+      Event::Error { message, .. } => {
+        self.error = Some(message.into());
+        false
+      }
+
+      Event::Fingerprint { state } => {
+        self.fingerprint = state.into();
+        false
+      }
+
+      Event::Failed { source, failure } => {
+        self.prompt_ready = false;
+        self.pending_password = None;
+
+        match failure {
+          // The outlined field is the whole message.
+          AuthFailure::Rejected => self.reject(cx),
+          AuthFailure::Error { message } => self.error = Some(message.into()),
+        }
+
+        // A fingerprint giving up leaves the password alone, and vice versa; only
+        // a failure of the path being waited on returns the screen to the user.
+        if source == AuthSource::Password {
+          self.clear_password(cx);
+          self.begin(cx);
+        }
+
+        false
+      }
+
+      Event::Authenticated { via } => {
+        info!(?via, "Authenticated");
+        self.phase = Phase::Starting;
+        self.fingerprint = FingerprintState::Off;
+        self.hint = None;
+        self.error = None;
+        self.request(Request::StartSession);
+        false
+      }
+
+      Event::SessionStarted => {
+        info!("Session starting, closing the login screen");
+        cx.quit();
+        false
+      }
+
+      Event::SessionFailed { message } => {
+        // The screen stays up: a login screen that has gone dark is worse than
+        // one saying the session would not start.
+        error!(message, "The session could not be started");
+        self.error = Some(message.into());
+        self.clear_password(cx);
+        self.begin(cx);
+        false
+      }
+
+      Event::RequestFailed { message } => {
+        warn!(message, "The login service refused a request");
+        self.error = Some(message.into());
+        self.phase = Phase::Ready;
+        false
+      }
+    }
+  }
+
+  /// Asks the daemon to start authenticating the selected user.
+  fn begin(&mut self, cx: &mut Context<Self>) {
+    let Some(user) = self.user() else {
+      warn!("No accounts to authenticate");
+      self.phase = Phase::Unavailable("No accounts are available".into());
+      return;
+    };
+
+    let username = user.name.to_string();
+    self.prompt_ready = false;
+    self.pending_password = None;
+    self.phase = Phase::Ready;
+    self.hint = None;
+    cx.notify();
+
+    self.request(Request::Authenticate { username });
+  }
+
+  fn disconnected(&mut self, reason: SharedString, cx: &mut Context<Self>) {
+    warn!(%reason, "Disconnected from the login service");
+
+    self.client = None;
+    self.prompt_ready = false;
+    self.pending_password = None;
+    self.phase = Phase::Unavailable(reason.clone());
+
+    // A missing socket means we were not started by the daemon, and no amount of
+    // retrying will conjure one.
+    if std::env::var_os(greet_ipc::SOCKET_ENV_VAR).is_none() {
+      error!("Not started by launch-greetd; giving up");
+      return;
+    }
+
+    let delay = self.retry_delay;
+    self.retry_delay = (delay * 2).min(RETRY_MAX);
+
+    self._retry = Some(cx.spawn(async move |this, cx| {
+      cx.background_executor().timer(delay).await;
+
+      this
+        .update(cx, |this, cx| {
+          debug!(?delay, "Reconnecting to the login service");
+          this.connect(cx);
+          cx.notify();
+        })
+        .log_err();
+    }));
+  }
+
+  /// Empties the field on the surface that has one.
+  fn clear_password(&mut self, cx: &mut Context<Self>) {
+    cx.emit(PasswordMirror {
+      value: SharedString::default(),
+      source: None,
+    });
   }
 
   pub fn user(&self) -> Option<&AuthUser> {
     self.users.get(self.selected)
-  }
-
-  pub fn phase(&self) -> &Phase {
-    &self.phase
   }
 
   pub fn error(&self) -> Option<SharedString> {
@@ -164,17 +435,29 @@ impl Greeter {
       return;
     }
 
-    // Not wired to the daemon yet; the state machine that consumes this lands
-    // with the IPC client.
-    debug!(length = password.len(), "Password submitted");
+    let secret = match Secret::new(password.to_string()) {
+      Ok(secret) => secret,
+      Err(_) => {
+        self.error = Some("That password is too long".into());
+        cx.notify();
+        return;
+      }
+    };
+
     self.phase = Phase::Verifying;
     self.error = None;
     cx.notify();
+
+    // Typing can outrun the PAM stack. Answering a prompt that has not been
+    // asked is an error, so an early password waits for it instead.
+    match self.prompt_ready {
+      true => self.request(Request::Password { value: secret }),
+      false => self.pending_password = Some(secret),
+    }
   }
 
   /// Outlines the field for [`REJECTION_HIGHLIGHT`]. That is the whole of what
   /// a rejection says: the field it was typed into is the message.
-  #[allow(dead_code)]
   fn reject(&mut self, cx: &mut Context<Self>) {
     self.rejected = true;
     cx.notify();
@@ -195,8 +478,14 @@ impl Greeter {
   /// attached. Falls back rather than leaving the machine with a login screen
   /// nobody can type into.
   fn primary_index(&self, cx: &App) -> usize {
-    let config = ConfigState::get(cx);
-    let Some(configured) = config.primary_display else {
+    // What the daemon says wins: it has the system configuration, whereas the
+    // greeter user's own config file usually does not exist.
+    let configured = self
+      .primary_output
+      .clone()
+      .or_else(|| ConfigState::get(cx).primary_display.map(SharedString::from));
+
+    let Some(configured) = configured else {
       return 0;
     };
 
@@ -357,6 +646,18 @@ impl GreetScreen {
         |this, _password, event: &InputEvent, _window, cx| match event {
           InputEvent::PressEnter { .. } => this.submit(cx),
           InputEvent::Change | InputEvent::Focus | InputEvent::Blur => {}
+        },
+      ));
+
+      // The greeter empties the field after a rejection, which it cannot do
+      // itself: the field lives here.
+      subscriptions.push(cx.subscribe_in(
+        &greeter,
+        window,
+        |this, _greeter, event: &PasswordMirror, window, cx| {
+          if let Some(password) = this.password.clone() {
+            apply_password_mirror(event, &password, cx.entity_id(), window, cx);
+          }
         },
       ));
 
