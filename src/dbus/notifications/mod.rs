@@ -130,7 +130,7 @@ impl Notification {
       id,
       app_name: SharedString::from(app_name),
       summary: SharedString::from(summary),
-      body: SharedString::from(body),
+      body: SharedString::from(strip_body_markup(body)),
       urgency,
       expire_timeout,
       actions,
@@ -153,6 +153,109 @@ impl Notification {
       timeout => timeout as u64,
     }
   }
+}
+
+/// The tags the spec defines for body markup. Nothing else is treated as a tag,
+/// so a body that merely happens to contain something like `<3` keeps it.
+const MARKUP_TAGS: [&str; 5] = ["b", "i", "u", "a", "img"];
+
+/// The longest entity we accept, `&#x10FFFF;` without its delimiters. Bounding
+/// the search keeps a lone `&` — ordinary text, as in `AT&T` — from dragging a
+/// scan across the rest of the body looking for a `;`.
+const MAX_ENTITY_LEN: usize = 8;
+
+/// Removes the markup the spec allows in a notification body and resolves the
+/// XML entities that come with it.
+///
+/// Bodies are "XML-based, and consist of a small subset of HTML", so senders
+/// escape their text: Signal sends `Kaffee &amp; Kuchen`, blueman sends
+/// `<b>Hilmar&#x27;s Pixel Buds Pro</b>`. We do not advertise `body-markup`, and
+/// the spec has servers that don't "filter them out" — but filtering the tags
+/// without also decoding the entities is what leaves a literal `&gt;` on screen.
+///
+/// Summaries are left alone: markup is defined for the body only, and senders
+/// treat it that way. The same Signal contact arrives as `Momo <3` in a summary
+/// and `Momo &lt;3` in a body.
+///
+/// Tags are removed before entities are decoded, so an escaped `&lt;b&gt;` ends
+/// up as literal text rather than being mistaken for markup on a second pass.
+fn strip_body_markup(body: String) -> String {
+  if !body.contains(['<', '&']) {
+    return body;
+  }
+
+  let mut stripped = String::with_capacity(body.len());
+  let mut rest = body.as_str();
+
+  loop {
+    let Some(index) = rest.find(['<', '&']) else {
+      stripped.push_str(rest);
+      return stripped;
+    };
+
+    stripped.push_str(&rest[..index]);
+    rest = &rest[index..];
+
+    if let Some(after) = strip_tag(rest) {
+      rest = after;
+    } else if let Some((character, after)) = decode_entity(rest) {
+      stripped.push(character);
+      rest = after;
+    } else {
+      // Neither, so this is a bare `<` or `&` that the body is free to contain.
+      let mut characters = rest.chars();
+      stripped.extend(characters.next());
+      rest = characters.as_str();
+    }
+  }
+}
+
+/// Consumes one [`MARKUP_TAGS`] tag at the start of `text`, returning what
+/// follows it.
+fn strip_tag(text: &str) -> Option<&str> {
+  let opened = text.strip_prefix('<')?;
+  let opened = opened.strip_prefix('/').unwrap_or(opened);
+  // An attribute value holding a `>` would cut the tag short here, but in XML it
+  // has to arrive as `&gt;`, so there is none to find.
+  let end = opened.find('>')?;
+  let name = opened[..end]
+    .trim_end_matches('/')
+    .split([' ', '\t', '\n'])
+    .next()
+    .unwrap_or_default();
+
+  MARKUP_TAGS
+    .iter()
+    .any(|tag| name.eq_ignore_ascii_case(tag))
+    .then(|| &opened[end + 1..])
+}
+
+/// Decodes one XML entity at the start of `text`, returning the character it
+/// stands for and what follows it.
+fn decode_entity(text: &str) -> Option<(char, &str)> {
+  let opened = text.strip_prefix('&')?;
+  let end = opened.bytes().take(MAX_ENTITY_LEN).position(|byte| byte == b';')?;
+  let (name, rest) = opened.split_at(end);
+
+  let character = match name {
+    "amp" => '&',
+    "lt" => '<',
+    "gt" => '>',
+    "quot" => '"',
+    "apos" => '\'',
+    // Character references, which senders reach for in place of the named
+    // entities XML leaves undefined — blueman's `&#x27;` for an apostrophe.
+    _ => {
+      let digits = name.strip_prefix('#')?;
+      let code = match digits.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => digits.parse().ok()?,
+      };
+      char::from_u32(code)?
+    }
+  };
+
+  Some((character, &rest[1..]))
 }
 
 /// The `image-data` hint payload, a `(iiibiiay)` struct per the spec.
@@ -506,4 +609,68 @@ async fn run_server(entity: Entity<Notifications>, cx: &mut gpui::AsyncApp) -> R
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::strip_body_markup;
+
+  #[track_caller]
+  fn strip(body: &str) -> String {
+    strip_body_markup(body.to_owned())
+  }
+
+  #[test]
+  fn decodes_entities() {
+    assert_eq!(strip("Kaffee &amp; Kuchen"), "Kaffee & Kuchen");
+    // Signal wraps names in bidi isolates, which have to survive untouched.
+    assert_eq!(
+      strip("\u{2068}Momo &lt;3\u{2069} reacted"),
+      "\u{2068}Momo <3\u{2069} reacted"
+    );
+    assert_eq!(strip("a &gt; b &quot;c&quot; &apos;d&apos;"), "a > b \"c\" 'd'");
+    assert_eq!(strip("Hilmar&#x27;s Buds"), "Hilmar's Buds");
+    assert_eq!(strip("Hilmar&#39;s Buds"), "Hilmar's Buds");
+  }
+
+  #[test]
+  fn strips_the_specs_tags() {
+    assert_eq!(strip("<b>Pixel Buds Pro</b> (24:29)"), "Pixel Buds Pro (24:29)");
+    assert_eq!(strip("<i>a</i><u>b</u>"), "ab");
+    assert_eq!(strip("see <a href=\"https://x.test\">this</a>"), "see this");
+    assert_eq!(strip("<img src=\"a.png\" alt=\"a\"/>done"), "done");
+    assert_eq!(strip("<B>upper</B>"), "upper");
+  }
+
+  /// Only the spec's tags are markup, so text that merely looks tag-ish stays.
+  #[test]
+  fn leaves_other_angle_brackets_alone() {
+    assert_eq!(strip("i <3 you"), "i <3 you");
+    assert_eq!(strip("<3> still text"), "<3> still text");
+    assert_eq!(strip("use <div> for that"), "use <div> for that");
+    assert_eq!(strip("a < b and b > c"), "a < b and b > c");
+  }
+
+  /// A bare `&` is ordinary text, and so is anything that isn't a known entity.
+  #[test]
+  fn leaves_other_ampersands_alone() {
+    assert_eq!(strip("AT&T"), "AT&T");
+    assert_eq!(strip("&nosuch; &#zz; &"), "&nosuch; &#zz; &");
+    assert_eq!(strip("Q&A; later"), "Q&A; later");
+  }
+
+  /// Tags go before entities are decoded, so escaped markup survives as text
+  /// instead of being stripped on a second look.
+  #[test]
+  fn does_not_decode_into_markup() {
+    assert_eq!(strip("&lt;b&gt;not bold&lt;/b&gt;"), "<b>not bold</b>");
+    assert_eq!(strip("&amp;amp;"), "&amp;");
+  }
+
+  #[test]
+  fn leaves_plain_bodies_untouched() {
+    assert_eq!(strip("Gruppenfotos starten um 16h"), "Gruppenfotos starten um 16h");
+    assert_eq!(strip(""), "");
+    assert_eq!(strip("line one\nline two"), "line one\nline two");
+  }
 }
