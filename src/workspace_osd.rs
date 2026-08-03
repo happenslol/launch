@@ -3,8 +3,11 @@ use std::{collections::HashMap, time::Duration};
 use gpui::{
   Animation, AnimationExt, App, Bounds, Context, DisplayId, ElementId, Entity, Global, IntoElement,
   Pixels, Render, Size, Styled, Subscription, Task, Window, WindowBackgroundAppearance,
-  WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, prelude::*, px, rgb, rgba,
+  WindowBounds, WindowHandle, WindowKind, WindowOptions, div,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
+  point,
+  prelude::*,
+  px, rgb, rgba,
 };
 use tracing::error;
 

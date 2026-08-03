@@ -59,7 +59,10 @@ impl NotificationServer {
       expire_timeout,
     );
 
-    if let Err(error) = self.requests.send(ServerRequest::Notify(Box::new(notification))) {
+    if let Err(error) = self
+      .requests
+      .send(ServerRequest::Notify(Box::new(notification)))
+    {
       warn!(?error, "notification receiver dropped");
     }
 

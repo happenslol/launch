@@ -196,7 +196,10 @@ impl PolkitAgent {
 
 impl PolkitAgent {
   fn attempt(&self) -> std::sync::MutexGuard<'_, Option<Attempt>> {
-    self.attempt.lock().unwrap_or_else(|error| error.into_inner())
+    self
+      .attempt
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
   }
 
   fn set_attempt(&self, attempt: Option<Attempt>) {
@@ -221,7 +224,10 @@ impl PolkitAgent {
           .await
       }
       Err(error) => {
-        debug!(?error, "agent helper socket unavailable, spawning setuid helper");
+        debug!(
+          ?error,
+          "agent helper socket unavailable, spawning setuid helper"
+        );
         self
           .authenticate_via_helper(cookie, username, cancel_rx)
           .await
@@ -377,10 +383,7 @@ impl PolkitAgent {
   }
 }
 
-async fn write_line<W: AsyncWrite + Unpin>(
-  writer: &mut W,
-  line: &str,
-) -> Result<(), PolkitError> {
+async fn write_line<W: AsyncWrite + Unpin>(writer: &mut W, line: &str) -> Result<(), PolkitError> {
   let write = async {
     writer.write_all(line.as_bytes()).await?;
     writer.write_all(b"\n").await?;

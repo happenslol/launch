@@ -16,13 +16,7 @@ pub trait DBusMenu {
     property_names: Vec<&str>,
   ) -> zbus::Result<(u32, (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>))>;
 
-  fn event(
-    &self,
-    id: i32,
-    event_id: &str,
-    data: &Value<'_>,
-    timestamp: u32,
-  ) -> zbus::Result<()>;
+  fn event(&self, id: i32, event_id: &str, data: &Value<'_>, timestamp: u32) -> zbus::Result<()>;
 
   fn about_to_show(&self, id: i32) -> zbus::Result<bool>;
 }

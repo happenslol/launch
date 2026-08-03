@@ -1,18 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{
-  Arc,
-  atomic::AtomicBool,
-};
+use std::sync::{Arc, atomic::AtomicBool};
 
-use gpui::{
-  AnyElement, App, Context, Entity, FocusHandle, Focusable, Image, ImageFormat, ImageSource,
-  IntoElement, KeyBinding, ObjectFit, Render, SharedString, Styled, Subscription, Task, Window,
-  actions, img, prelude::*, rems, rgb, rgba,
-};
-use nucleo_matcher::{
-  Utf32Str,
-  pattern::{CaseMatching, Normalization, Pattern},
-};
 use crate::{
   confirmation::{ConfirmationEvent, ConfirmationPrompt, render_confirmation_overlay},
   icon::{Icon, IconName},
@@ -21,6 +9,15 @@ use crate::{
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
   util::{ResultExt, h_flex, v_flex},
   wayland::{self, ClipboardDbReader, ClipboardEntry, ContentType},
+};
+use gpui::{
+  AnyElement, App, Context, Entity, FocusHandle, Focusable, Image, ImageFormat, ImageSource,
+  IntoElement, KeyBinding, ObjectFit, Render, SharedString, Styled, Subscription, Task, Window,
+  actions, img, prelude::*, rems, rgb, rgba,
+};
+use nucleo_matcher::{
+  Utf32Str,
+  pattern::{CaseMatching, Normalization, Pattern},
 };
 
 actions!(clipboard, [DeleteEntry]);

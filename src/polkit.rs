@@ -11,10 +11,13 @@ use std::time::Duration;
 use flume::{Receiver, Sender};
 use gpui::{
   Animation, AnimationExt, App, AppContext as _, AsyncApp, Bounds, Context, ElementId, Entity,
-  FocusHandle, Focusable, IntoElement, KeyBinding, Render, SharedString, Size, Styled, Subscription,
-  Task, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
-  actions, div, point, prelude::*, px, rems, rgb, rgba,
+  FocusHandle, Focusable, IntoElement, KeyBinding, Render, SharedString, Size, Styled,
+  Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+  WindowOptions, actions, div,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
+  point,
+  prelude::*,
+  px, rems, rgb, rgba,
 };
 use tracing::{debug, error};
 
@@ -445,7 +448,11 @@ impl PolkitDialog {
           .size(px(40.))
           .rounded_lg()
           .bg(rgba(0xFFFFFF0F))
-          .child(Icon::new(IconName::ShieldLock).size(rems(1.4)).text_color(rgb(0xE0E0E0))),
+          .child(
+            Icon::new(IconName::ShieldLock)
+              .size(rems(1.4))
+              .text_color(rgb(0xE0E0E0)),
+          ),
       )
       .child(
         v_flex()
@@ -468,12 +475,7 @@ impl PolkitDialog {
   /// monospace code block, since it is typically a long store path whose
   /// meaningful tail (the binary and its arguments) must stay visible.
   fn render_message(&self) -> gpui::AnyElement {
-    let muted = |text: String| {
-      div()
-        .text_sm()
-        .text_color(rgba(0xFFFFFFAA))
-        .child(text)
-    };
+    let muted = |text: String| div().text_sm().text_color(rgba(0xFFFFFFAA)).child(text);
 
     match split_command(&self.message) {
       Some((prefix, command, suffix)) => {
@@ -481,9 +483,13 @@ impl PolkitDialog {
         let suffix = suffix.trim_start();
         v_flex()
           .gap_1()
-          .when(!prefix.is_empty(), |this| this.child(muted(prefix.to_owned())))
+          .when(!prefix.is_empty(), |this| {
+            this.child(muted(prefix.to_owned()))
+          })
           .child(command_chip(command.trim()))
-          .when(!suffix.is_empty(), |this| this.child(muted(suffix.to_owned())))
+          .when(!suffix.is_empty(), |this| {
+            this.child(muted(suffix.to_owned()))
+          })
           .into_any_element()
       }
       None => muted(self.message.to_string()).into_any_element(),
@@ -493,7 +499,9 @@ impl PolkitDialog {
   fn render_body(&self, can_submit: bool) -> gpui::AnyElement {
     if self.submitting {
       return status_row(
-        Spinner::new().color(rgb(0x888888).into()).into_any_element(),
+        Spinner::new()
+          .color(rgb(0x888888).into())
+          .into_any_element(),
         "Authenticating…",
       )
       .into_any_element();
@@ -505,7 +513,9 @@ impl PolkitDialog {
       // spinner, is what the row is waiting for.
       let leading = match self.fingerprint {
         true => fingerprint_indicator(),
-        false => Spinner::new().color(rgb(0x888888).into()).into_any_element(),
+        false => Spinner::new()
+          .color(rgb(0x888888).into())
+          .into_any_element(),
       };
       return status_row(leading, "Waiting for authentication…").into_any_element();
     }
@@ -518,19 +528,18 @@ impl PolkitDialog {
       .bg(rgba(0x00000055))
       .border_1()
       .border_color(rgba(0xFFFFFF1F))
-      .child(Icon::new(IconName::Lock).size(rems(0.95)).text_color(rgba(0xFFFFFF66)))
+      .child(
+        Icon::new(IconName::Lock)
+          .size(rems(0.95))
+          .text_color(rgba(0xFFFFFF66)),
+      )
       .child(input(&self.password).flex_grow())
       .when(self.fingerprint, |this| this.child(fingerprint_indicator()))
       .into_any_element()
   }
 
   fn render_error(this: gpui::Div, error: SharedString) -> gpui::Div {
-    this.child(
-      div()
-        .text_sm()
-        .text_color(rgb(0xE07070))
-        .child(error),
-    )
+    this.child(div().text_sm().text_color(rgb(0xE07070)).child(error))
   }
 
   fn render_buttons(&self, can_submit: bool, cx: &mut Context<Self>) -> impl IntoElement {

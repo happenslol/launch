@@ -11,10 +11,12 @@ use gpui::{
   Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, DisplayId, Div, ElementId,
   Entity, FontStyle, FontWeight, Global, HighlightStyle, ImageSource, IntoElement, MouseButton,
   ObjectFit, Pixels, Render, Resource, SharedString, Size, Stateful, Styled, StyledText,
-  Subscription, Task, UnderlineStyle, WeakEntity, Window,
-  WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, img,
-  point, prelude::*, px, rems, rgb, rgba,
+  Subscription, Task, UnderlineStyle, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
+  WindowHandle, WindowKind, WindowOptions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
+  point,
+  prelude::*,
+  px, rems, rgb, rgba,
 };
 use regex::Regex;
 use tracing::{error, warn};
@@ -155,7 +157,9 @@ impl NotificationOsd {
       // back — see [`Self::report_region`] and
       // [`NotificationsView::update_content`].
       let updated = handle
-        .update(cx, |view, _window, cx| view.update_content(active.clone(), cx))
+        .update(cx, |view, _window, cx| {
+          view.update_content(active.clone(), cx)
+        })
         .is_ok();
 
       if updated {
@@ -230,7 +234,10 @@ fn target_display(cx: &App) -> Option<(DisplayId, Pixels)> {
   let displays = cx.displays();
 
   if let Some(name) = configured {
-    if let Some(display) = displays.iter().find(|display| display.name() == Some(name.as_str())) {
+    if let Some(display) = displays
+      .iter()
+      .find(|display| display.name() == Some(name.as_str()))
+    {
       return Some((display.id(), display.bounds().size.height));
     }
 
@@ -518,7 +525,10 @@ impl NotificationsView {
     let active_ids: HashSet<u32> = active.iter().map(|notification| notification.id).collect();
 
     for notification in &active {
-      if let Some(card) = self.cards.iter_mut().find(|card| card.notification.id == notification.id)
+      if let Some(card) = self
+        .cards
+        .iter_mut()
+        .find(|card| card.notification.id == notification.id)
       {
         card.layout = pick_layout(notification);
         card.text = CardText::new(notification);
@@ -559,8 +569,12 @@ impl NotificationsView {
     self.removal_tasks.insert(
       id,
       cx.spawn(async move |this, cx| {
-        cx.background_executor().timer(ANIM_EXIT_DURATION + ANIM_EXIT_GRACE).await;
-        this.update(cx, |this, cx| this.remove_card(id, cx)).log_err();
+        cx.background_executor()
+          .timer(ANIM_EXIT_DURATION + ANIM_EXIT_GRACE)
+          .await;
+        this
+          .update(cx, |this, cx| this.remove_card(id, cx))
+          .log_err();
       }),
     );
   }
@@ -613,7 +627,10 @@ impl NotificationsView {
   /// measured to size the surface, rather than being shrunk to fit the window.
   fn card_base(&self, notification: &Notification, cx: &mut Context<Self>) -> Stateful<Div> {
     let id = notification.id;
-    let has_default = notification.actions.iter().any(|action| action.key == "default");
+    let has_default = notification
+      .actions
+      .iter()
+      .any(|action| action.key == "default");
     let border_color = match notification.urgency {
       Urgency::Critical => rgba(0xE0524FCC),
       _ => rgba(0xFFFFFF15),
@@ -647,15 +664,15 @@ impl NotificationsView {
       .on_mouse_down(
         MouseButton::Right,
         cx.listener(move |this, _, _window, cx| {
-          this
-            .notifications
-            .update(cx, |notifications, cx| notifications.dismiss(id, CloseReason::Dismissed, cx));
+          this.notifications.update(cx, |notifications, cx| {
+            notifications.dismiss(id, CloseReason::Dismissed, cx)
+          });
         }),
       )
       .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-        this
-          .notifications
-          .update(cx, |notifications, cx| notifications.set_hovered(id, *hovered, cx));
+        this.notifications.update(cx, |notifications, cx| {
+          notifications.set_hovered(id, *hovered, cx)
+        });
       }))
   }
 
@@ -669,7 +686,9 @@ impl NotificationsView {
   ) -> Stateful<Div> {
     let key = action.key.clone();
     let element = div()
-      .id(SharedString::from(format!("notif-{notification_id}-action-{index}")))
+      .id(SharedString::from(format!(
+        "notif-{notification_id}-action-{index}"
+      )))
       .cursor_pointer();
 
     let element = match variant {
@@ -710,9 +729,9 @@ impl NotificationsView {
     element.child(action.label.clone()).on_click(cx.listener(
       move |this, _: &ClickEvent, _window, cx| {
         let key = key.clone();
-        this
-          .notifications
-          .update(cx, |notifications, cx| notifications.invoke_action(notification_id, key, cx));
+        this.notifications.update(cx, |notifications, cx| {
+          notifications.invoke_action(notification_id, key, cx)
+        });
         cx.stop_propagation();
       },
     ))
@@ -767,42 +786,40 @@ impl NotificationsView {
     let notification = &card.notification;
     let buttons = self.compact_buttons(notification, cx);
 
-    self
-      .card_base(notification, cx)
-      .child(
-        h_flex()
-          .w_full()
-          .items_center()
-          .gap_3()
-          .p_3()
-          .child(render_avatar(notification, COMPACT_ICON_SIZE))
-          .child(
-            v_flex()
-              .flex_1()
-              .min_w(px(0.))
-              .gap(px(1.))
-              .child(
+    self.card_base(notification, cx).child(
+      h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .p_3()
+        .child(render_avatar(notification, COMPACT_ICON_SIZE))
+        .child(
+          v_flex()
+            .flex_1()
+            .min_w(px(0.))
+            .gap(px(1.))
+            .child(
+              div()
+                .text_sm()
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xEEEEEE))
+                .truncate()
+                .child(card.text.summary.clone()),
+            )
+            .when(!card.text.body.is_empty(), |this| {
+              this.child(
                 div()
-                  .text_sm()
-                  .font_weight(FontWeight::BOLD)
-                  .text_color(rgb(0xEEEEEE))
+                  .text_xs()
+                  .text_color(rgba(0xFFFFFF99))
                   .truncate()
-                  .child(card.text.summary.clone()),
+                  .child(render_body(&card.text.body)),
               )
-              .when(!card.text.body.is_empty(), |this| {
-                this.child(
-                  div()
-                    .text_xs()
-                    .text_color(rgba(0xFFFFFF99))
-                    .truncate()
-                    .child(render_body(&card.text.body)),
-                )
-              }),
-          )
-          .when(!buttons.is_empty(), |this| {
-            this.child(h_flex().flex_none().gap_2().children(buttons))
-          }),
-      )
+            }),
+        )
+        .when(!buttons.is_empty(), |this| {
+          this.child(h_flex().flex_none().gap_2().children(buttons))
+        }),
+    )
   }
 
   fn render_message(&self, card: &CardState, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -811,128 +828,121 @@ impl NotificationsView {
     let notification = &card.notification;
     let buttons = self.prominent_buttons(notification, cx);
 
-    self
-      .card_base(notification, cx)
-      .child(
-        v_flex()
-          .w_full()
-          .gap_3()
-          .p_3()
-          .child(
-            h_flex()
-              .w_full()
-              .items_start()
-              .gap_3()
-              .child(render_avatar(notification, MESSAGE_ICON_SIZE))
-              .child(
-                v_flex()
-                  .flex_1()
-                  .min_w(px(0.))
-                  .gap(px(2.))
-                  .child(
-                    h_flex()
-                      .w_full()
-                      .items_baseline()
-                      .gap_2()
-                      .child(
-                        div()
-                          .flex_1()
-                          .min_w(px(0.))
-                          .text_xs()
-                          .text_color(rgba(0xFFFFFF80))
-                          .truncate()
-                          .child(card.text.app_name.clone()),
-                      )
-                      .child(
-                        div()
-                          .flex_none()
-                          .text_xs()
-                          .text_color(rgba(0xFFFFFF55))
-                          .child(relative_time(notification.received)),
-                      ),
-                  )
-                  .child(
-                    div()
-                      .text_base()
-                      .font_weight(FontWeight::BOLD)
-                      .text_color(rgb(0xF0F0F0))
-                      .truncate()
-                      .child(card.text.summary.clone()),
-                  )
-                  .when(!card.text.body.is_empty(), |this| {
-                    this.child(
+    self.card_base(notification, cx).child(
+      v_flex()
+        .w_full()
+        .gap_3()
+        .p_3()
+        .child(
+          h_flex()
+            .w_full()
+            .items_start()
+            .gap_3()
+            .child(render_avatar(notification, MESSAGE_ICON_SIZE))
+            .child(
+              v_flex()
+                .flex_1()
+                .min_w(px(0.))
+                .gap(px(2.))
+                .child(
+                  h_flex()
+                    .w_full()
+                    .items_baseline()
+                    .gap_2()
+                    .child(
                       div()
-                        .text_sm()
-                        .text_color(rgba(0xFFFFFFAA))
-                        .line_height(rems(1.3))
-                        // Grow with the body, but cap it at [`BODY_MAX_LINES`].
-                        // `text_ellipsis` is what ends the clamped text in an
-                        // ellipsis: on its own `line_clamp` just stops wrapping,
-                        // leaving the remainder to run off the last line and be
-                        // cut mid-word by the card's `overflow_hidden`.
-                        .line_clamp(BODY_MAX_LINES)
-                        .text_ellipsis()
-                        .child(render_body(&card.text.body)),
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_xs()
+                        .text_color(rgba(0xFFFFFF80))
+                        .truncate()
+                        .child(card.text.app_name.clone()),
                     )
-                  }),
-              ),
-          )
-          .when(!buttons.is_empty(), |this| {
-            this.child(h_flex().w_full().gap_2().children(buttons))
-          }),
-      )
+                    .child(
+                      div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgba(0xFFFFFF55))
+                        .child(relative_time(notification.received)),
+                    ),
+                )
+                .child(
+                  div()
+                    .text_base()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xF0F0F0))
+                    .truncate()
+                    .child(card.text.summary.clone()),
+                )
+                .when(!card.text.body.is_empty(), |this| {
+                  this.child(
+                    div()
+                      .text_sm()
+                      .text_color(rgba(0xFFFFFFAA))
+                      .line_height(rems(1.3))
+                      // Grow with the body, but cap it at [`BODY_MAX_LINES`].
+                      // `text_ellipsis` is what ends the clamped text in an
+                      // ellipsis: on its own `line_clamp` just stops wrapping,
+                      // leaving the remainder to run off the last line and be
+                      // cut mid-word by the card's `overflow_hidden`.
+                      .line_clamp(BODY_MAX_LINES)
+                      .text_ellipsis()
+                      .child(render_body(&card.text.body)),
+                  )
+                }),
+            ),
+        )
+        .when(!buttons.is_empty(), |this| {
+          this.child(h_flex().w_full().gap_2().children(buttons))
+        }),
+    )
   }
 
   fn render_media(&self, card: &CardState, cx: &mut Context<Self>) -> Stateful<Div> {
     let notification = &card.notification;
     let buttons = self.prominent_buttons(notification, cx);
 
-    self
-      .card_base(notification, cx)
-      .child(
+    self.card_base(notification, cx).child(
+      v_flex().w_full().child(render_cover(notification)).child(
         v_flex()
           .w_full()
-          .child(render_cover(notification))
+          .gap_3()
+          .p_3()
           .child(
             v_flex()
-              .w_full()
-              .gap_3()
-              .p_3()
+              .gap(px(2.))
+              .when(!card.text.app_name.is_empty(), |this| {
+                this.child(
+                  div()
+                    .text_xs()
+                    .text_color(rgba(0xFFFFFF80))
+                    .truncate()
+                    .child(card.text.app_name.clone()),
+                )
+              })
               .child(
-                v_flex()
-                  .gap(px(2.))
-                  .when(!card.text.app_name.is_empty(), |this| {
-                    this.child(
-                      div()
-                        .text_xs()
-                        .text_color(rgba(0xFFFFFF80))
-                        .truncate()
-                        .child(card.text.app_name.clone()),
-                    )
-                  })
-                  .child(
-                    div()
-                      .text_base()
-                      .font_weight(FontWeight::BOLD)
-                      .text_color(rgb(0xF0F0F0))
-                      .truncate()
-                      .child(card.text.summary.clone()),
-                  )
-                  .when(!card.text.body.is_empty(), |this| {
-                    this.child(
-                      div()
-                        .text_sm()
-                        .text_color(rgba(0xFFFFFFAA))
-                        .truncate()
-                        .child(render_body(&card.text.body)),
-                    )
-                  }),
+                div()
+                  .text_base()
+                  .font_weight(FontWeight::BOLD)
+                  .text_color(rgb(0xF0F0F0))
+                  .truncate()
+                  .child(card.text.summary.clone()),
               )
-              .when(!buttons.is_empty(), |this| {
-                this.child(h_flex().w_full().gap_2().children(buttons))
+              .when(!card.text.body.is_empty(), |this| {
+                this.child(
+                  div()
+                    .text_sm()
+                    .text_color(rgba(0xFFFFFFAA))
+                    .truncate()
+                    .child(render_body(&card.text.body)),
+                )
               }),
-          ),
-      )
+          )
+          .when(!buttons.is_empty(), |this| {
+            this.child(h_flex().w_full().gap_2().children(buttons))
+          }),
+      ),
+    )
   }
 }
 
@@ -1023,23 +1033,39 @@ fn render_avatar(notification: &Notification, size: f32) -> AnyElement {
 
   if let Some(image) = &notification.image {
     return frame
-      .child(img(ImageSource::Render(image.clone())).size_full().object_fit(ObjectFit::Cover))
+      .child(
+        img(ImageSource::Render(image.clone()))
+          .size_full()
+          .object_fit(ObjectFit::Cover),
+      )
       .into_any_element();
   }
 
   if let Some(path) = &notification.icon_path {
     let resource = Resource::Path(PathBuf::from(path.to_string()).into());
     return frame
-      .child(img(ImageSource::Resource(resource)).size_full().object_fit(ObjectFit::Cover))
+      .child(
+        img(ImageSource::Resource(resource))
+          .size_full()
+          .object_fit(ObjectFit::Cover),
+      )
       .into_any_element();
   }
 
-  let frame = frame.flex().items_center().justify_center().bg(rgba(0xFFFFFF14));
+  let frame = frame
+    .flex()
+    .items_center()
+    .justify_center()
+    .bg(rgba(0xFFFFFF14));
   let letter = avatar_letter(notification);
 
   if letter.is_empty() {
     frame
-      .child(Icon::new(IconName::Bell).size(px(size * 0.45)).text_color(rgba(0xFFFFFF88)))
+      .child(
+        Icon::new(IconName::Bell)
+          .size(px(size * 0.45))
+          .text_color(rgba(0xFFFFFF88)),
+      )
       .into_any_element()
   } else {
     frame
@@ -1067,18 +1093,30 @@ fn avatar_letter(notification: &Notification) -> SharedString {
 /// The full-width cover art for the media layout, falling back to a tinted
 /// placeholder when the notification carries no image.
 fn render_cover(notification: &Notification) -> AnyElement {
-  let frame = div().flex_none().w_full().h(px(MEDIA_COVER_HEIGHT)).overflow_hidden();
+  let frame = div()
+    .flex_none()
+    .w_full()
+    .h(px(MEDIA_COVER_HEIGHT))
+    .overflow_hidden();
 
   if let Some(image) = &notification.image {
     return frame
-      .child(img(ImageSource::Render(image.clone())).size_full().object_fit(ObjectFit::Cover))
+      .child(
+        img(ImageSource::Render(image.clone()))
+          .size_full()
+          .object_fit(ObjectFit::Cover),
+      )
       .into_any_element();
   }
 
   if let Some(path) = &notification.icon_path {
     let resource = Resource::Path(PathBuf::from(path.to_string()).into());
     return frame
-      .child(img(ImageSource::Resource(resource)).size_full().object_fit(ObjectFit::Cover))
+      .child(
+        img(ImageSource::Resource(resource))
+          .size_full()
+          .object_fit(ObjectFit::Cover),
+      )
       .into_any_element();
   }
 
@@ -1087,7 +1125,11 @@ fn render_cover(notification: &Notification) -> AnyElement {
     .items_center()
     .justify_center()
     .bg(rgba(0xFFFFFF0A))
-    .child(Icon::new(IconName::Photo).size(px(28.)).text_color(rgba(0xFFFFFF55)))
+    .child(
+      Icon::new(IconName::Photo)
+        .size(px(28.))
+        .text_color(rgba(0xFFFFFF55)),
+    )
     .into_any_element()
 }
 
@@ -1109,9 +1151,21 @@ fn relative_time(received: Instant) -> SharedString {
 mod tests {
   use super::{Body, BodyBuilder, Emphasis, single_line_body};
 
-  const NONE: Emphasis = Emphasis { bold: false, italic: false, underline: false };
-  const BOLD: Emphasis = Emphasis { bold: true, italic: false, underline: false };
-  const UNDERLINE: Emphasis = Emphasis { bold: false, italic: false, underline: true };
+  const NONE: Emphasis = Emphasis {
+    bold: false,
+    italic: false,
+    underline: false,
+  };
+  const BOLD: Emphasis = Emphasis {
+    bold: true,
+    italic: false,
+    underline: false,
+  };
+  const UNDERLINE: Emphasis = Emphasis {
+    bold: false,
+    italic: false,
+    underline: true,
+  };
 
   fn body(chunks: &[(&str, Emphasis)]) -> Body {
     let mut builder = BodyBuilder::default();

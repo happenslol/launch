@@ -173,7 +173,9 @@ impl Db {
         "#,
       )
       .and_then(|mut query| {
-        query.execute(rusqlite::params![app_name, summary, body, app_icon, urgency])
+        query.execute(rusqlite::params![
+          app_name, summary, body, app_icon, urgency
+        ])
       });
 
     if let Err(err) = result {

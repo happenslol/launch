@@ -14,8 +14,8 @@ use chrono::{DateTime, Local, TimeZone};
 use freedesktop_desktop_entry::DesktopEntry;
 use gpui::{
   AnyView, App, Bounds, BoundsHandle, Entity, FocusHandle, Focusable, ImageSource, KeyBinding,
-  MouseButton, RenderImage, SharedString, Size, Subscription, Task, Window, WindowBackgroundAppearance,
-  WindowBounds, WindowKind, WindowOptions, actions, div, img,
+  MouseButton, RenderImage, SharedString, Size, Subscription, Task, Window,
+  WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, actions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   popup::{PopupAnchor, PopupConstraintAdjustment, PopupGravity, PopupOptions},
@@ -23,11 +23,11 @@ use gpui::{
   px, rems, rgb, rgba,
 };
 use image::{Frame, ImageBuffer, Rgba};
-use smallvec::SmallVec;
 use nucleo_matcher::{
   Utf32Str,
   pattern::{CaseMatching, Normalization, Pattern},
 };
+use smallvec::SmallVec;
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -222,8 +222,9 @@ impl Launcher {
         }
         cx.notify();
       }),
-      cx.subscribe(&systray, |this, systray, event: &SystrayEvent, cx| {
-        match event {
+      cx.subscribe(
+        &systray,
+        |this, systray, event: &SystrayEvent, cx| match event {
           SystrayEvent::ItemAdded(item) => {
             if let Some(image) = decode_tray_pixmap(item.icon_pixmap.as_deref()) {
               this.tray_pixmaps.insert(item.address().to_string(), image);
@@ -255,8 +256,8 @@ impl Launcher {
               }
             }
           }
-        }
-      }),
+        },
+      ),
       cx.observe(&systray, |this, _, cx| {
         let items: Vec<(String, Option<String>)> = this
           .systray
@@ -276,57 +277,58 @@ impl Launcher {
         cx.notify();
       }),
       cx.subscribe_in(
-      &picker,
-      window,
-      move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
-        PickerEvent::Picked(item) => {
-          if let RootItem::App { entry, .. } = &item {
-            if entry.dbus_activatable() {
-              DB.record_launch(&item.id());
-              let app_id = entry.appid.clone();
-              let conn_task = GlobalDbusConnection::session(cx);
-              let window_id = niri::find_window_by_app_id(&entry.appid, cx);
-              let entry = entry.clone();
-              cx.spawn_in(window, async move |_, cx| {
-                if let Some(conn) = conn_task.await
-                  && dbus::application::activate(&conn, &app_id).await.is_ok()
-                {
-                  debug!(app_id, "Launched via dbus activation");
-                  let _ = cx.update(|window, _| window.remove_window());
-                  return;
-                }
-                if let Some(window_id) = window_id {
-                  debug!(app_id = entry.appid.as_str(), "Falling back to niri focus");
-                  let _ = cx.update(|window, cx| niri::focus_niri_window(window_id, window, cx));
-                  return;
-                }
-                debug!(app_id = entry.appid.as_str(), "Falling back to fork/exec");
-                match xdg::start(&entry) {
-                  Ok(_) => {
+        &picker,
+        window,
+        move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
+          PickerEvent::Picked(item) => {
+            if let RootItem::App { entry, .. } = &item {
+              if entry.dbus_activatable() {
+                DB.record_launch(&item.id());
+                let app_id = entry.appid.clone();
+                let conn_task = GlobalDbusConnection::session(cx);
+                let window_id = niri::find_window_by_app_id(&entry.appid, cx);
+                let entry = entry.clone();
+                cx.spawn_in(window, async move |_, cx| {
+                  if let Some(conn) = conn_task.await
+                    && dbus::application::activate(&conn, &app_id).await.is_ok()
+                  {
+                    debug!(app_id, "Launched via dbus activation");
                     let _ = cx.update(|window, _| window.remove_window());
+                    return;
                   }
-                  Err(err) => error!(?err, "Failed to start process"),
-                }
-              })
-              .detach();
-              return;
-            }
+                  if let Some(window_id) = window_id {
+                    debug!(app_id = entry.appid.as_str(), "Falling back to niri focus");
+                    let _ = cx.update(|window, cx| niri::focus_niri_window(window_id, window, cx));
+                    return;
+                  }
+                  debug!(app_id = entry.appid.as_str(), "Falling back to fork/exec");
+                  match xdg::start(&entry) {
+                    Ok(_) => {
+                      let _ = cx.update(|window, _| window.remove_window());
+                    }
+                    Err(err) => error!(?err, "Failed to start process"),
+                  }
+                })
+                .detach();
+                return;
+              }
 
-            if let Some(window_id) = niri::find_window_by_app_id(&entry.appid, cx) {
-              DB.record_launch(&item.id());
-              debug!(app_id = entry.appid.as_str(), "Launching via niri focus");
-              niri::focus_niri_window(window_id, window, cx);
-              return;
+              if let Some(window_id) = niri::find_window_by_app_id(&entry.appid, cx) {
+                DB.record_launch(&item.id());
+                debug!(app_id = entry.appid.as_str(), "Launching via niri focus");
+                niri::focus_niri_window(window_id, window, cx);
+                return;
+              }
             }
+            this.launch(item.clone(), window, cx);
           }
-          this.launch(item.clone(), window, cx);
-        }
-        PickerEvent::SecondaryPicked(item) => this.launch(item.clone(), window, cx),
-        PickerEvent::QueryChanged(query) => {
-          this.update_inline_results(query.clone(), window, cx);
-        }
-      },
-    )];
+          PickerEvent::SecondaryPicked(item) => this.launch(item.clone(), window, cx),
+          PickerEvent::QueryChanged(query) => {
+            this.update_inline_results(query.clone(), window, cx);
+          }
+        },
+      ),
+    ];
 
     Self {
       focus_handle: cx.focus_handle(),
@@ -825,98 +827,97 @@ impl Render for Launcher {
       )
       .when(!tray_items.is_empty(), |this| {
         this.child(
-          h_flex()
-            .justify_end()
-            .mt(px(8.))
-            .child(
-              h_flex()
-                .key_context(TRAY_CONTEXT)
-                .track_focus(&tray_focus_handle)
-                .on_action(cx.listener(Self::tray_next))
-                .on_action(cx.listener(Self::tray_prev))
-                .on_action(cx.listener(Self::tray_activate))
-                .px_2()
-                .py_1()
-                .rounded_lg()
-                .bg(rgba(0x171717F0))
-                .border_1()
-                .border_color(rgba(0xFFFFFF15))
-                .when(selected_tray_index.is_some(), |this| this.border_color(rgba(0xFFFFFF30)))
-                .gap_1()
-                .children(tray_items.iter().enumerate().map(|(index, item)| {
-                  let is_selected = selected_tray_index == Some(index);
+          h_flex().justify_end().mt(px(8.)).child(
+            h_flex()
+              .key_context(TRAY_CONTEXT)
+              .track_focus(&tray_focus_handle)
+              .on_action(cx.listener(Self::tray_next))
+              .on_action(cx.listener(Self::tray_prev))
+              .on_action(cx.listener(Self::tray_activate))
+              .px_2()
+              .py_1()
+              .rounded_lg()
+              .bg(rgba(0x171717F0))
+              .border_1()
+              .border_color(rgba(0xFFFFFF15))
+              .when(selected_tray_index.is_some(), |this| {
+                this.border_color(rgba(0xFFFFFF30))
+              })
+              .gap_1()
+              .children(tray_items.iter().enumerate().map(|(index, item)| {
+                let is_selected = selected_tray_index == Some(index);
 
-                  let icon_source = item
-                    .icon_name
-                    .as_ref()
-                    .and_then(|name| icon_cache.get(name))
-                    .map(|resource| ImageSource::Resource(resource.clone()))
-                    .or_else(|| {
-                      tray_pixmaps
-                        .get(item.address())
-                        .map(|image| ImageSource::Render(image.clone()))
-                    });
+                let icon_source = item
+                  .icon_name
+                  .as_ref()
+                  .and_then(|name| icon_cache.get(name))
+                  .map(|resource| ImageSource::Resource(resource.clone()))
+                  .or_else(|| {
+                    tray_pixmaps
+                      .get(item.address())
+                      .map(|image| ImageSource::Render(image.clone()))
+                  });
 
-                  let icon_element = icon_source
-                    .map(|source| img(source).size(px(24.)).into_any_element())
-                    .unwrap_or_else(|| {
-                      let fallback = match item.icon_name.as_ref().map(|s| s.as_ref()) {
-                        Some("input-keyboard-symbolic") => IconName::Keyboard,
-                        _ => IconName::AppWindow,
-                      };
-                      Icon::new(fallback).size(px(24.)).into_any_element()
-                    });
+                let icon_element = icon_source
+                  .map(|source| img(source).size(px(24.)).into_any_element())
+                  .unwrap_or_else(|| {
+                    let fallback = match item.icon_name.as_ref().map(|s| s.as_ref()) {
+                      Some("input-keyboard-symbolic") => IconName::Keyboard,
+                      _ => IconName::AppWindow,
+                    };
+                    Icon::new(fallback).size(px(24.)).into_any_element()
+                  });
 
-                  let item = item.clone();
-                  let bounds_handle = tray_handles[index].clone();
-                  div()
-                    .id(item.id.clone())
-                    .track_bounds(&bounds_handle)
-                    .p(px(4.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(is_selected, |this| this.bg(rgba(0xFFFFFF15)))
-                    .when(!is_selected, |this| {
-                      this.hover(|style| style.bg(rgba(0xFFFFFF15)))
+                let item = item.clone();
+                let bounds_handle = tray_handles[index].clone();
+                div()
+                  .id(item.id.clone())
+                  .track_bounds(&bounds_handle)
+                  .p(px(4.))
+                  .rounded_md()
+                  .cursor_pointer()
+                  .when(is_selected, |this| this.bg(rgba(0xFFFFFF15)))
+                  .when(!is_selected, |this| {
+                    this.hover(|style| style.bg(rgba(0xFFFFFF15)))
+                  })
+                  .on_click({
+                    let item = item.clone();
+                    let bounds_handle = bounds_handle.clone();
+                    cx.listener(move |this, _, window, cx| {
+                      if item.item_is_menu || item.has_menu() {
+                        this.show_tray_menu(item.clone(), bounds_handle.bounds(), window, cx);
+                      } else {
+                        let item = item.clone();
+                        cx.spawn_in(window, async move |_, cx| {
+                          item.activate(0, 0).await.log_err();
+                          let _ = cx.update(|window, _| window.remove_window());
+                        })
+                        .detach();
+                      }
                     })
-                    .on_click({
+                  })
+                  .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener({
                       let item = item.clone();
                       let bounds_handle = bounds_handle.clone();
-                      cx.listener(move |this, _, window, cx| {
-                        if item.item_is_menu || item.has_menu() {
+                      move |this, _, window, cx| {
+                        if item.has_menu() {
                           this.show_tray_menu(item.clone(), bounds_handle.bounds(), window, cx);
                         } else {
                           let item = item.clone();
                           cx.spawn_in(window, async move |_, cx| {
-                            item.activate(0, 0).await.log_err();
+                            item.secondary_activate(0, 0).await.log_err();
                             let _ = cx.update(|window, _| window.remove_window());
                           })
                           .detach();
                         }
-                      })
-                    })
-                    .on_mouse_down(
-                      MouseButton::Right,
-                      cx.listener({
-                        let item = item.clone();
-                        let bounds_handle = bounds_handle.clone();
-                        move |this, _, window, cx| {
-                          if item.has_menu() {
-                            this.show_tray_menu(item.clone(), bounds_handle.bounds(), window, cx);
-                          } else {
-                            let item = item.clone();
-                            cx.spawn_in(window, async move |_, cx| {
-                              item.secondary_activate(0, 0).await.log_err();
-                              let _ = cx.update(|window, _| window.remove_window());
-                            })
-                            .detach();
-                          }
-                        }
-                      }),
-                    )
-                    .child(icon_element)
-                })),
-            ),
+                      }
+                    }),
+                  )
+                  .child(icon_element)
+              })),
+          ),
         )
       })
   }
@@ -1242,9 +1243,7 @@ fn decode_tray_pixmap(pixmaps: Option<&[(i32, i32, Vec<u8>)]>) -> Option<Arc<Ren
   let pixmaps = pixmaps?;
   let (w, h, data) = pixmaps
     .iter()
-    .filter(|(w, h, data)| {
-      *w > 0 && *h > 0 && data.len() == (*w as usize) * (*h as usize) * 4
-    })
+    .filter(|(w, h, data)| *w > 0 && *h > 0 && data.len() == (*w as usize) * (*h as usize) * 4)
     .max_by_key(|(w, h, _)| (*w as i64) * (*h as i64))?;
 
   let width = *w as u32;

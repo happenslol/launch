@@ -41,7 +41,13 @@ pub fn estimate_menu_height(items: &[MenuItem]) -> Pixels {
   let visible = visible_items(items);
   let total: f32 = visible
     .iter()
-    .map(|item| if item.is_separator { SEPARATOR_HEIGHT } else { ITEM_HEIGHT })
+    .map(|item| {
+      if item.is_separator {
+        SEPARATOR_HEIGHT
+      } else {
+        ITEM_HEIGHT
+      }
+    })
     .sum::<f32>()
     + MENU_VERTICAL_PADDING;
   px(total.min(f32::from(MENU_MAX_HEIGHT)))
@@ -73,7 +79,11 @@ impl MenuItem {
 }
 
 pub fn parse_layout(
-  raw: (i32, HashMap<String, zvariant::OwnedValue>, Vec<zvariant::OwnedValue>),
+  raw: (
+    i32,
+    HashMap<String, zvariant::OwnedValue>,
+    Vec<zvariant::OwnedValue>,
+  ),
 ) -> Result<Vec<MenuItem>> {
   let (_id, _props, children) = raw;
   let mut items = Vec::new();
@@ -153,7 +163,10 @@ fn parse_menu_item(value: &zvariant::OwnedValue) -> Option<MenuItem> {
   let item_type = prop_string(&props, "type").unwrap_or_default();
   let is_separator = item_type == "separator";
 
-  let toggle_type = match prop_string(&props, "toggle-type").as_deref().unwrap_or_default() {
+  let toggle_type = match prop_string(&props, "toggle-type")
+    .as_deref()
+    .unwrap_or_default()
+  {
     "checkmark" => ToggleType::Checkmark,
     "radio" => ToggleType::Radio,
     _ => ToggleType::None,
@@ -280,8 +293,7 @@ impl TrayMenu {
 
   fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
     let visible = visible_items(&self.items);
-    self.selected_index =
-      first_selectable_index(&visible, self.selected_index, Direction::Forward);
+    self.selected_index = first_selectable_index(&visible, self.selected_index, Direction::Forward);
     if let Some(index) = self.selected_index {
       self.scroll_handle.scroll_to_item(index);
     }
@@ -346,12 +358,7 @@ impl TrayMenu {
     }
   }
 
-  fn open_submenu_action(
-    &mut self,
-    _: &OpenSubmenu,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  fn open_submenu_action(&mut self, _: &OpenSubmenu, window: &mut Window, cx: &mut Context<Self>) {
     let Some(item) = self.selected_visible_item() else {
       return;
     };
@@ -361,12 +368,7 @@ impl TrayMenu {
     }
   }
 
-  fn open_submenu_for(
-    &mut self,
-    item: &MenuItem,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  fn open_submenu_for(&mut self, item: &MenuItem, window: &mut Window, cx: &mut Context<Self>) {
     let id = item.id;
     let children = item.children.clone();
     let proxy = self.proxy.clone();
@@ -423,7 +425,12 @@ impl TrayMenu {
     }
   }
 
-  fn activate_item_at(&mut self, visible_index: usize, window: &mut Window, cx: &mut Context<Self>) {
+  fn activate_item_at(
+    &mut self,
+    visible_index: usize,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
     self.selected_index = Some(visible_index);
     cx.notify();
     self.activate_selected(window, cx);
@@ -437,20 +444,21 @@ enum Direction {
 }
 
 fn visible_items(items: &[MenuItem]) -> Vec<MenuItem> {
-  let mut result: Vec<MenuItem> = items
-    .iter()
-    .filter(|i| i.visible)
-    .cloned()
-    .fold(Vec::new(), |mut acc, item| {
-      if item.is_separator {
-        if acc.last().is_some_and(|last: &MenuItem| !last.is_separator) {
+  let mut result: Vec<MenuItem> =
+    items
+      .iter()
+      .filter(|i| i.visible)
+      .cloned()
+      .fold(Vec::new(), |mut acc, item| {
+        if item.is_separator {
+          if acc.last().is_some_and(|last: &MenuItem| !last.is_separator) {
+            acc.push(item);
+          }
+        } else {
           acc.push(item);
         }
-      } else {
-        acc.push(item);
-      }
-      acc
-    });
+        acc
+      });
   if result.last().is_some_and(|i| i.is_separator) {
     result.pop();
   }
@@ -606,7 +614,13 @@ impl Render for TrayMenu {
                 }),
             )
           })
-          .child(div().flex_grow().min_w_0().truncate().child(item.label.clone()))
+          .child(
+            div()
+              .flex_grow()
+              .min_w_0()
+              .truncate()
+              .child(item.label.clone()),
+          )
           .when(has_submenu, |this| {
             this.child(
               Icon::new(IconName::ChevronRight)

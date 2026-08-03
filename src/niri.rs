@@ -1,7 +1,4 @@
-use std::sync::{
-  Arc,
-  atomic::AtomicBool,
-};
+use std::sync::{Arc, atomic::AtomicBool};
 
 use gpui::{
   App, Context, Entity, EventEmitter, FocusHandle, Focusable, Global, ImageSource, IntoElement,
@@ -45,7 +42,8 @@ impl NiriState {
   }
 
   pub fn try_global(cx: &App) -> Option<Entity<Self>> {
-    cx.try_global::<GlobalNiriState>().map(|state| state.0.clone())
+    cx.try_global::<GlobalNiriState>()
+      .map(|state| state.0.clone())
   }
 
   pub fn windows(&self) -> &[niri_ipc::Window] {

@@ -159,11 +159,7 @@ impl Watcher {
   }
 
   pub async fn attach_to(self, connection: &zbus::Connection) -> zbus::Result<()> {
-    if !connection
-      .object_server()
-      .at(WATCHER_OBJECT, self)
-      .await?
-    {
+    if !connection.object_server().at(WATCHER_OBJECT, self).await? {
       return Err(zbus::Error::Failure(format!(
         "Object already exists at {} -- is StatusNotifierWatcher already running?",
         WATCHER_OBJECT

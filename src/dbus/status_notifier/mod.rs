@@ -60,9 +60,7 @@ impl TrayItem {
       } else if address.starts_with(':') {
         let resolved = resolve_pathless_address(connection, address, "/".to_owned())
           .await?
-          .ok_or_else(|| {
-            anyhow::anyhow!("no StatusNotifierItem found for {}", address)
-          })?;
+          .ok_or_else(|| anyhow::anyhow!("no StatusNotifierItem found for {}", address))?;
         (address.to_owned(), resolved)
       } else {
         anyhow::bail!("invalid StatusNotifierItem address: {}", address);
@@ -80,11 +78,7 @@ impl TrayItem {
     let status_str = proxy.status().await.unwrap_or_else(|_| "Active".into());
     let status = status_str.parse().unwrap_or(Status::Active);
     let icon_name = proxy.icon_name().await.ok().filter(|s| !s.is_empty());
-    let icon_theme_path = proxy
-      .icon_theme_path()
-      .await
-      .ok()
-      .filter(|s| !s.is_empty());
+    let icon_theme_path = proxy.icon_theme_path().await.ok().filter(|s| !s.is_empty());
     let icon_pixmap = proxy.icon_pixmap().await.ok().filter(|v| !v.is_empty());
     let menu_path = proxy.menu().await.ok();
     let item_is_menu = proxy.item_is_menu().await.unwrap_or(false);
@@ -259,10 +253,9 @@ async fn run_host(entity: Entity<Systray>, cx: &mut gpui::AsyncApp) -> Result<()
     use zbus::fdo::RequestNameReply::*;
     counter += 1;
     let name = format!("org.freedesktop.StatusNotifierHost-{}-{}", pid, counter);
-    let wellknown: zbus::names::WellKnownName =
-      name.try_into().map_err(|error| {
-        anyhow::anyhow!("invalid well-known name: {}", error)
-      })?;
+    let wellknown: zbus::names::WellKnownName = name
+      .try_into()
+      .map_err(|error| anyhow::anyhow!("invalid well-known name: {}", error))?;
 
     let flags = [zbus::fdo::RequestNameFlags::DoNotQueue];
     match connection
@@ -324,10 +317,9 @@ async fn run_host(entity: Entity<Systray>, cx: &mut gpui::AsyncApp) -> Result<()
         let address = args.service;
         info!(address, "systray: item registered signal");
 
-        let already_tracked =
-          entity.read_with(cx, |systray, _cx| {
-            systray.items.iter().any(|i| i.address == address)
-          });
+        let already_tracked = entity.read_with(cx, |systray, _cx| {
+          systray.items.iter().any(|i| i.address == address)
+        });
 
         if already_tracked {
           info!(address, "systray: duplicate item, skipping");
@@ -395,7 +387,9 @@ async fn run_host(entity: Entity<Systray>, cx: &mut gpui::AsyncApp) -> Result<()
           let emitter = iface_ref.signal_emitter();
 
           for item in &removed_items {
-            Watcher::emit_item_unregistered(emitter, item).await.log_err();
+            Watcher::emit_item_unregistered(emitter, item)
+              .await
+              .log_err();
           }
 
           if !removed_items.is_empty() {
@@ -482,11 +476,7 @@ async fn listen_item_signals(
     match signal {
       ItemSignal::NewIcon(_) => {
         let icon_name = proxy.icon_name().await.ok().filter(|s| !s.is_empty());
-        let icon_theme_path = proxy
-          .icon_theme_path()
-          .await
-          .ok()
-          .filter(|s| !s.is_empty());
+        let icon_theme_path = proxy.icon_theme_path().await.ok().filter(|s| !s.is_empty());
         let icon_pixmap = proxy.icon_pixmap().await.ok().filter(|v| !v.is_empty());
         let address = address.to_owned();
 
@@ -577,9 +567,12 @@ async fn resolve_pathless_address(
         return Ok(Some(join_to_path(&path, &name)));
       }
 
-      let resolved =
-        Box::pin(resolve_pathless_address(connection, service, join_to_path(&path, &name)))
-          .await?;
+      let resolved = Box::pin(resolve_pathless_address(
+        connection,
+        service,
+        join_to_path(&path, &name),
+      ))
+      .await?;
 
       if resolved.is_some() {
         return Ok(resolved);

@@ -191,21 +191,22 @@ fn build_watcher(path: &Path, sender: flume::Sender<()>) -> Result<RecommendedWa
     .context("config path has no parent directory")?
     .to_path_buf();
 
-  let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| match result {
-    Ok(event) => {
-      // Only react to writes. Reading the file to reload it emits inotify access
-      // events, so reacting to those as well would trigger an endless loop.
-      let is_write = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
-      if is_write
-        && event.paths.iter().any(|changed| changed == &target)
-        && sender.send(()).is_err()
-      {
-        // The receiver has been dropped, which only happens once the app is
-        // shutting down. Nothing left to notify, so the failure is expected.
+  let mut watcher =
+    notify::recommended_watcher(move |result: notify::Result<Event>| match result {
+      Ok(event) => {
+        // Only react to writes. Reading the file to reload it emits inotify access
+        // events, so reacting to those as well would trigger an endless loop.
+        let is_write = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
+        if is_write
+          && event.paths.iter().any(|changed| changed == &target)
+          && sender.send(()).is_err()
+        {
+          // The receiver has been dropped, which only happens once the app is
+          // shutting down. Nothing left to notify, so the failure is expected.
+        }
       }
-    }
-    Err(error) => error!(?error, "Config watch error"),
-  })?;
+      Err(error) => error!(?error, "Config watch error"),
+    })?;
 
   watcher.watch(&directory, RecursiveMode::NonRecursive)?;
   Ok(watcher)
@@ -229,8 +230,7 @@ fn ensure_file(path: &Path) -> Result<()> {
       .with_context(|| format!("creating config directory {}", parent.display()))?;
   }
 
-  std::fs::write(path, "")
-    .with_context(|| format!("creating config file {}", path.display()))?;
+  std::fs::write(path, "").with_context(|| format!("creating config file {}", path.display()))?;
   Ok(())
 }
 

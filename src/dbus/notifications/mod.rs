@@ -382,7 +382,10 @@ fn parse_tag(text: &str) -> Option<(MarkupTag, bool, &str)> {
 /// stands for and what follows it.
 fn decode_entity(text: &str) -> Option<(char, &str)> {
   let opened = text.strip_prefix('&')?;
-  let end = opened.bytes().take(MAX_ENTITY_LEN).position(|byte| byte == b';')?;
+  let end = opened
+    .bytes()
+    .take(MAX_ENTITY_LEN)
+    .position(|byte| byte == b';')?;
   let (name, rest) = opened.split_at(end);
 
   let character = match name {
@@ -659,7 +662,10 @@ impl Notifications {
 
   /// Resumes a paused countdown for `id` with whatever time remained.
   fn resume_expiry(&mut self, id: u32, cx: &mut gpui::Context<Self>) {
-    let is_paused = self.expiry.get(&id).is_some_and(|expiry| expiry.task.is_none());
+    let is_paused = self
+      .expiry
+      .get(&id)
+      .is_some_and(|expiry| expiry.task.is_none());
     if is_paused {
       self.start_expiry(id, cx);
     }
@@ -780,9 +786,21 @@ mod tests {
       .collect()
   }
 
-  const BOLD: Emphasis = Emphasis { bold: true, italic: false, underline: false };
-  const ITALIC: Emphasis = Emphasis { bold: false, italic: true, underline: false };
-  const UNDERLINE: Emphasis = Emphasis { bold: false, italic: false, underline: true };
+  const BOLD: Emphasis = Emphasis {
+    bold: true,
+    italic: false,
+    underline: false,
+  };
+  const ITALIC: Emphasis = Emphasis {
+    bold: false,
+    italic: true,
+    underline: false,
+  };
+  const UNDERLINE: Emphasis = Emphasis {
+    bold: false,
+    italic: false,
+    underline: true,
+  };
 
   #[test]
   fn decodes_entities() {
@@ -792,14 +810,20 @@ mod tests {
       strip("\u{2068}Momo &lt;3\u{2069} reacted"),
       "\u{2068}Momo <3\u{2069} reacted"
     );
-    assert_eq!(strip("a &gt; b &quot;c&quot; &apos;d&apos;"), "a > b \"c\" 'd'");
+    assert_eq!(
+      strip("a &gt; b &quot;c&quot; &apos;d&apos;"),
+      "a > b \"c\" 'd'"
+    );
     assert_eq!(strip("Hilmar&#x27;s Buds"), "Hilmar's Buds");
     assert_eq!(strip("Hilmar&#39;s Buds"), "Hilmar's Buds");
   }
 
   #[test]
   fn removes_the_specs_tags_from_the_text() {
-    assert_eq!(strip("<b>Pixel Buds Pro</b> (24:29)"), "Pixel Buds Pro (24:29)");
+    assert_eq!(
+      strip("<b>Pixel Buds Pro</b> (24:29)"),
+      "Pixel Buds Pro (24:29)"
+    );
     assert_eq!(strip("<i>a</i><u>b</u>"), "ab");
     assert_eq!(strip("see <a href=\"https://x.test\">this</a>"), "see this");
     assert_eq!(strip("<img src=\"a.png\" alt=\"a\"/>done"), "done");
@@ -808,7 +832,10 @@ mod tests {
 
   #[test]
   fn emphasizes_what_the_tags_cover() {
-    assert_eq!(spans("<b>Pixel Buds</b> (24:29)"), [("Pixel Buds".into(), BOLD)]);
+    assert_eq!(
+      spans("<b>Pixel Buds</b> (24:29)"),
+      [("Pixel Buds".into(), BOLD)]
+    );
     assert_eq!(
       spans("<i>a</i>x<u>b</u>"),
       [("a".into(), ITALIC), ("b".into(), UNDERLINE)]
@@ -822,7 +849,11 @@ mod tests {
   /// Tags nest, so the emphasis of the innermost text is everything open.
   #[test]
   fn combines_nested_tags() {
-    let both = Emphasis { bold: true, italic: true, underline: false };
+    let both = Emphasis {
+      bold: true,
+      italic: true,
+      underline: false,
+    };
     assert_eq!(
       spans("<b>bold <i>both</i></b>"),
       [("bold ".into(), BOLD), ("both".into(), both)]
@@ -842,7 +873,20 @@ mod tests {
   #[test]
   fn survives_mismatched_nesting() {
     assert_eq!(spans("</b>not bold"), []);
-    assert_eq!(spans("<b>a<i>b</b>c"), [("a".into(), BOLD), ("b".into(), Emphasis { bold: true, italic: true, underline: false })]);
+    assert_eq!(
+      spans("<b>a<i>b</b>c"),
+      [
+        ("a".into(), BOLD),
+        (
+          "b".into(),
+          Emphasis {
+            bold: true,
+            italic: true,
+            underline: false
+          }
+        )
+      ]
+    );
     // An unclosed tag runs to the end, as it would in any XML reader.
     assert_eq!(spans("plain <b>to the end"), [("to the end".into(), BOLD)]);
   }
@@ -874,7 +918,10 @@ mod tests {
 
   #[test]
   fn leaves_plain_bodies_untouched() {
-    assert_eq!(strip("Gruppenfotos starten um 16h"), "Gruppenfotos starten um 16h");
+    assert_eq!(
+      strip("Gruppenfotos starten um 16h"),
+      "Gruppenfotos starten um 16h"
+    );
     assert_eq!(strip(""), "");
     assert_eq!(strip("line one\nline two"), "line one\nline two");
     assert_eq!(spans("Gruppenfotos starten um 16h"), []);

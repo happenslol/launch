@@ -3,8 +3,11 @@ use std::time::Duration;
 use gpui::{
   Animation, AnimationExt, App, Bounds, Context, ElementId, Entity, Global, IntoElement, Render,
   Size, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-  WindowKind, WindowOptions, div, point, prelude::*, px, relative, rems, rgb, rgba,
+  WindowKind, WindowOptions, div,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
+  point,
+  prelude::*,
+  px, relative, rems, rgb, rgba,
 };
 use tracing::error;
 
@@ -220,9 +223,7 @@ impl VolumeOsdView {
   fn restart_timeout(&mut self, cx: &mut Context<Self>) {
     self._timeout_task = cx.spawn(async move |this, cx| {
       cx.background_executor().timer(DISPLAY_TIMEOUT).await;
-      this
-        .update(cx, |this, cx| this.start_exit(cx))
-        .log_err();
+      this.update(cx, |this, cx| this.start_exit(cx)).log_err();
     });
   }
 
@@ -314,7 +315,11 @@ impl Render for VolumeOsdView {
             .with_easing(easing),
             move |this, delta| {
               let opacity = if closing { 1.0 - delta } else { delta };
-              let offset = if closing { 6.0 * delta } else { 6.0 * (1.0 - delta) };
+              let offset = if closing {
+                6.0 * delta
+              } else {
+                6.0 * (1.0 - delta)
+              };
               this.opacity(opacity).mt(px(offset))
             },
           ),

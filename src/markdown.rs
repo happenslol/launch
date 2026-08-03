@@ -20,8 +20,12 @@ actions!(markdown, [Copy, CopyRaw]);
 enum SelectMode {
   #[default]
   Character,
-  Word { anchor_range: Range<usize> },
-  Line { anchor_range: Range<usize> },
+  Word {
+    anchor_range: Range<usize>,
+  },
+  Line {
+    anchor_range: Range<usize>,
+  },
 }
 
 #[derive(Clone, Default)]

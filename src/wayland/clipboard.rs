@@ -12,12 +12,9 @@ use rusqlite::OpenFlags;
 use rustix::fs::{OFlags, fcntl_setfl};
 use rustix::pipe::PipeFlags;
 use tracing::{debug, error, warn};
-use wayland_client::{
-  Connection, Dispatch, Proxy, QueueHandle, event_created_child,
-};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, event_created_child};
 use wayland_protocols_wlr::data_control::v1::client::{
-  zwlr_data_control_device_v1, zwlr_data_control_offer_v1,
-  zwlr_data_control_source_v1,
+  zwlr_data_control_device_v1, zwlr_data_control_offer_v1, zwlr_data_control_source_v1,
 };
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -900,4 +897,3 @@ impl Dispatch<zwlr_data_control_source_v1::ZwlrDataControlSourceV1, ()> for Stat
     }
   }
 }
-
