@@ -99,14 +99,14 @@ pub async fn main(mut config: Config) -> Result<()> {
 
   let users = crate::users::to_ipc(&accounts, &avatars);
 
-  // The configured default only counts if it is actually on offer; otherwise the
-  // login screen would open on somebody it cannot authenticate.
-  let default_user = config
-    .users
-    .default
-    .as_ref()
-    .filter(|wanted| users.iter().any(|user| &user.name == *wanted))
-    .cloned()
+  // Whoever logged in last, then whoever the configuration names, then whoever
+  // is first. Each candidate only counts if it is actually on offer: otherwise
+  // the login screen would open on somebody it cannot authenticate - which is
+  // exactly what a stale state file left over from a deleted account would do.
+  let default_user = last_user()
+    .into_iter()
+    .chain(config.users.default.clone())
+    .find(|wanted| users.iter().any(|user| &user.name == wanted))
     .or_else(|| users.first().map(|user| user.name.clone()))
     .unwrap_or_default();
 
@@ -188,6 +188,27 @@ async fn run_signal_loop(context: &Rc<Context>, listener: Listener) {
   }
 }
 
+/// The account that logged in last, if it was recorded and looks like a name.
+///
+/// Trimmed and length-checked rather than trusted: the file is root-owned, so a
+/// bad value means the daemon wrote one or something else corrupted it, and
+/// either way falling through beats offering an account made of whitespace.
+fn last_user() -> Option<String> {
+  let contents = std::fs::read_to_string(crate::context::LAST_USER_PATH).ok()?;
+  recorded_username(&contents)
+}
+
+fn recorded_username(contents: &str) -> Option<String> {
+  let name = contents.trim();
+
+  if name.is_empty() || name.len() > greet_ipc::MAX_USERNAME_LEN {
+    warn!("Ignoring an implausible value in the last-user file");
+    return None;
+  }
+
+  Some(name.to_owned())
+}
+
 /// Waits until the target VT is the active one.
 fn wait_for_vt(terminal: &TerminalMode) -> Result<()> {
   let TerminalMode::Terminal { path, vt, .. } = terminal else {
@@ -218,4 +239,27 @@ fn reset_vt(terminal: &TerminalMode) {
 /// Applied on top of the file, for `--vt`.
 pub fn override_vt(config: &mut Config, vt: VtSelection) {
   config.terminal.vt = vt;
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_recorded_name_is_trimmed() {
+    assert_eq!(recorded_username("ada\n"), Some("ada".to_owned()));
+    assert_eq!(recorded_username("  ada  "), Some("ada".to_owned()));
+  }
+
+  /// An empty or oversized file must fall through to the configured default
+  /// rather than open the login screen on an account made of whitespace.
+  #[test]
+  fn an_implausible_name_is_ignored() {
+    assert_eq!(recorded_username(""), None);
+    assert_eq!(recorded_username("   \n"), None);
+    assert_eq!(
+      recorded_username(&"a".repeat(greet_ipc::MAX_USERNAME_LEN + 1)),
+      None
+    );
+  }
 }

@@ -13,6 +13,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 
 use anyhow::{Context as _, Result, bail};
+use greet_ipc::Secret;
 use nix::fcntl::{F_GETFD, F_SETFD, FdFlag, fcntl};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{ForkResult, Pid, fork};
@@ -101,8 +102,14 @@ pub enum ParentToWorker {
     command: String,
   },
   /// Answer to a PAM prompt, or `None` to acknowledge an informational message.
+  ///
+  /// Carries the IPC `Secret` rather than a `String` so the copy this side of
+  /// the socket, and the one the worker deserializes, are both wiped when
+  /// dropped. The `CString` finally handed to libpam is not - `pam-client2` takes
+  /// one by value and libpam copies it internally - so this closes the copies we
+  /// own, not every copy that exists.
   PamResponse {
-    response: Option<String>,
+    response: Option<Secret>,
   },
   Start,
   Cancel,

@@ -39,6 +39,17 @@ const CANCEL_GRACE: Duration = Duration::from_millis(250);
 /// field forever.
 const MAX_FINGERPRINT_FAILURES: u32 = 5;
 
+/// How long the login screen gets between being asked to leave and being made
+/// to. Short, because by this point it has already ignored `SessionStarted` and
+/// a SIGTERM, and the user is looking at a screen that says it is logging them
+/// in.
+const EVICTION_GRACE: Duration = Duration::from_secs(2);
+
+/// Where the last successful login is recorded, so the screen opens on the
+/// account most likely to be wanted. Advisory: an unreadable or stale value
+/// falls through to the configured default (see [`crate::users`]).
+pub const LAST_USER_PATH: &str = "/var/lib/launch-greetd/last-user";
+
 /// Where fprintd keeps enrolled prints, one directory per user.
 ///
 /// Read only to decide whether forking a fingerprint worker is worth it, and
@@ -63,8 +74,21 @@ impl RunningSession {
   /// happens. greetd's equivalent kills both, which is why greeter sessions
   /// leak there.
   pub fn terminate(&self) {
-    if let Err(error) = nix::sys::signal::kill(self.session, nix::sys::signal::Signal::SIGTERM) {
-      warn!(?error, pid = %self.session, "Session was already gone");
+    self.signal(nix::sys::signal::Signal::SIGTERM);
+  }
+
+  /// Ends a session that would not go when asked.
+  ///
+  /// Still only the session process: the worker survives either way, because it
+  /// owes a `pam_close_session` and killing it strands the logind session
+  /// whether or not the thing it was hosting was cooperative.
+  fn kill(&self) {
+    self.signal(nix::sys::signal::Signal::SIGKILL);
+  }
+
+  fn signal(&self, signal: nix::sys::signal::Signal) {
+    if let Err(error) = nix::sys::signal::kill(self.session, signal) {
+      warn!(?error, ?signal, pid = %self.session, "Session was already gone");
     }
   }
 }
@@ -76,12 +100,11 @@ impl RunningSession {
 /// and the session from fighting over the same VT.
 struct PendingSession {
   worker: Rc<Worker>,
-  /// When it was scheduled, which is what the eviction timer measures.
+  /// When it was scheduled, which is what the eviction timer measures from.
   ///
   /// greetd measures from when the *attempt* was created instead, so any login
   /// where the user took more than ten seconds to type went straight to
   /// SIGKILL without ever being asked politely.
-  #[allow(dead_code)]
   scheduled_at: Instant,
 }
 
@@ -190,6 +213,9 @@ struct ContextInner {
   current: Option<RunningSession>,
   /// Authenticated and waiting for the greeter to exit.
   scheduled: Option<PendingSession>,
+  /// Makes the greeter leave if it will not go on its own. Aborted the moment
+  /// the session it was waiting for is promoted.
+  eviction: Option<JoinHandle<()>>,
   attempt: Option<Attempt>,
   /// Where pushed events go. Only one greeter may be connected at a time.
   client: Option<mpsc::UnboundedSender<Event>>,
@@ -223,6 +249,7 @@ impl Context {
       inner: Mutex::new(ContextInner {
         current: None,
         scheduled: None,
+        eviction: None,
         attempt: None,
         client: None,
       }),
@@ -853,7 +880,7 @@ impl Context {
 
     worker
       .send(&ParentToWorker::PamResponse {
-        response: Some(secret.expose().to_owned()),
+        response: Some(secret),
       })
       .await
       .context("handing the password to the worker")
@@ -874,7 +901,7 @@ impl Context {
   /// ready, and it stays parked until the greeter exits - otherwise the two
   /// would fight over the same VT. The greeter is told to quit, and
   /// [`Self::check_children`] does the rest.
-  pub async fn start_session(&self) -> Result<()> {
+  pub async fn start_session(self: &Rc<Self>) -> Result<()> {
     let mut inner = self.inner.lock().await;
 
     if inner.scheduled.is_some() {
@@ -898,11 +925,19 @@ impl Context {
 
     let username = attempt.username.clone();
     let loser = inner.attempt.take();
+    let scheduled_at = Instant::now();
 
     inner.scheduled = Some(PendingSession {
       worker: slot.worker,
-      scheduled_at: Instant::now(),
+      scheduled_at,
     });
+
+    // Armed here rather than when the greeter is asked to go, so the clock starts
+    // at the schedule and not at whatever the greeter does next.
+    inner.eviction = Some(task::spawn_local({
+      let context = Rc::clone(self);
+      async move { context.evict_greeter().await }
+    }));
 
     Self::push(&inner, Event::SessionStarted);
     drop(inner);
@@ -912,8 +947,105 @@ impl Context {
       loser.cancel();
     }
 
+    // Recorded at the point authentication succeeded and a session is committed,
+    // not once it is running: a session that fails to start was still this
+    // machine's last successful login, and is still the right account to offer
+    // next time.
+    self.record_last_user(&username);
+
     info!(user = username, ?winner, "Session scheduled");
     Ok(())
+  }
+
+  /// Makes the login screen leave so the authenticated session can have the VT.
+  ///
+  /// Only ever reached by a greeter that ignored `SessionStarted`. Left alone,
+  /// that is a machine which authenticated you and then sat there, so the
+  /// escalation is worth having even though it should never fire.
+  ///
+  /// A timer task rather than greetd's `alarm()` + SIGALRM: this is an async
+  /// daemon with a timer wheel already running, and a signal handler racing the
+  /// state it would have to inspect is the harder thing to get right.
+  async fn evict_greeter(self: Rc<Self>) {
+    let patience = self.config.general.patience;
+
+    // Taken from the session it is protecting rather than passed in, so the
+    // schedule time lives in exactly one place.
+    let Some(scheduled_at) = self
+      .inner
+      .lock()
+      .await
+      .scheduled
+      .as_ref()
+      .map(|pending| pending.scheduled_at)
+    else {
+      return;
+    };
+
+    // Measured from the schedule, which is the whole point. greetd measures from
+    // when the attempt was created, so a user who took longer than the patience
+    // to type their password had the SIGTERM step skipped entirely.
+    tokio::time::sleep(patience.saturating_sub(scheduled_at.elapsed())).await;
+
+    let inner = self.inner.lock().await;
+
+    // Gone on its own in the meantime, which is the normal path.
+    let Some(current) = &inner.current else {
+      return;
+    };
+
+    if !current.is_greeter {
+      return;
+    }
+
+    warn!(
+      seconds = scheduled_at.elapsed().as_secs(),
+      "The login screen has not exited, asking it to"
+    );
+
+    current.terminate();
+    drop(inner);
+
+    tokio::time::sleep(EVICTION_GRACE).await;
+
+    let inner = self.inner.lock().await;
+
+    let Some(current) = &inner.current else {
+      return;
+    };
+
+    if !current.is_greeter {
+      return;
+    }
+
+    warn!(
+      seconds = scheduled_at.elapsed().as_secs(),
+      "The login screen ignored SIGTERM, killing it"
+    );
+
+    current.kill();
+  }
+
+  /// Remembers who logged in, so the login screen opens on them next time.
+  ///
+  /// Advisory in both directions: a failure to write costs the next login its
+  /// pre-selected account and nothing else, so it is logged rather than
+  /// propagated.
+  fn record_last_user(&self, username: &str) {
+    let path = std::path::Path::new(LAST_USER_PATH);
+
+    let Some(directory) = path.parent() else {
+      return;
+    };
+
+    if let Err(error) = std::fs::create_dir_all(directory) {
+      warn!(?error, ?directory, "Could not create the state directory");
+      return;
+    }
+
+    if let Err(error) = std::fs::write(path, username) {
+      warn!(?error, ?path, "Could not record the last user");
+    }
   }
 
   /// Sends `Start` to the parked worker and waits for the session to be forked.
@@ -1051,6 +1183,13 @@ impl Context {
       // The greeter is out of the way, so the authenticated worker can have the
       // VT.
       let pending = inner.scheduled.take();
+
+      // Nothing left to evict. Left running, it would go on to signal whatever
+      // became `current` next - which is the session it was protecting.
+      if let Some(eviction) = inner.eviction.take() {
+        eviction.abort();
+      }
+
       drop(inner);
 
       if let Some(pending) = pending {
@@ -1099,6 +1238,10 @@ impl Context {
     }
 
     inner.scheduled = None;
+
+    if let Some(eviction) = inner.eviction.take() {
+      eviction.abort();
+    }
 
     if let Some(current) = inner.current.take() {
       current.terminate();

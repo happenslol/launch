@@ -354,7 +354,11 @@ struct SocketConversation {
 }
 
 impl SocketConversation {
-  fn ask(&self, style: AuthMessageType, message: &CStr) -> Result<Option<String>, ErrorCode> {
+  fn ask(
+    &self,
+    style: AuthMessageType,
+    message: &CStr,
+  ) -> Result<Option<greet_ipc::Secret>, ErrorCode> {
     let message = message.to_string_lossy().trim().to_owned();
 
     WorkerToParent::PamMessage { style, message }
@@ -370,9 +374,12 @@ impl SocketConversation {
     }
   }
 
+  /// The one place the secret leaves our control: `CString` has no wiping drop,
+  /// and `pam-client2` takes one by value. It lives from here until libpam has
+  /// copied it, which is as small a window as this API allows.
   fn prompt(&self, style: AuthMessageType, message: &CStr) -> Result<CString, ErrorCode> {
     let response = self.ask(style, message)?.ok_or(ErrorCode::CONV_ERR)?;
-    CString::new(response).map_err(|_| ErrorCode::CONV_ERR)
+    CString::new(response.expose()).map_err(|_| ErrorCode::CONV_ERR)
   }
 }
 
