@@ -1,6 +1,7 @@
 mod server;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
@@ -76,7 +77,7 @@ pub struct Notification {
   pub id: u32,
   pub app_name: SharedString,
   pub summary: SharedString,
-  pub body: SharedString,
+  pub body: Body,
   pub urgency: Urgency,
   pub expire_timeout: i32,
   pub actions: Vec<NotificationAction>,
@@ -130,7 +131,7 @@ impl Notification {
       id,
       app_name: SharedString::from(app_name),
       summary: SharedString::from(summary),
-      body: SharedString::from(strip_body_markup(body)),
+      body: parse_body(body),
       urgency,
       expire_timeout,
       actions,
@@ -155,66 +156,216 @@ impl Notification {
   }
 }
 
-/// The tags the spec defines for body markup. Nothing else is treated as a tag,
-/// so a body that merely happens to contain something like `<3` keeps it.
-const MARKUP_TAGS: [&str; 5] = ["b", "i", "u", "a", "img"];
-
 /// The longest entity we accept, `&#x10FFFF;` without its delimiters. Bounding
 /// the search keeps a lone `&` — ordinary text, as in `AT&T` — from dragging a
 /// scan across the rest of the body looking for a `;`.
 const MAX_ENTITY_LEN: usize = 8;
 
-/// Removes the markup the spec allows in a notification body and resolves the
-/// XML entities that come with it.
+/// The emphasis body markup can put on a stretch of text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Emphasis {
+  pub bold: bool,
+  pub italic: bool,
+  pub underline: bool,
+}
+
+impl Emphasis {
+  /// What the tags open at this point in the body add up to. They nest, so
+  /// `<b>bold <i>and italic</i></b>` carries both.
+  fn from_open_tags(open: &[MarkupTag]) -> Self {
+    let mut emphasis = Self::default();
+    for tag in open {
+      match tag {
+        MarkupTag::Bold => emphasis.bold = true,
+        MarkupTag::Italic => emphasis.italic = true,
+        MarkupTag::Underline => emphasis.underline = true,
+        MarkupTag::Link | MarkupTag::Image => {}
+      }
+    }
+    emphasis
+  }
+}
+
+/// A stretch of emphasized body text, as a byte range into [`Body::text`].
+/// Spans are ordered and never overlap.
+#[derive(Clone)]
+pub struct BodySpan {
+  pub range: Range<usize>,
+  pub emphasis: Emphasis,
+}
+
+/// A notification body with the spec's markup resolved: `text` is what gets
+/// displayed, with tags removed and entities decoded, and `spans` says which
+/// parts of it are emphasized.
+#[derive(Clone, Default)]
+pub struct Body {
+  pub text: SharedString,
+  pub spans: Vec<BodySpan>,
+}
+
+impl Body {
+  pub fn is_empty(&self) -> bool {
+    self.text.is_empty()
+  }
+}
+
+/// Builds a [`Body`] a chunk at a time, merging neighbouring text that carries
+/// the same emphasis so each stretch ends up as a single span.
+#[derive(Default)]
+pub struct BodyBuilder {
+  text: String,
+  spans: Vec<BodySpan>,
+}
+
+impl BodyBuilder {
+  pub fn is_empty(&self) -> bool {
+    self.text.is_empty()
+  }
+
+  pub fn push(&mut self, chunk: &str, emphasis: Emphasis) {
+    if chunk.is_empty() {
+      return;
+    }
+
+    let start = self.text.len();
+    self.text.push_str(chunk);
+
+    if emphasis == Emphasis::default() {
+      return;
+    }
+
+    match self.spans.last_mut() {
+      Some(last) if last.emphasis == emphasis && last.range.end == start => {
+        last.range.end = self.text.len()
+      }
+      _ => self.spans.push(BodySpan {
+        range: start..self.text.len(),
+        emphasis,
+      }),
+    }
+  }
+
+  pub fn build(self) -> Body {
+    Body {
+      text: SharedString::from(self.text),
+      spans: self.spans,
+    }
+  }
+}
+
+/// The tags the spec defines for body markup. Nothing else is treated as a tag,
+/// so a body that merely happens to contain something like `<3` keeps it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MarkupTag {
+  Bold,
+  Italic,
+  Underline,
+  /// Kept as plain text. Hyperlinks need the `body-hyperlinks` capability, which
+  /// we don't claim, and text styled as a link but not clickable would only
+  /// promise something we can't deliver.
+  Link,
+  /// Dropped along with its (empty) content. Images need `body-images`, which we
+  /// don't claim either.
+  Image,
+}
+
+impl MarkupTag {
+  fn parse(name: &str) -> Option<Self> {
+    [
+      ("b", Self::Bold),
+      ("i", Self::Italic),
+      ("u", Self::Underline),
+      ("a", Self::Link),
+      ("img", Self::Image),
+    ]
+    .into_iter()
+    // XML is case-sensitive, but senders thinking in HTML are not.
+    .find(|(candidate, _)| name.eq_ignore_ascii_case(candidate))
+    .map(|(_, tag)| tag)
+  }
+}
+
+/// Resolves the markup the spec allows in a notification body into text plus the
+/// emphasis to draw it with.
 ///
 /// Bodies are "XML-based, and consist of a small subset of HTML", so senders
 /// escape their text: Signal sends `Kaffee &amp; Kuchen`, blueman sends
-/// `<b>Hilmar&#x27;s Pixel Buds Pro</b>`. We do not advertise `body-markup`, and
-/// the spec has servers that don't "filter them out" — but filtering the tags
-/// without also decoding the entities is what leaves a literal `&gt;` on screen.
+/// `<b>Hilmar&#x27;s Pixel Buds Pro</b>`. Leaving that alone is what puts a
+/// literal `&gt;` on screen.
 ///
 /// Summaries are left alone: markup is defined for the body only, and senders
 /// treat it that way. The same Signal contact arrives as `Momo <3` in a summary
 /// and `Momo &lt;3` in a body.
 ///
-/// Tags are removed before entities are decoded, so an escaped `&lt;b&gt;` ends
+/// Tags are consumed before entities are decoded, so an escaped `&lt;b&gt;` ends
 /// up as literal text rather than being mistaken for markup on a second pass.
-fn strip_body_markup(body: String) -> String {
+fn parse_body(body: String) -> Body {
   if !body.contains(['<', '&']) {
-    return body;
+    return Body {
+      text: SharedString::from(body),
+      spans: Vec::new(),
+    };
   }
 
-  let mut stripped = String::with_capacity(body.len());
+  let mut builder = BodyBuilder::default();
+  let mut open: Vec<MarkupTag> = Vec::new();
   let mut rest = body.as_str();
+  let mut buffer = [0u8; 4];
 
   loop {
     let Some(index) = rest.find(['<', '&']) else {
-      stripped.push_str(rest);
-      return stripped;
+      builder.push(rest, Emphasis::from_open_tags(&open));
+      return builder.build();
     };
 
-    stripped.push_str(&rest[..index]);
+    builder.push(&rest[..index], Emphasis::from_open_tags(&open));
     rest = &rest[index..];
 
-    if let Some(after) = strip_tag(rest) {
+    if let Some((tag, closing, after)) = parse_tag(rest) {
+      match (tag, closing) {
+        (MarkupTag::Image, _) => {}
+        (tag, false) => open.push(tag),
+        // Mismatched nesting closes the innermost tag that matches, dropping
+        // whatever was left open inside it. Senders are not always well-formed,
+        // and one stray tag should not emphasize the rest of the body.
+        (tag, true) => {
+          if let Some(position) = open.iter().rposition(|entry| *entry == tag) {
+            open.truncate(position);
+          }
+        }
+      }
       rest = after;
-    } else if let Some((character, after)) = decode_entity(rest) {
-      stripped.push(character);
-      rest = after;
-    } else {
-      // Neither, so this is a bare `<` or `&` that the body is free to contain.
-      let mut characters = rest.chars();
-      stripped.extend(characters.next());
-      rest = characters.as_str();
+      continue;
     }
+
+    let (character, after) = match decode_entity(rest) {
+      Some(decoded) => decoded,
+      // Neither, so this is a bare `<` or `&` that the body is free to contain.
+      None => {
+        let mut characters = rest.chars();
+        let Some(character) = characters.next() else {
+          return builder.build();
+        };
+        (character, characters.as_str())
+      }
+    };
+
+    builder.push(
+      character.encode_utf8(&mut buffer),
+      Emphasis::from_open_tags(&open),
+    );
+    rest = after;
   }
 }
 
-/// Consumes one [`MARKUP_TAGS`] tag at the start of `text`, returning what
-/// follows it.
-fn strip_tag(text: &str) -> Option<&str> {
+/// Parses one [`MarkupTag`] at the start of `text`, returning it, whether it was
+/// a closing tag, and what follows it.
+fn parse_tag(text: &str) -> Option<(MarkupTag, bool, &str)> {
   let opened = text.strip_prefix('<')?;
-  let opened = opened.strip_prefix('/').unwrap_or(opened);
+  let (opened, closing) = match opened.strip_prefix('/') {
+    Some(opened) => (opened, true),
+    None => (opened, false),
+  };
   // An attribute value holding a `>` would cut the tag short here, but in XML it
   // has to arrive as `&gt;`, so there is none to find.
   let end = opened.find('>')?;
@@ -224,10 +375,7 @@ fn strip_tag(text: &str) -> Option<&str> {
     .next()
     .unwrap_or_default();
 
-  MARKUP_TAGS
-    .iter()
-    .any(|tag| name.eq_ignore_ascii_case(tag))
-    .then(|| &opened[end + 1..])
+  Some((MarkupTag::parse(name)?, closing, &opened[end + 1..]))
 }
 
 /// Decodes one XML entity at the start of `text`, returning the character it
@@ -404,7 +552,7 @@ impl Notifications {
     DB.record_notification(
       &notification.app_name,
       &notification.summary,
-      &notification.body,
+      &notification.body.text,
       &notification.app_icon,
       notification.urgency.as_u8(),
     );
@@ -600,7 +748,7 @@ async fn run_server(entity: Entity<Notifications>, cx: &mut gpui::AsyncApp) -> R
   while let Ok(request) = receiver.recv_async().await {
     match request {
       ServerRequest::Notify(notification) => {
-        entity.update(cx, |this, cx| this.push(notification, cx));
+        entity.update(cx, |this, cx| this.push(*notification, cx));
       }
       ServerRequest::Close(id) => {
         entity.update(cx, |this, cx| this.dismiss(id, CloseReason::Closed, cx));
@@ -613,12 +761,28 @@ async fn run_server(entity: Entity<Notifications>, cx: &mut gpui::AsyncApp) -> R
 
 #[cfg(test)]
 mod tests {
-  use super::strip_body_markup;
+  use super::{Emphasis, parse_body};
 
+  /// The rendered text, ignoring emphasis.
   #[track_caller]
   fn strip(body: &str) -> String {
-    strip_body_markup(body.to_owned())
+    parse_body(body.to_owned()).text.to_string()
   }
+
+  /// Each emphasized stretch as `(text, emphasis)`, in order.
+  #[track_caller]
+  fn spans(body: &str) -> Vec<(String, Emphasis)> {
+    let body = parse_body(body.to_owned());
+    body
+      .spans
+      .iter()
+      .map(|span| (body.text[span.range.clone()].to_owned(), span.emphasis))
+      .collect()
+  }
+
+  const BOLD: Emphasis = Emphasis { bold: true, italic: false, underline: false };
+  const ITALIC: Emphasis = Emphasis { bold: false, italic: true, underline: false };
+  const UNDERLINE: Emphasis = Emphasis { bold: false, italic: false, underline: true };
 
   #[test]
   fn decodes_entities() {
@@ -634,12 +798,53 @@ mod tests {
   }
 
   #[test]
-  fn strips_the_specs_tags() {
+  fn removes_the_specs_tags_from_the_text() {
     assert_eq!(strip("<b>Pixel Buds Pro</b> (24:29)"), "Pixel Buds Pro (24:29)");
     assert_eq!(strip("<i>a</i><u>b</u>"), "ab");
     assert_eq!(strip("see <a href=\"https://x.test\">this</a>"), "see this");
     assert_eq!(strip("<img src=\"a.png\" alt=\"a\"/>done"), "done");
     assert_eq!(strip("<B>upper</B>"), "upper");
+  }
+
+  #[test]
+  fn emphasizes_what_the_tags_cover() {
+    assert_eq!(spans("<b>Pixel Buds</b> (24:29)"), [("Pixel Buds".into(), BOLD)]);
+    assert_eq!(
+      spans("<i>a</i>x<u>b</u>"),
+      [("a".into(), ITALIC), ("b".into(), UNDERLINE)]
+    );
+    assert_eq!(spans("<B>upper</B>"), [("upper".into(), BOLD)]);
+    // Neither is rendered, so neither emphasizes anything.
+    assert_eq!(spans("see <a href=\"https://x.test\">this</a>"), []);
+    assert_eq!(spans("<img src=\"a.png\" alt=\"a\"/>done"), []);
+  }
+
+  /// Tags nest, so the emphasis of the innermost text is everything open.
+  #[test]
+  fn combines_nested_tags() {
+    let both = Emphasis { bold: true, italic: true, underline: false };
+    assert_eq!(
+      spans("<b>bold <i>both</i></b>"),
+      [("bold ".into(), BOLD), ("both".into(), both)]
+    );
+  }
+
+  /// Neighbouring text with the same emphasis becomes one span, so a tag split
+  /// by an entity doesn't fragment into several runs.
+  #[test]
+  fn merges_neighbouring_text() {
+    assert_eq!(spans("<b>Q&amp;A</b>"), [("Q&A".into(), BOLD)]);
+    assert_eq!(spans("<b>a</b><b>b</b>"), [("ab".into(), BOLD)]);
+  }
+
+  /// Senders are not always well-formed, and one stray tag should not
+  /// emphasize everything after it.
+  #[test]
+  fn survives_mismatched_nesting() {
+    assert_eq!(spans("</b>not bold"), []);
+    assert_eq!(spans("<b>a<i>b</b>c"), [("a".into(), BOLD), ("b".into(), Emphasis { bold: true, italic: true, underline: false })]);
+    // An unclosed tag runs to the end, as it would in any XML reader.
+    assert_eq!(spans("plain <b>to the end"), [("to the end".into(), BOLD)]);
   }
 
   /// Only the spec's tags are markup, so text that merely looks tag-ish stays.
@@ -672,5 +877,6 @@ mod tests {
     assert_eq!(strip("Gruppenfotos starten um 16h"), "Gruppenfotos starten um 16h");
     assert_eq!(strip(""), "");
     assert_eq!(strip("line one\nline two"), "line one\nline two");
+    assert_eq!(spans("Gruppenfotos starten um 16h"), []);
   }
 }

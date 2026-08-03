@@ -15,7 +15,9 @@ pub(super) const NOTIFICATIONS_OBJECT: &str = "/org/freedesktop/Notifications";
 /// executor, so rather than touching gpui state directly they are forwarded to
 /// the foreground [`super::Notifications`] entity over a channel.
 pub(super) enum ServerRequest {
-  Notify(Notification),
+  /// Boxed so the variant doesn't dwarf `Close`; a `Notification` carries its
+  /// decoded image and parsed body.
+  Notify(Box<Notification>),
   Close(u32),
 }
 
@@ -57,7 +59,7 @@ impl NotificationServer {
       expire_timeout,
     );
 
-    if let Err(error) = self.requests.send(ServerRequest::Notify(notification)) {
+    if let Err(error) = self.requests.send(ServerRequest::Notify(Box::new(notification))) {
       warn!(?error, "notification receiver dropped");
     }
 
@@ -74,6 +76,10 @@ impl NotificationServer {
     vec![
       "actions".to_string(),
       "body".to_string(),
+      // Bold, italic and underline are drawn; `<a>` keeps its text and `<img>`
+      // is dropped, which is why neither `body-hyperlinks` nor `body-images`
+      // is claimed alongside.
+      "body-markup".to_string(),
       "icon-static".to_string(),
       "persistence".to_string(),
     ]

@@ -9,8 +9,9 @@ use std::{
 
 use gpui::{
   Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, DisplayId, Div, ElementId,
-  Entity, FontWeight, Global, ImageSource, IntoElement, MouseButton, ObjectFit, Pixels, Render,
-  Resource, SharedString, Size, Stateful, Styled, Subscription, Task, WeakEntity, Window,
+  Entity, FontStyle, FontWeight, Global, HighlightStyle, ImageSource, IntoElement, MouseButton,
+  ObjectFit, Pixels, Render, Resource, SharedString, Size, Stateful, Styled, StyledText,
+  Subscription, Task, UnderlineStyle, WeakEntity, Window,
   WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, img,
   point, prelude::*, px, rems, rgb, rgba,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
@@ -21,7 +22,8 @@ use tracing::{error, warn};
 use crate::{
   config::ConfigState,
   dbus::notifications::{
-    CloseReason, Notification, NotificationAction, NotificationEvent, Notifications, Urgency,
+    Body, BodyBuilder, CloseReason, Emphasis, Notification, NotificationAction, NotificationEvent,
+    Notifications, Urgency,
   },
   icon::{Icon, IconName},
   util::{ResultExt, h_flex, v_flex},
@@ -39,6 +41,10 @@ const COMPACT_ICON_SIZE: f32 = 36.0;
 const MESSAGE_ICON_SIZE: f32 = 44.0;
 
 const MEDIA_COVER_HEIGHT: f32 = 120.0;
+
+/// The family the cards draw in. It is embedded with regular, bold, italic and
+/// bold-italic faces, which is what lets body markup resolve to real ones.
+const CARD_FONT: &str = "Noto Sans";
 
 /// The most lines a wrapping body is allowed to occupy before it is clamped and
 /// ellipsized. Past a few lines a toast is better truncated than turned into a
@@ -361,7 +367,7 @@ impl CardState {
 struct CardText {
   app_name: SharedString,
   summary: SharedString,
-  body: SharedString,
+  body: Body,
 }
 
 impl CardText {
@@ -369,7 +375,7 @@ impl CardText {
     Self {
       app_name: single_line(&notification.app_name),
       summary: single_line(&notification.summary),
-      body: single_line(&notification.body),
+      body: single_line_body(&notification.body),
     }
   }
 }
@@ -385,13 +391,92 @@ impl CardText {
 fn single_line(text: &SharedString) -> SharedString {
   // Cloning a `SharedString` is a refcount bump, so leave already-flat text —
   // the common case — alone rather than rebuilding it.
-  let is_flat = !text.contains(|character: char| character.is_whitespace() && character != ' ')
-    && !text.contains("  ");
-  if is_flat {
+  if is_flat(text) {
     return text.clone();
   }
 
   SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// [`single_line`] for a body, carrying its emphasis across the collapse.
+///
+/// Spans are byte ranges into the text, so rather than remapping them the body
+/// is rebuilt from the characters that survive, each carrying the emphasis it
+/// had at its old offset. Collapsed whitespace takes the emphasis of the run it
+/// stood for, which keeps an underline unbroken across the spaces inside it.
+fn single_line_body(body: &Body) -> Body {
+  if is_flat(&body.text) {
+    return body.clone();
+  }
+
+  let mut builder = BodyBuilder::default();
+  let mut spans = body.spans.iter().peekable();
+  let mut pending_space: Option<Emphasis> = None;
+  let mut buffer = [0u8; 4];
+
+  for (offset, character) in body.text.char_indices() {
+    while spans.next_if(|span| span.range.end <= offset).is_some() {}
+    let emphasis = spans
+      .peek()
+      .filter(|span| span.range.start <= offset)
+      .map_or_default(|span| span.emphasis);
+
+    if character.is_whitespace() {
+      // Held back rather than emitted, so a run collapses to one space and a
+      // trailing run — like a leading one — produces nothing at all.
+      if pending_space.is_none() && !builder.is_empty() {
+        pending_space = Some(emphasis);
+      }
+      continue;
+    }
+
+    if let Some(emphasis) = pending_space.take() {
+      builder.push(" ", emphasis);
+    }
+    builder.push(character.encode_utf8(&mut buffer), emphasis);
+  }
+
+  builder.build()
+}
+
+/// Whether text is already one line with no repeated or edge spaces, and so
+/// survives [`single_line`] unchanged.
+fn is_flat(text: &str) -> bool {
+  !text.contains(|character: char| character.is_whitespace() && character != ' ')
+    && !text.contains("  ")
+    && !text.starts_with(' ')
+    && !text.ends_with(' ')
+}
+
+/// The body as an element, styled where its markup asks for it. Plain bodies —
+/// nearly all of them — skip [`StyledText`] and the run bookkeeping it brings.
+fn render_body(body: &Body) -> AnyElement {
+  if body.spans.is_empty() {
+    return body.text.clone().into_any_element();
+  }
+
+  StyledText::new(body.text.clone())
+    .with_highlights(
+      body
+        .spans
+        .iter()
+        .map(|span| (span.range.clone(), highlight(span.emphasis))),
+    )
+    .into_any_element()
+}
+
+/// Emphasis as a delta on whatever text style the card puts the body in, so the
+/// size and colour each layout picks are left alone.
+fn highlight(emphasis: Emphasis) -> HighlightStyle {
+  HighlightStyle {
+    font_weight: emphasis.bold.then_some(FontWeight::BOLD),
+    font_style: emphasis.italic.then_some(FontStyle::Italic),
+    underline: emphasis.underline.then(|| UnderlineStyle {
+      thickness: px(1.),
+      ..Default::default()
+    }),
+    ..Default::default()
+  }
 }
 
 struct NotificationsView {
@@ -536,6 +621,10 @@ impl NotificationsView {
 
     div()
       .id(SharedString::from(format!("notif-{id}")))
+      // Pinned rather than left to the default `.SystemUIFont`, which resolves
+      // to a single face: a run asking for bold or italic gets the regular one
+      // back, so body markup renders with no visible emphasis at all.
+      .font_family(CARD_FONT)
       .flex_none()
       .w_full()
       .max_h(px(MAX_CARD_HEIGHT))
@@ -706,7 +795,7 @@ impl NotificationsView {
                     .text_xs()
                     .text_color(rgba(0xFFFFFF99))
                     .truncate()
-                    .child(card.text.body.clone()),
+                    .child(render_body(&card.text.body)),
                 )
               }),
           )
@@ -783,7 +872,7 @@ impl NotificationsView {
                         // cut mid-word by the card's `overflow_hidden`.
                         .line_clamp(BODY_MAX_LINES)
                         .text_ellipsis()
-                        .child(card.text.body.clone()),
+                        .child(render_body(&card.text.body)),
                     )
                   }),
               ),
@@ -835,7 +924,7 @@ impl NotificationsView {
                         .text_sm()
                         .text_color(rgba(0xFFFFFFAA))
                         .truncate()
-                        .child(card.text.body.clone()),
+                        .child(render_body(&card.text.body)),
                     )
                   }),
               )
@@ -1013,5 +1102,62 @@ fn relative_time(received: Instant) -> SharedString {
     SharedString::from(format!("{}h", seconds / 3600))
   } else {
     SharedString::from(format!("{}d", seconds / 86_400))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{Body, BodyBuilder, Emphasis, single_line_body};
+
+  const NONE: Emphasis = Emphasis { bold: false, italic: false, underline: false };
+  const BOLD: Emphasis = Emphasis { bold: true, italic: false, underline: false };
+  const UNDERLINE: Emphasis = Emphasis { bold: false, italic: false, underline: true };
+
+  fn body(chunks: &[(&str, Emphasis)]) -> Body {
+    let mut builder = BodyBuilder::default();
+    for (chunk, emphasis) in chunks {
+      builder.push(chunk, *emphasis);
+    }
+    builder.build()
+  }
+
+  /// Each emphasized stretch as `(text, emphasis)`, in order.
+  #[track_caller]
+  fn spans(body: &Body) -> Vec<(String, Emphasis)> {
+    body
+      .spans
+      .iter()
+      .map(|span| (body.text[span.range.clone()].to_owned(), span.emphasis))
+      .collect()
+  }
+
+  #[test]
+  fn flattens_a_body_and_carries_its_emphasis() {
+    let flattened = single_line_body(&body(&[("line one\nline ", NONE), ("two", BOLD)]));
+    assert_eq!(flattened.text, "line one line two");
+    assert_eq!(spans(&flattened), [("two".to_owned(), BOLD)]);
+  }
+
+  /// Whitespace inside a span collapses along with the rest but keeps its
+  /// emphasis, so an underline isn't broken at every space it spans.
+  #[test]
+  fn keeps_spans_contiguous_across_collapsed_whitespace() {
+    let flattened = single_line_body(&body(&[("a\n\n  b", UNDERLINE)]));
+    assert_eq!(flattened.text, "a b");
+    assert_eq!(spans(&flattened), [("a b".to_owned(), UNDERLINE)]);
+  }
+
+  #[test]
+  fn drops_edge_whitespace_and_the_spans_over_it() {
+    let flattened = single_line_body(&body(&[("  ", NONE), ("bold", BOLD), (" \n ", BOLD)]));
+    assert_eq!(flattened.text, "bold");
+    assert_eq!(spans(&flattened), [("bold".to_owned(), BOLD)]);
+  }
+
+  #[test]
+  fn leaves_flat_bodies_alone() {
+    let flattened = single_line_body(&body(&[("already flat ", NONE), ("here", BOLD)]));
+    assert_eq!(flattened.text, "already flat here");
+    assert_eq!(spans(&flattened), [("here".to_owned(), BOLD)]);
   }
 }
