@@ -267,7 +267,10 @@ fn run(socket: &StdUnixDatagram) -> Result<()> {
     }
   };
 
-  WorkerToParent::FinalChildPid(child.as_raw()).send(socket)?;
+  WorkerToParent::FinalChildPid {
+    pid: child.as_raw(),
+  }
+  .send(socket)?;
 
   // Nothing more will be said to the daemon, and the session must not find an
   // open channel to it.

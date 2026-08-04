@@ -14,8 +14,14 @@ use uzers::os::unix::UserExt as _;
 
 use crate::config::UsersConfig;
 
-/// Login shells that mean the account is not for logging in.
-const NOLOGIN_SHELLS: &[&str] = &["/bin/false", "/usr/bin/false", "/sbin/nologin"];
+/// Shell *names* that mean the account is not for logging in.
+///
+/// Matched on the file name rather than the whole path, because where the binary
+/// lives varies: `/sbin/nologin` on a traditional distribution,
+/// `/run/current-system/sw/bin/nologin` or a bare store path on NixOS. Comparing
+/// path suffixes misses all but the first, which is how thirty-two `nixbld`
+/// accounts came to be offered on the login screen.
+const NOLOGIN_SHELLS: &[&str] = &["nologin", "false"];
 
 pub struct Account {
   pub name: String,
@@ -52,12 +58,8 @@ pub fn list(config: &UsersConfig) -> Vec<Account> {
         return false;
       }
 
-      let shell = user.shell().to_string_lossy();
-      if NOLOGIN_SHELLS
-        .iter()
-        .any(|nologin| shell.ends_with(nologin))
-      {
-        debug!(user = %name, %shell, "Skipping an account that cannot log in");
+      if !can_log_in(user.shell()) {
+        debug!(user = %name, shell = %user.shell().display(), "Skipping an account that cannot log in");
         return false;
       }
 
@@ -76,6 +78,20 @@ pub fn list(config: &UsersConfig) -> Vec<Account> {
   accounts
 }
 
+/// Whether a shell is one somebody could actually log in through.
+///
+/// An empty shell is not a refusal: passwd leaves it blank to mean the system
+/// default, which is a real shell.
+fn can_log_in(shell: &std::path::Path) -> bool {
+  let Some(name) = shell.file_name() else {
+    return true;
+  };
+
+  !NOLOGIN_SHELLS
+    .iter()
+    .any(|nologin| name.as_encoded_bytes() == nologin.as_bytes())
+}
+
 /// Turns the accounts into what the greeter is told about them.
 ///
 /// The display name is derived by `greet_ipc::user` rather than here, so the
@@ -89,4 +105,41 @@ pub fn to_ipc(accounts: &[Account], avatars: &HashMap<String, PathBuf>) -> Vec<I
       name: account.name.clone(),
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+  use std::path::Path;
+
+  use super::*;
+
+  /// The store paths are the cases that matter: matching on a path suffix like
+  /// `/sbin/nologin` silently lets every NixOS system account through.
+  #[test]
+  fn recognises_shells_that_cannot_log_in() {
+    for shell in [
+      "/sbin/nologin",
+      "/usr/sbin/nologin",
+      "/run/current-system/sw/bin/nologin",
+      "/nix/store/abc123-shadow-4.17.4/bin/nologin",
+      "/bin/false",
+      "/nix/store/abc123-coreutils-9.8/bin/false",
+    ] {
+      assert!(!can_log_in(Path::new(shell)), "{shell} should be refused");
+    }
+  }
+
+  #[test]
+  fn accepts_real_shells() {
+    for shell in [
+      "/bin/sh",
+      "/bin/bash",
+      "/run/current-system/sw/bin/zsh",
+      "/nix/store/abc123-fish-4.0.0/bin/fish",
+      // Blank means the system default, which is a shell like any other.
+      "",
+    ] {
+      assert!(can_log_in(Path::new(shell)), "{shell} should be accepted");
+    }
+  }
 }

@@ -26,6 +26,7 @@ tokio = { version = "1.49", optional = true, default-features = false, features 
 ] }
 
 [dev-dependencies]
+async-io = "2"
 async-net = "2"
 futures = "0.3"
 
@@ -35,4 +36,9 @@ futures = "0.3"
 [[example]]
 name = "stub-greetd"
 path = "examples/stub-greetd.rs"
+required-features = ["futures-io"]
+
+[[example]]
+name = "greet-client"
+path = "examples/greet-client.rs"
 required-features = ["futures-io"]

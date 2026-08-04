@@ -144,6 +144,21 @@
           '';
         });
 
+      # Test tooling: a greeter that speaks the protocol from a shell script, for
+      # driving the daemon in a VM where there is no compositor to draw a real
+      # login screen into. Kept out of `package` so it cannot reach a system
+      # profile, and it reuses `cargoArtifacts`, so it costs one crate to build.
+      greetClient = craneLib.buildPackage (args
+        // {
+          inherit cargoArtifacts;
+          pname = "greet-client";
+          cargoExtraArgs = "--locked -p greet-ipc --features futures-io --example greet-client";
+          doCheck = false;
+          installPhaseCommand = ''
+            install -Dm755 target/release/examples/greet-client "$out/bin/greet-client"
+          '';
+        });
+
       libraryPath = pkgs.lib.makeLibraryPath (with pkgs; [
         libxkbcommon
         vulkan-loader
@@ -173,6 +188,11 @@
       };
 
       packages.default = package;
+      packages.greet-client = greetClient;
+
+      checks.greeter = import ./nix/greeter-test.nix {
+        inherit self pkgs;
+      };
     })
     // {
       overlays.default = final: _prev: {
@@ -181,5 +201,6 @@
 
       nixosModules.default = nixosModule;
       nixosModules.launch = nixosModule;
+      nixosModules.greeter = import ./nix/greeter.nix;
     };
 }

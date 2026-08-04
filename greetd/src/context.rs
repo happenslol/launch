@@ -963,7 +963,7 @@ impl Context {
 
     let session = loop {
       match pending.worker.recv().await? {
-        WorkerToParent::FinalChildPid(pid) => break Pid::from_raw(pid),
+        WorkerToParent::FinalChildPid { pid } => break Pid::from_raw(pid),
         // A module can still speak during open_session - pam_motd and the like.
         // Nothing is listening by then, so they are acknowledged and dropped.
         WorkerToParent::PamMessage { .. } => {
@@ -1036,7 +1036,7 @@ impl Context {
 
     let session = loop {
       match worker.recv().await? {
-        WorkerToParent::FinalChildPid(pid) => break Pid::from_raw(pid),
+        WorkerToParent::FinalChildPid { pid } => break Pid::from_raw(pid),
         WorkerToParent::PamMessage { .. } => {
           worker
             .send(&ParentToWorker::PamResponse { response: None })

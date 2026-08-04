@@ -131,7 +131,13 @@ pub enum WorkerToParent {
     message: String,
   },
   /// The session process was forked; this is its pid.
-  FinalChildPid(i32),
+  ///
+  /// A struct variant, not a newtype: `#[serde(tag = "type")]` cannot represent a
+  /// newtype variant wrapping a primitive, and it fails at *runtime* rather than
+  /// at compile time. Every variant here must therefore be a unit or a struct.
+  FinalChildPid {
+    pid: i32,
+  },
 }
 
 impl ParentToWorker {
@@ -391,6 +397,86 @@ pub fn terminal_mode(selection: VtSelection, switch: bool) -> Result<TerminalMod
         vt,
         switch: false,
       })
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// `#[serde(tag = "type")]` cannot represent a newtype variant wrapping a
+  /// primitive, and it fails when the message is *sent* rather than when it is
+  /// compiled. Every variant is round-tripped here because the one that was
+  /// missing this - the pid of a started session - meant no login could ever
+  /// complete, and nothing else in the test suite touched it.
+  #[test]
+  fn every_worker_message_survives_the_wire() {
+    let messages = vec![
+      WorkerToParent::Ready,
+      WorkerToParent::Success,
+      WorkerToParent::Error {
+        message: "nope".to_owned(),
+      },
+      WorkerToParent::PamMessage {
+        style: AuthMessageType::Secret,
+        message: "Password:".to_owned(),
+      },
+      WorkerToParent::FinalChildPid { pid: 4321 },
+    ];
+
+    for message in messages {
+      let encoded = serde_json::to_vec(&message)
+        .unwrap_or_else(|error| panic!("{message:?} could not be encoded: {error}"));
+
+      let decoded: WorkerToParent =
+        serde_json::from_slice(&encoded).expect("decodes what it encoded");
+
+      assert_eq!(
+        serde_json::to_string(&message).expect("serializes"),
+        serde_json::to_string(&decoded).expect("serializes"),
+      );
+    }
+  }
+
+  #[test]
+  fn every_daemon_message_survives_the_wire() {
+    let messages = vec![
+      ParentToWorker::InitiateLogin {
+        service: "launch-greeter".to_owned(),
+        class: SessionClass::User,
+        user: "ada".to_owned(),
+        authenticate: true,
+        terminal: TerminalMode::Terminal {
+          path: "/dev/tty2".to_owned(),
+          vt: 2,
+          switch: true,
+        },
+        source_profile: true,
+        seat: Some("seat0".to_owned()),
+        session_type: "wayland".to_owned(),
+        listener_path: None,
+        command: "niri --session".to_owned(),
+      },
+      ParentToWorker::PamResponse { response: None },
+      ParentToWorker::PamResponse {
+        response: Some(Secret::new("hunter2".to_owned()).expect("within the bound")),
+      },
+      ParentToWorker::Start,
+      ParentToWorker::Cancel,
+    ];
+
+    for message in messages {
+      let encoded = serde_json::to_vec(&message)
+        .unwrap_or_else(|error| panic!("{message:?} could not be encoded: {error}"));
+
+      let decoded: ParentToWorker =
+        serde_json::from_slice(&encoded).expect("decodes what it encoded");
+
+      assert_eq!(
+        serde_json::to_string(&message).expect("serializes"),
+        serde_json::to_string(&decoded).expect("serializes"),
+      );
     }
   }
 }
