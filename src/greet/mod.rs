@@ -17,32 +17,71 @@ mod client;
 use std::time::Duration;
 
 use gpui::{
-  App, Bounds, Context, DisplayId, Entity, EventEmitter, Focusable, Global, IntoElement,
-  MouseButton, Render, SharedString, Size, Styled, Subscription, Task, Window,
-  WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div,
+  App, Bounds, Context, DisplayId, Entity, EventEmitter, FocusHandle, Focusable, Global,
+  IntoElement, KeyBinding, MouseButton, Render, SharedString, Size, Styled, Subscription, Task,
+  Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+  actions, div,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
-  px,
+  px, rems, rgb, rgba,
 };
 use greet_ipc::{AuthFailure, AuthSource, Event, PROTOCOL_VERSION, Request, Secret};
 use tracing::{debug, error, info, warn};
 
 use crate::auth_screen::{
   AuthPrompt, AuthUser, FingerprintState, PasswordMirror, REJECTION_HIGHLIGHT,
-  apply_password_mirror, render_auth_screen,
+  apply_password_mirror, render_auth_screen, render_avatar,
 };
 use crate::config::ConfigState;
 use crate::greet::client::{ClientEvent, GreetClient};
+use crate::icon::{Icon, IconName};
 use crate::input::state::{InputEvent, InputState};
 use crate::status::{self, Clock};
-use crate::util::ResultExt;
+use crate::util::{ResultExt, h_flex, v_flex};
 
 struct GlobalGreeter(#[allow(dead_code)] Entity<Greeter>);
 
 impl Global for GlobalGreeter {}
 
+actions!(
+  greeter,
+  [
+    /// Replace the prompt with the list of accounts.
+    SwitchUser,
+    /// Return to the prompt, changing nothing.
+    DismissSwitcher,
+    SelectNextUser,
+    SelectPrevUser,
+    /// Authenticate as the highlighted account.
+    ConfirmUser,
+  ]
+);
+
+/// Active whenever the prompt has the keyboard, so `alt-u` reaches us from
+/// inside the password field. No `InputState` binding uses `alt`, so nothing is
+/// shadowed.
+const CONTEXT: &str = "greeter";
+
+/// Active only while the list is up, which is what lets it claim the bare arrows
+/// and `enter` that belong to the field the rest of the time.
+const SWITCHER_CONTEXT: &str = "greeter_switcher";
+
+/// Avatars in the list are chips beside a name rather than the portrait the
+/// prompt leads with, so they get their own size through the same renderer.
+const SWITCHER_AVATAR_SIZE: gpui::Pixels = px(40.);
+
 pub fn start(cx: &mut App) {
+  // Bound once here rather than per surface: `bind_keys` is global, and a
+  // greeter with three outputs would otherwise register everything three times.
+  cx.bind_keys([
+    KeyBinding::new("alt-u", SwitchUser, Some(CONTEXT)),
+    KeyBinding::new("escape", DismissSwitcher, Some(SWITCHER_CONTEXT)),
+    KeyBinding::new("down", SelectNextUser, Some(SWITCHER_CONTEXT)),
+    KeyBinding::new("up", SelectPrevUser, Some(SWITCHER_CONTEXT)),
+    KeyBinding::new("enter", ConfirmUser, Some(SWITCHER_CONTEXT)),
+  ]);
+
   let greeter = cx.new(Greeter::new);
 
   // Deliberately after `cx.new` has returned rather than inside it. Opening a
@@ -140,6 +179,16 @@ pub struct Greeter {
   /// Whether an attempt was turned down just now, which the field is outlined
   /// for.
   rejected: bool,
+  /// Which account the attempt in flight is for, which is not always the
+  /// highlighted one: the list moves its highlight freely and only commits on
+  /// enter.
+  authenticating: Option<SharedString>,
+  /// Whether the account list has replaced the prompt.
+  ///
+  /// Never the opening screen, even with several accounts on offer: the machine
+  /// almost always wants the same one, and a list would make every login two
+  /// steps.
+  switching: bool,
   fingerprint: FingerprintState,
   /// Surfaces, in the order the displays were enumerated.
   screens: Vec<WindowHandle<GreetScreen>>,
@@ -189,6 +238,8 @@ impl Greeter {
       error: None,
       hint: None,
       rejected: false,
+      authenticating: None,
+      switching: false,
       fingerprint: FingerprintState::Off,
       screens: Vec::new(),
       displays: Vec::new(),
@@ -348,6 +399,9 @@ impl Greeter {
       Event::Authenticated { via } => {
         info!(?via, "Authenticated");
         self.phase = Phase::Starting;
+        // A finger can land on the reader while the list is open, and there is no
+        // account left to choose once one has been let in.
+        self.switching = false;
         self.fingerprint = FingerprintState::Off;
         self.hint = None;
         self.error = None;
@@ -404,6 +458,7 @@ impl Greeter {
     };
 
     let username = user.name.to_string();
+    self.authenticating = Some(user.name.clone());
     self.prompt_ready = false;
     self.pending_password = None;
     self.phase = Phase::Ready;
@@ -413,12 +468,72 @@ impl Greeter {
     self.request(Request::Authenticate { username });
   }
 
+  /// Shows or hides the account list. Only ever reachable when there is more
+  /// than one account, so it cannot strand a single-user machine in a list of
+  /// one.
+  fn set_switching(&mut self, switching: bool, cx: &mut Context<Self>) {
+    if self.users.len() < 2 {
+      return;
+    }
+
+    self.switching = switching;
+    cx.notify();
+  }
+
+  /// Points the highlight at one account, for a pointer that skipped the arrows.
+  fn highlight(&mut self, index: usize, cx: &mut Context<Self>) {
+    if index >= self.users.len() {
+      return;
+    }
+
+    self.selected = index;
+    cx.notify();
+  }
+
+  /// Moves the highlight without committing to it, so arrowing past an account
+  /// does not tear down a perfectly good attempt on the way.
+  fn move_highlight(&mut self, delta: isize, cx: &mut Context<Self>) {
+    if self.users.is_empty() {
+      return;
+    }
+
+    let count = self.users.len() as isize;
+    let next = (self.selected as isize + delta).rem_euclid(count);
+    self.selected = next as usize;
+    cx.notify();
+  }
+
+  /// Commits the highlighted account and returns to the prompt.
+  fn confirm_highlight(&mut self, cx: &mut Context<Self>) {
+    self.switching = false;
+
+    // Landed back on the account already being authenticated - a plain escape by
+    // another route. Restarting would throw away a live attempt, and with it a
+    // reader that is already armed, for nothing.
+    if self.authenticating.as_ref() == self.user().map(|user| &user.name) {
+      cx.notify();
+      return;
+    }
+
+    self.error = None;
+    self.rejected = false;
+    self.fingerprint = FingerprintState::Off;
+    self.clear_password(cx);
+
+    // No `Cancel` first: the daemon abandons the attempt in flight when it is
+    // asked to authenticate somebody else, so sending one would only be a second
+    // way of saying the same thing.
+    self.begin(cx);
+  }
+
   fn disconnected(&mut self, reason: SharedString, cx: &mut Context<Self>) {
     warn!(%reason, "Disconnected from the login service");
 
     self.client = None;
     self.prompt_ready = false;
     self.pending_password = None;
+    // A list of accounts none of which can be authenticated is worse than none.
+    self.switching = false;
     self.phase = Phase::Unavailable(reason.clone());
 
     // A missing socket means we were not started by the daemon, and no amount of
@@ -454,6 +569,24 @@ impl Greeter {
 
   pub fn user(&self) -> Option<&AuthUser> {
     self.users.get(self.selected)
+  }
+
+  pub fn users(&self) -> &[AuthUser] {
+    &self.users
+  }
+
+  pub fn selected(&self) -> usize {
+    self.selected
+  }
+
+  pub fn switching(&self) -> bool {
+    self.switching
+  }
+
+  /// Whether there is anywhere to switch to. With one account the button is not
+  /// drawn at all, so the common machine never sees it.
+  pub fn can_switch(&self) -> bool {
+    self.users.len() > 1
   }
 
   pub fn error(&self) -> Option<SharedString> {
@@ -681,6 +814,9 @@ pub struct GreetScreen {
   /// The field, on the surface that has one.
   password: Option<Entity<InputState>>,
   clock: bool,
+  /// Held by the account list while it is up, because it needs the arrows and
+  /// `enter` that the field binds the rest of the time.
+  focus_handle: FocusHandle,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -737,8 +873,167 @@ impl GreetScreen {
       greeter,
       password,
       clock,
+      focus_handle: cx.focus_handle(),
       _subscriptions: subscriptions,
     }
+  }
+
+  /// Puts the account list up and gives it the keyboard.
+  ///
+  /// Focus has to move off the field: the list wants the bare arrows and `enter`
+  /// that `InputState` binds, and it only gets them once the field is no longer
+  /// the focused element.
+  fn on_switch_user(&mut self, _: &SwitchUser, window: &mut Window, cx: &mut Context<Self>) {
+    if !self.greeter.read(cx).can_switch() {
+      return;
+    }
+
+    window.focus(&self.focus_handle, cx);
+    self
+      .greeter
+      .update(cx, |greeter, cx| greeter.set_switching(true, cx));
+  }
+
+  fn on_dismiss_switcher(
+    &mut self,
+    _: &DismissSwitcher,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.close_switcher(window, cx);
+    self
+      .greeter
+      .update(cx, |greeter, cx| greeter.set_switching(false, cx));
+  }
+
+  fn on_select_next_user(&mut self, _: &SelectNextUser, _: &mut Window, cx: &mut Context<Self>) {
+    self
+      .greeter
+      .update(cx, |greeter, cx| greeter.move_highlight(1, cx));
+  }
+
+  fn on_select_prev_user(&mut self, _: &SelectPrevUser, _: &mut Window, cx: &mut Context<Self>) {
+    self
+      .greeter
+      .update(cx, |greeter, cx| greeter.move_highlight(-1, cx));
+  }
+
+  fn on_confirm_user(&mut self, _: &ConfirmUser, window: &mut Window, cx: &mut Context<Self>) {
+    self.confirm(window, cx);
+  }
+
+  fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.close_switcher(window, cx);
+    self
+      .greeter
+      .update(cx, |greeter, cx| greeter.confirm_highlight(cx));
+  }
+
+  /// Hands the keyboard back to the field, which is where every route out of the
+  /// list ends up.
+  fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(password) = &self.password {
+      window.focus(&password.focus_handle(cx), cx);
+    }
+  }
+
+  /// One row of the account list.
+  fn render_user_row(
+    &self,
+    index: usize,
+    user: &AuthUser,
+    highlighted: bool,
+    cx: &mut Context<Self>,
+  ) -> gpui::Stateful<gpui::Div> {
+    let display_name = user.display_name.clone();
+    let username = user.name.clone();
+
+    h_flex()
+      .id(("greeter-user", index))
+      .w_full()
+      .items_center()
+      .gap_3()
+      .p_2()
+      .rounded(px(8.))
+      .when(highlighted, |this| this.bg(rgba(0xFFFFFF14)))
+      .hover(|this| this.bg(rgba(0xFFFFFF1F)))
+      .child(render_avatar(
+        user.avatar.as_ref(),
+        user.initial.clone(),
+        SWITCHER_AVATAR_SIZE,
+      ))
+      .child(
+        v_flex()
+          .gap_0p5()
+          .child(div().text_sm().child(display_name.clone()))
+          .when(display_name != username, |this| {
+            this.child(div().text_xs().text_color(rgba(0xFFFFFFAA)).child(username))
+          }),
+      )
+      .on_click(cx.listener(move |this, _event, window, cx| {
+        this
+          .greeter
+          .update(cx, |greeter, cx| greeter.highlight(index, cx));
+        this.confirm(window, cx);
+      }))
+  }
+
+  /// The list itself, which replaces the prompt rather than covering it: a login
+  /// screen with two things asking for input at once is a login screen where it
+  /// is unclear what typing does.
+  fn render_switcher(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    let greeter = self.greeter.read(cx);
+    let selected = greeter.selected();
+
+    let rows: Vec<_> = greeter
+      .users()
+      .iter()
+      .enumerate()
+      .map(|(index, user)| (index, user.clone()))
+      .collect();
+
+    v_flex()
+      .track_focus(&self.focus_handle)
+      .key_context(SWITCHER_CONTEXT)
+      .on_action(cx.listener(Self::on_dismiss_switcher))
+      .on_action(cx.listener(Self::on_select_next_user))
+      .on_action(cx.listener(Self::on_select_prev_user))
+      .on_action(cx.listener(Self::on_confirm_user))
+      .w(px(360.))
+      .gap_1()
+      .child(
+        div()
+          .text_sm()
+          .text_color(rgba(0xFFFFFFAA))
+          .pb_2()
+          .child("Log in as"),
+      )
+      .children(
+        rows
+          .into_iter()
+          .map(|(index, user)| self.render_user_row(index, &user, index == selected, cx)),
+      )
+  }
+
+  /// The quiet way back into the list, for a pointer or for somebody who does not
+  /// know about `alt-u`.
+  fn render_switch_button(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    h_flex()
+      .id("greeter-switch-user")
+      .items_center()
+      .gap_2()
+      .px_2()
+      .py_1()
+      .rounded(px(6.))
+      .text_sm()
+      .text_color(rgba(0xFFFFFFAA))
+      .hover(|this| this.bg(rgba(0xFFFFFF14)).text_color(rgb(0xFFFFFF)))
+      .child(Icon::new(IconName::Users).size(rems(0.95)))
+      .child("Switch user")
+      .on_click(
+        cx.listener(|this, _event, window, cx| this.on_switch_user(&SwitchUser, window, cx)),
+      )
+      .into_any_element()
   }
 
   fn submit(&mut self, cx: &mut Context<Self>) {
@@ -778,6 +1073,12 @@ impl Render for GreetScreen {
         .when(self.clock, |this| this.child(self.render_clock(cx)));
     };
 
+    if greeter.switching() {
+      return backdrop()
+        .child(self.render_switcher(cx))
+        .when(self.clock, |this| this.child(self.render_clock(cx)));
+    }
+
     let Some(user) = greeter.user() else {
       return div()
         .size_full()
@@ -785,19 +1086,35 @@ impl Render for GreetScreen {
         .when(self.clock, |this| this.child(self.render_clock(cx)));
     };
 
+    let can_switch = greeter.can_switch();
+    let busy = greeter.busy();
+    let fingerprint = greeter.fingerprint();
+    let rejected = greeter.rejected();
+    let hint = greeter.hint();
+    let error = greeter.error();
+    let status = greeter.status();
+    let user = user.clone();
+
+    let below = match can_switch {
+      true => Some(self.render_switch_button(cx)),
+      false => None,
+    };
+
     render_auth_screen(AuthPrompt {
-      user,
+      user: &user,
       password: &password,
-      busy: greeter.busy(),
-      fingerprint: greeter.fingerprint(),
-      rejected: greeter.rejected(),
-      hint: greeter.hint(),
-      error: greeter.error(),
-      status: greeter.status(),
-      // The user switcher lands with the IPC client, which is what supplies a
-      // list longer than one.
-      below: None,
+      busy,
+      fingerprint,
+      rejected,
+      hint,
+      error,
+      status,
+      below,
     })
+    // On the prompt rather than only on the field, so `alt-u` works wherever the
+    // keyboard happens to be within the login screen.
+    .key_context(CONTEXT)
+    .on_action(cx.listener(Self::on_switch_user))
     .on_mouse_down(
       MouseButton::Left,
       cx.listener(|this, _event, window, cx| {
@@ -808,6 +1125,19 @@ impl Render for GreetScreen {
     )
     .when(self.clock, |this| this.child(self.render_clock(cx)))
   }
+}
+
+/// The frame both states share, so switching does not move the background.
+fn backdrop() -> gpui::Div {
+  div()
+    .size_full()
+    .relative()
+    .flex()
+    .flex_col()
+    .items_center()
+    .justify_center()
+    .bg(rgb(0x0D0D0D))
+    .text_color(rgb(0xFFFFFF))
 }
 
 #[cfg(test)]
