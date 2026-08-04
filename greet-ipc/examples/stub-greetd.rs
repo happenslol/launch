@@ -111,17 +111,14 @@ async fn serve(stream: async_net::unix::UnixStream) -> Result<(), Box<dyn std::e
                 failure: AuthFailure::Error {
                   message: message.to_owned(),
                 },
-                retry: false,
               },
             ],
             _ => match step.as_str() {
-              // The dead-path half of rejection: the greeter should ask for a
-              // whole new attempt. Typing a wrong password exercises the other
-              // half, where the daemon re-arms and only a fresh prompt follows.
+              // The greeter should respond by asking for a whole new attempt,
+              // exactly as it does when a typed password is turned down.
               "reject" => vec![Event::Failed {
                 source: AuthSource::Password,
                 failure: AuthFailure::Rejected,
-                retry: false,
               }],
               // The reader giving up after too many failed matches.
               "fpexhausted" => vec![
@@ -163,28 +160,18 @@ async fn serve(stream: async_net::unix::UnixStream) -> Result<(), Box<dyn std::e
           )
           .await?
         }
-        // Re-armed rather than abandoned, which is what the daemon does with a
-        // rejected password - so a fresh prompt has to follow, or the greeter
-        // would sit waiting for one.
+        // No prompt follows. The daemon abandons the whole attempt, and the
+        // greeter comes back with a fresh `Authenticate` - which is what produces
+        // the next prompt, above.
         false => {
           send(
             &mut writer,
             Event::Failed {
               source: AuthSource::Password,
               failure: AuthFailure::Rejected,
-              retry: true,
             },
           )
-          .await?;
-
-          send(
-            &mut writer,
-            Event::Prompt {
-              source: AuthSource::Password,
-              echo: false,
-            },
-          )
-          .await?;
+          .await?
         }
       },
       Request::Cancel => {}

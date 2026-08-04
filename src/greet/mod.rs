@@ -80,13 +80,11 @@ enum Rejection {
   Ignore,
   /// Say so, but leave the password field exactly as it is.
   ShowOnly,
-  /// This path is armed again; the field goes live and waits for its prompt.
-  WaitForPrompt,
   /// This path is dead; ask the daemon to start over.
   NewAttempt,
 }
 
-fn rejection(phase: &Phase, source: AuthSource, retry: bool) -> Rejection {
+fn rejection(phase: &Phase, source: AuthSource) -> Rejection {
   match (phase, source) {
     // The race is over and the session is on its way. A losing worker's
     // complaint would only replace "Starting session" with an error for whatever
@@ -97,10 +95,24 @@ fn rejection(phase: &Phase, source: AuthSource, retry: bool) -> Rejection {
     // prompt, and pretending otherwise sends the next thing typed to
     // `pending_password` to wait for a prompt that has already been and gone.
     (_, AuthSource::Fingerprint) => Rejection::ShowOnly,
-    (_, AuthSource::Password) => match retry {
-      true => Rejection::WaitForPrompt,
-      false => Rejection::NewAttempt,
-    },
+    // The daemon never re-arms a slot, so there is no prompt coming for the
+    // worker that just died - the whole attempt has to be asked for again.
+    (_, AuthSource::Password) => Rejection::NewAttempt,
+  }
+}
+
+/// The line shown under the field while the reader is armed.
+///
+/// Written here rather than passed through from `pam_fprintd`, whose own wording
+/// ("Swipe your finger across the fingerprint reader") reads as the next thing to
+/// do when it is really an alternative to the field above it. Phrased as an aside
+/// for that reason.
+fn fingerprint_hint(state: FingerprintState) -> Option<SharedString> {
+  match state {
+    FingerprintState::Off => None,
+    FingerprintState::Starting => None,
+    FingerprintState::Waiting => Some("or use your fingerprint".into()),
+    FingerprintState::Reading => Some("Reading your fingerprint".into()),
   }
 }
 
@@ -121,12 +133,10 @@ pub struct Greeter {
   primary_output: Option<SharedString>,
   /// Why the last attempt failed, if it did.
   error: Option<SharedString>,
-  /// Whatever PAM had to say during an attempt, and which worker said it.
-  ///
-  /// The source is kept because a hint outlives the thing that produced it:
-  /// "Swipe your finger" has to go when the reader does, or the screen ends up
-  /// asking for a finger nothing is listening for.
-  hint: Option<(AuthSource, SharedString)>,
+  /// Whatever the password stack had to say during an attempt. The fingerprint
+  /// line is not here - it comes from [`fingerprint_hint`], so it cannot outlive
+  /// the reader that prompted it.
+  hint: Option<SharedString>,
   /// Whether an attempt was turned down just now, which the field is outlined
   /// for.
   rejected: bool,
@@ -306,8 +316,8 @@ impl Greeter {
 
       Event::Prompt { .. } => false,
 
-      Event::Info { source, message } => {
-        self.hint = Some((source, message.into()));
+      Event::Info { message, .. } => {
+        self.hint = Some(message.into());
         false
       }
 
@@ -318,33 +328,13 @@ impl Greeter {
 
       Event::Fingerprint { state } => {
         self.fingerprint = state.into();
-
-        // Whatever the reader last asked for is no longer being waited on.
-        if self.fingerprint == FingerprintState::Off
-          && matches!(self.hint, Some((AuthSource::Fingerprint, _)))
-        {
-          self.hint = None;
-        }
-
         false
       }
 
-      Event::Failed {
-        source,
-        failure,
-        retry,
-      } => {
-        match rejection(&self.phase, source, retry) {
+      Event::Failed { source, failure } => {
+        match rejection(&self.phase, source) {
           Rejection::Ignore => {}
           Rejection::ShowOnly => self.show_failure(failure, cx),
-          // The daemon re-armed this path and a fresh prompt is coming, so the
-          // field goes live without a new attempt - which would discard a
-          // fingerprint worker that is still running.
-          Rejection::WaitForPrompt => {
-            self.show_failure(failure, cx);
-            self.disarm_password(cx);
-            self.phase = Phase::Ready;
-          }
           Rejection::NewAttempt => {
             self.show_failure(failure, cx);
             self.disarm_password(cx);
@@ -470,8 +460,14 @@ impl Greeter {
     self.error.clone()
   }
 
+  /// A word from the password stack wins the single hint row over the standing
+  /// fingerprint line: it is something the user has to read, where the reader
+  /// being armed is also visible from the indicator in the field.
   pub fn hint(&self) -> Option<SharedString> {
-    self.hint.as_ref().map(|(_, message)| message.clone())
+    self
+      .hint
+      .clone()
+      .or_else(|| fingerprint_hint(self.fingerprint))
   }
 
   pub fn rejected(&self) -> bool {
@@ -823,42 +819,37 @@ mod tests {
   /// this is the one that looks fine and silently swallows what is typed.
   #[test]
   fn a_fingerprint_failure_leaves_the_password_field_alone() {
-    for retry in [true, false] {
-      assert_eq!(
-        rejection(&Phase::Ready, AuthSource::Fingerprint, retry),
-        Rejection::ShowOnly,
-        "with retry = {retry}"
-      );
-    }
-  }
-
-  #[test]
-  fn a_rejected_password_waits_for_the_re_armed_prompt() {
     assert_eq!(
-      rejection(&Phase::Ready, AuthSource::Password, true),
-      Rejection::WaitForPrompt
+      rejection(&Phase::Ready, AuthSource::Fingerprint),
+      Rejection::ShowOnly
     );
   }
 
   #[test]
-  fn a_dead_password_path_asks_for_a_new_attempt() {
+  fn a_failed_password_asks_for_a_new_attempt() {
     assert_eq!(
-      rejection(&Phase::Ready, AuthSource::Password, false),
+      rejection(&Phase::Ready, AuthSource::Password),
       Rejection::NewAttempt
     );
+  }
+
+  /// The reader going away has to take its line with it, or the screen offers a
+  /// fingerprint nothing is listening for.
+  #[test]
+  fn the_fingerprint_line_only_exists_while_the_reader_does() {
+    assert_eq!(fingerprint_hint(FingerprintState::Off), None);
+    assert!(fingerprint_hint(FingerprintState::Waiting).is_some());
   }
 
   /// The losing worker's failure can arrive after the winner authenticated.
   #[test]
   fn nothing_is_applied_once_the_session_is_starting() {
     for source in [AuthSource::Password, AuthSource::Fingerprint] {
-      for retry in [true, false] {
-        assert_eq!(
-          rejection(&Phase::Starting, source, retry),
-          Rejection::Ignore,
-          "for {source:?} with retry = {retry}"
-        );
-      }
+      assert_eq!(
+        rejection(&Phase::Starting, source),
+        Rejection::Ignore,
+        "for {source:?}"
+      );
     }
   }
 }

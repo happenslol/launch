@@ -184,19 +184,15 @@ pub enum Event {
   Fingerprint {
     state: FingerprintState,
   },
-  /// This worker turned the attempt down. The other one, if any, is unaffected.
+  /// This worker turned the attempt down.
+  ///
+  /// The path is dead either way: the daemon never re-arms a slot in place, so
+  /// the greeter asks for a whole new attempt. That is GDM's behaviour too, and
+  /// the pause while both workers restart is not unwelcome after a wrong
+  /// password.
   Failed {
     source: AuthSource,
     failure: AuthFailure,
-    /// Whether this path is armed again and will send a fresh [`Event::Prompt`].
-    ///
-    /// A rejected password re-arms in place, so the greeter waits for the new
-    /// prompt; anything else leaves the path dead, and the greeter has to ask
-    /// for a whole new attempt. Without this the greeter would have to infer
-    /// which happened from the failure kind, and guessing wrong means either a
-    /// login screen waiting for a prompt nobody will send, or one that discards
-    /// a live fingerprint worker on every typo.
-    retry: bool,
   },
   /// PAM accepted. The greeter should send [`Request::StartSession`].
   Authenticated {

@@ -322,6 +322,20 @@ fn fail_child(message: &[u8]) -> ! {
 /// Turns a PAM error into something worth showing, keeping the distinction the
 /// UI needs between "wrong password" and "something is broken".
 fn pam_failure(error: pam_client2::Error) -> anyhow::Error {
+  // The stack could not even try - no reader attached, nothing enrolled for this
+  // user, fprintd not running. Distinct from a rejection because there is nothing
+  // for the user to do differently, and distinct from a broken stack because
+  // nothing is broken. GDM makes the same distinction from the same two codes,
+  // and it is what lets this daemon offer a fingerprint worker without first
+  // asking whether the user has any prints.
+  if matches!(
+    error.code(),
+    ErrorCode::AUTHINFO_UNAVAIL | ErrorCode::MODULE_UNKNOWN
+  ) {
+    debug!(?error, "Authentication service unavailable");
+    return anyhow::anyhow!(UNAVAILABLE);
+  }
+
   let rejected = matches!(
     error.code(),
     ErrorCode::AUTH_ERR
@@ -343,6 +357,11 @@ fn pam_failure(error: pam_client2::Error) -> anyhow::Error {
 /// Sentinel the daemon matches on to tell an ordinary rejection from a broken
 /// stack. A rejection needs no message: the field it was typed into says it.
 pub const REJECTED: &str = "__rejected__";
+
+/// Sentinel for a stack that could not be attempted at all. Reported to the
+/// greeter as the path going away rather than as a failure, so a machine with no
+/// enrolled prints simply shows no fingerprint indicator.
+pub const UNAVAILABLE: &str = "__unavailable__";
 
 /// Answers PAM's prompts by asking the daemon, which asks the greeter.
 ///

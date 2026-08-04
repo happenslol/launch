@@ -20,7 +20,7 @@ use tokio::task::{self, JoinHandle};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::session::REJECTED;
+use crate::session::{REJECTED, UNAVAILABLE};
 use crate::worker::{
   AuthMessageType, ParentToWorker, SessionClass, TerminalMode, Worker, WorkerToParent,
 };
@@ -61,13 +61,6 @@ const EVICTION_GRACE: Duration = Duration::from_secs(2);
 /// account most likely to be wanted. Advisory: an unreadable or stale value
 /// falls through to the configured default (see [`crate::users`]).
 pub const LAST_USER_PATH: &str = "/var/lib/launch-greetd/last-user";
-
-/// Where fprintd keeps enrolled prints, one directory per user.
-///
-/// Read only to decide whether forking a fingerprint worker is worth it, and
-/// deliberately fail-open (see [`Context::has_enrolled_prints`]): this is
-/// fprintd's private storage layout, not an interface it promises to keep.
-const FPRINT_STORAGE: &str = "/var/lib/fprint";
 
 /// A session that is running: the worker holding its PAM transaction, and the
 /// process the worker forked.
@@ -178,7 +171,8 @@ struct Attempt {
   username: String,
   password: Option<Slot>,
   /// The second worker, running a stack whose auth half is `pam_fprintd` and
-  /// nothing else. Absent when the reader is unavailable or unenrolled.
+  /// nothing else. Absent when the configuration disables it or the fork failed;
+  /// a reader that turns out to be unusable is discovered by the worker itself.
   fingerprint: Option<Slot>,
   /// Which worker got there first. Set once and never overwritten, so two
   /// workers reporting success cannot both win.
@@ -374,7 +368,13 @@ impl Context {
     // A failure here is not fatal. The password worker is already up, and a
     // login screen that works one way is worth more than one that refuses to
     // appear because a reader is broken.
-    let fingerprint = match self.fingerprint_eligible(&username) {
+    // Started whenever the stack exists, without first asking whether this user
+    // has any prints enrolled. `pam_fprintd` answers that itself with
+    // `PAM_AUTHINFO_UNAVAIL`, which arrives here as the path going quiet rather
+    // than as a failure - so there is nothing to gain from reading fprintd's
+    // private storage layout to guess the same answer less reliably. GDM does it
+    // this way too.
+    let fingerprint = match self.config.session.fingerprint {
       false => None,
       true => match self
         .spawn_slot(
@@ -415,42 +415,6 @@ impl Context {
     });
 
     Ok(())
-  }
-
-  /// Whether a fingerprint worker is worth forking for this user.
-  ///
-  /// The service file having been checked at startup is what `config.session
-  /// .fingerprint` already means, so only the per-user question is left.
-  fn fingerprint_eligible(&self, username: &str) -> bool {
-    self.config.session.fingerprint && Self::has_enrolled_prints(username)
-  }
-
-  /// Whether fprintd has prints stored for this user.
-  ///
-  /// Purely an optimisation, and deliberately fail-open: `true` on anything
-  /// unexpected. Asking fprintd properly would mean a D-Bus round trip on the
-  /// login path, and reading its storage directly couples us to a layout it does
-  /// not promise to keep - so a wrong answer here must cost a wasted fork, never
-  /// a reader that silently stops working. The worker itself is the real check:
-  /// `pam_fprintd` returns immediately when there is nothing enrolled.
-  fn has_enrolled_prints(username: &str) -> bool {
-    Self::prints_stored_in(std::path::Path::new(FPRINT_STORAGE), username)
-  }
-
-  fn prints_stored_in(storage: &std::path::Path, username: &str) -> bool {
-    let directory = storage.join(username);
-
-    match std::fs::read_dir(&directory) {
-      Ok(mut entries) => entries.next().is_some(),
-      // The one case we can conclude from: fprintd has no storage for this user.
-      Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-      // Anything else - no permission, no fprintd, a layout that moved - is not
-      // ours to conclude from, so let the worker decide.
-      Err(error) => {
-        debug!(?error, ?directory, "Could not tell whether prints exist");
-        true
-      }
-    }
   }
 
   /// Forks one worker and starts pumping its messages.
@@ -629,17 +593,18 @@ impl Context {
           // There is no equivalent for the lock screen's `Reading`: libpam has
           // no way to report a finger mid-swipe, which fprintd's own D-Bus
           // signals do.
-          if source == AuthSource::Fingerprint {
-            Self::push(
-              &inner,
-              Event::Fingerprint {
-                state: greet_ipc::FingerprintState::Waiting,
-              },
-            );
-          }
-
-          let event = match style {
-            AuthMessageType::Error => Event::Error { source, message },
+          //
+          // Only the *arrival* is used. `pam_fprintd`'s own wording is an
+          // instruction ("Swipe your finger across the fingerprint reader") which
+          // reads as the thing to do next, when it is really an alternative to the
+          // password sitting right above it - so the greeter writes its own line
+          // from the state instead, and the text is dropped here. GDM substitutes
+          // it in the same place for the same reason.
+          let event = match (source, style) {
+            (AuthSource::Fingerprint, AuthMessageType::Info) => Event::Fingerprint {
+              state: greet_ipc::FingerprintState::Waiting,
+            },
+            (_, AuthMessageType::Error) => Event::Error { source, message },
             _ => Event::Info { source, message },
           };
 
@@ -685,6 +650,7 @@ impl Context {
 
       WorkerToParent::Error { message } => {
         let rejected = message.contains(REJECTED);
+        let unavailable = message.contains(UNAVAILABLE);
         debug!(?source, message, "Attempt turned down");
 
         // Only this slot fails. A fingerprint that gives up must never take a
@@ -707,14 +673,31 @@ impl Context {
           return true;
         }
 
-        // A wrong password re-arms in place. Sending the greeter back through
-        // `Authenticate` instead would tear down a live fingerprint worker and
-        // re-claim the reader on every typo.
-        let retry = source == AuthSource::Password && rejected;
-
         // Read out before the pushes below, for the same reason as above.
-        let username = attempt.username.clone();
         let empty = attempt.is_empty();
+
+        if source == AuthSource::Fingerprint {
+          Self::push(
+            &inner,
+            Event::Fingerprint {
+              state: greet_ipc::FingerprintState::Off,
+            },
+          );
+        }
+
+        // The stack could not be attempted, so there is nothing to report: the
+        // indicator going away above is the whole message. Saying more would mean
+        // a machine with no enrolled prints greeting every user with an error
+        // about a reader they were never going to use.
+        if unavailable {
+          debug!(?source, "Path unavailable, offering it no further");
+
+          if empty {
+            inner.attempt = None;
+          }
+
+          return true;
+        }
 
         let failure = match (source, rejected) {
           (_, false) => AuthFailure::Error { message },
@@ -726,34 +709,10 @@ impl Context {
           },
         };
 
-        if source == AuthSource::Fingerprint {
-          Self::push(
-            &inner,
-            Event::Fingerprint {
-              state: greet_ipc::FingerprintState::Off,
-            },
-          );
-        }
+        Self::push(&inner, Event::Failed { source, failure });
 
-        Self::push(
-          &inner,
-          Event::Failed {
-            source,
-            failure,
-            retry,
-          },
-        );
-
-        // Kept alive across the re-arm: the slot it is about to be given back is
-        // for this attempt, and dropping it here would orphan that worker.
-        if empty && !retry {
+        if empty {
           inner.attempt = None;
-        }
-
-        drop(inner);
-
-        if retry {
-          self.rearm_password(username).await;
         }
 
         true
@@ -763,64 +722,6 @@ impl Context {
         warn!(?source, ?other, "Unexpected message from a worker");
         true
       }
-    }
-  }
-
-  /// Replaces a rejected password worker with a fresh one, leaving any
-  /// fingerprint worker exactly as it was.
-  async fn rearm_password(self: &Rc<Self>, username: String) {
-    let slot = match self
-      .spawn_slot(
-        AuthSource::Password,
-        &self.config.session.service,
-        &username,
-      )
-      .await
-    {
-      Ok(slot) => slot,
-      Err(error) => {
-        error!(?error, "Could not restart password authentication");
-
-        let mut inner = self.inner.lock().await;
-        Self::push(
-          &inner,
-          Event::Error {
-            source: AuthSource::Password,
-            message: "Password authentication is unavailable".to_owned(),
-          },
-        );
-
-        // Nothing will prompt again, so the attempt is over. The greeter finds
-        // out by asking for a new one.
-        if inner.attempt.as_ref().is_some_and(Attempt::is_empty) {
-          inner.attempt = None;
-        }
-
-        return;
-      }
-    };
-
-    let mut inner = self.inner.lock().await;
-
-    // The attempt can have been replaced while the fork was in progress - a user
-    // switch, a cancel, or the fingerprint worker winning - in which case this
-    // worker is already obsolete.
-    let stale = match inner.attempt.as_ref() {
-      None => true,
-      Some(attempt) => {
-        attempt.username != username || attempt.winner.is_some() || attempt.password.is_some()
-      }
-    };
-
-    if stale {
-      drop(inner);
-      debug!("Discarding a password worker for an attempt that moved on");
-      slot.cancel();
-      return;
-    }
-
-    if let Some(attempt) = inner.attempt.as_mut() {
-      attempt.password = Some(slot);
     }
   }
 
@@ -860,8 +761,6 @@ impl Context {
         failure: AuthFailure::Error {
           message: "Authentication stopped unexpectedly".to_owned(),
         },
-        // A worker that died without a word is not something to retry blindly.
-        retry: false,
       },
     );
 
@@ -1256,70 +1155,5 @@ impl Context {
     if let Some(current) = inner.current.take() {
       current.terminate();
     }
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn fixture(name: &str) -> std::path::PathBuf {
-    let directory = std::env::temp_dir().join(format!(
-      "launch-greetd-prints-{}-{name}",
-      std::process::id()
-    ));
-
-    std::fs::remove_dir_all(&directory).ok();
-    std::fs::create_dir_all(&directory).expect("creates the fixture");
-    directory
-  }
-
-  #[test]
-  fn finds_stored_prints() {
-    let storage = fixture("enrolled");
-    let user = storage.join("ada");
-    std::fs::create_dir_all(&user).expect("creates the user directory");
-    std::fs::write(user.join("right-index-finger"), b"print").expect("writes a print");
-
-    assert!(Context::prints_stored_in(&storage, "ada"));
-  }
-
-  #[test]
-  fn an_empty_directory_is_not_enrolled() {
-    let storage = fixture("empty");
-    std::fs::create_dir_all(storage.join("ada")).expect("creates the user directory");
-
-    assert!(!Context::prints_stored_in(&storage, "ada"));
-  }
-
-  #[test]
-  fn a_missing_directory_is_not_enrolled() {
-    let storage = fixture("missing");
-    assert!(!Context::prints_stored_in(&storage, "ada"));
-  }
-
-  /// The check is an optimisation, so anything it cannot answer has to come back
-  /// `true` and leave the decision to the worker. Answering `false` here would
-  /// silently disable the fingerprint reader.
-  #[test]
-  fn an_unreadable_directory_falls_open() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let storage = fixture("unreadable");
-    let user = storage.join("ada");
-    std::fs::create_dir_all(&user).expect("creates the user directory");
-    std::fs::set_permissions(&user, std::fs::Permissions::from_mode(0o000))
-      .expect("removes permissions");
-
-    // Root ignores the mode, which would make this assert the opposite of what
-    // it is checking.
-    if nix::unistd::Uid::current().is_root() {
-      return;
-    }
-
-    let answer = Context::prints_stored_in(&storage, "ada");
-    std::fs::set_permissions(&user, std::fs::Permissions::from_mode(0o700)).ok();
-
-    assert!(answer);
   }
 }
