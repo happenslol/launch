@@ -233,11 +233,14 @@ in {
       }
     ];
 
+    # greetd has no `vt` option any more - nixpkgs fixed it to VT 1 - so the
+    # overlap is decidable without reading anything from it.
     warnings =
-      lib.optional (config.services.greetd.enable && config.services.greetd.vt == cfg.vt)
+      lib.optional (config.services.greetd.enable && cfg.vt == 1)
       ''
-        Both greetd and the launch greeter are configured for VT ${toString cfg.vt}.
-        They will fight over it; give one of them a different VT.
+        greetd is enabled and always uses VT 1, which programs.launch.greeter is
+        also set to. They will fight over it: give the launch greeter a different
+        vt, or disable greetd.
       '';
 
     programs.launch.greeter.greeterCommand =
@@ -363,7 +366,11 @@ in {
 
     # A login manager *is* the graphical target: without this the machine boots to
     # multi-user, nothing pulls the unit in, and there is no way to log in.
-    systemd.defaultUnit = "graphical.target";
+    #
+    # A default rather than a plain assignment so it cannot collide with another
+    # display manager's identical setting while both are installed - which is the
+    # normal state during a cutover.
+    systemd.defaultUnit = lib.mkDefault "graphical.target";
 
     # A desktop daemon for the greeter's own account would be a second launch
     # instance fighting the login screen for the same abstract socket.
