@@ -16,6 +16,7 @@ mod client;
 
 use std::time::Duration;
 
+use futures::StreamExt as _;
 use gpui::{
   App, Bounds, Context, DisplayId, Entity, EventEmitter, FocusHandle, Focusable, Global,
   IntoElement, KeyBinding, MouseButton, Render, SharedString, Size, Styled, Subscription, Task,
@@ -34,6 +35,8 @@ use crate::auth_screen::{
   apply_password_mirror, render_auth_screen, render_avatar,
 };
 use crate::config::ConfigState;
+use crate::dbus::GlobalDbusConnection;
+use crate::dbus::fprintd::FingerprintReader;
 use crate::greet::client::{ClientEvent, GreetClient};
 use crate::icon::{Icon, IconName};
 use crate::input::state::{InputEvent, InputState};
@@ -200,6 +203,8 @@ pub struct Greeter {
   _events: Option<Task<()>>,
   _rejection: Option<Task<()>>,
   _retry: Option<Task<()>>,
+  /// Follows the sensor so the field can spin while a finger is actually on it.
+  _finger_present: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
 }
 
@@ -245,6 +250,7 @@ impl Greeter {
       displays: Vec::new(),
       retry_delay: RETRY_INITIAL,
       _events: None,
+      _finger_present: None,
       _rejection: None,
       _retry: None,
       _subscriptions: subscriptions,
@@ -379,6 +385,17 @@ impl Greeter {
 
       Event::Fingerprint { state } => {
         self.fingerprint = state.into();
+
+        // Armed for the first time: start following the sensor. `pam_fprintd`
+        // reports nothing between arming and success - verified in its source, it
+        // only speaks on retries - so a finger landing is invisible through the
+        // daemon. fprintd itself does say, and `finger-present` needs no claim
+        // and no polkit, which is the one thing an unprivileged login screen can
+        // still ask about.
+        if self.fingerprint == FingerprintState::Waiting && self._finger_present.is_none() {
+          self.watch_finger_present(cx);
+        }
+
         false
       }
 
@@ -432,6 +449,67 @@ impl Greeter {
         false
       }
     }
+  }
+
+  /// Mirrors the sensor into the field's indicator, exactly as the lock screen
+  /// does - it is the same fprintd property behind the same two states.
+  fn watch_finger_present(&mut self, cx: &mut Context<Self>) {
+    let connection = GlobalDbusConnection::system(cx);
+
+    self._finger_present = Some(cx.spawn(async move |this, cx| {
+      // The global connection is lazy; nothing has forced it before now.
+      let Some(connection) = connection.await else {
+        warn!("System bus unavailable, the sensor cannot be followed");
+        return;
+      };
+
+      let reader = match FingerprintReader::observe(&connection).await {
+        Ok(Some(reader)) => reader,
+        Ok(None) => {
+          debug!("No fingerprint reader to follow");
+          return;
+        }
+        Err(error) => {
+          warn!(?error, "Could not reach the fingerprint reader");
+          return;
+        }
+      };
+
+      let changes = match reader.listen_finger_present().await {
+        Ok(changes) => changes,
+        Err(error) => {
+          warn!(?error, "Could not follow the state of the sensor");
+          return;
+        }
+      };
+
+      debug!(reader = %reader.name, "Following the fingerprint sensor");
+
+      futures::pin_mut!(changes);
+
+      while let Some(present) = changes.next().await {
+        if this
+          .update(cx, |this, cx| this.set_finger_present(present, cx))
+          .is_err()
+        {
+          break;
+        }
+      }
+    }));
+  }
+
+  /// Moves only between waiting and reading. A reader the daemon has turned off,
+  /// or an attempt already won, must not be brought back to life by a stray
+  /// property change.
+  fn set_finger_present(&mut self, present: bool, cx: &mut Context<Self>) {
+    let state = match (self.fingerprint, present) {
+      (FingerprintState::Waiting, true) => FingerprintState::Reading,
+      (FingerprintState::Reading, false) => FingerprintState::Waiting,
+      _ => return,
+    };
+
+    self.fingerprint = state;
+    cx.notify();
   }
 
   fn show_failure(&mut self, failure: AuthFailure, cx: &mut Context<Self>) {

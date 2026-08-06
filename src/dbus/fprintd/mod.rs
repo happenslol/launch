@@ -84,10 +84,35 @@ pub struct FingerprintReader {
 }
 
 impl FingerprintReader {
-  /// Looks up the default reader. `Ok(None)` covers the ordinary reasons there
-  /// is nothing to verify against - no fprintd, no reader, no enrolled prints -
-  /// so callers can treat fingerprint support as simply absent.
-  pub async fn find(connection: &zbus::Connection) -> Result<Option<Self>> {
+  /// Looks up the default reader without asking whose prints are on it.
+  ///
+  /// For watching the sensor rather than verifying against it. The login screen
+  /// runs as an unprivileged account with no prints of its own, so the
+  /// enrollment check [`Self::find`] does would always come back empty - and
+  /// asking about somebody else's prints needs polkit's `setusername`, which is
+  /// not obtainable non-interactively. Watching needs neither: `GetDefaultDevice`
+  /// is ungated, and `finger-present` arrives as an ordinary property change.
+  ///
+  /// The returned handle must not be claimed or verified with. Only the
+  /// `pam_fprintd` worker does that, and two claimants would fight over one
+  /// device.
+  pub async fn observe(connection: &zbus::Connection) -> Result<Option<Self>> {
+    let Some(proxy) = Self::default_device(connection).await? else {
+      return Ok(None);
+    };
+
+    let name = proxy.name().await.log_err().unwrap_or_default();
+
+    Ok(Some(Self {
+      proxy,
+      name: name.into(),
+    }))
+  }
+
+  /// The default device, if fprintd has one.
+  async fn default_device(
+    connection: &zbus::Connection,
+  ) -> Result<Option<api::DeviceProxy<'static>>> {
     let manager = api::ManagerProxy::new(connection).await?;
 
     let path = match manager.get_default_device().await {
@@ -102,6 +127,17 @@ impl FingerprintReader {
       .path(path)?
       .build()
       .await?;
+
+    Ok(Some(proxy))
+  }
+
+  /// Looks up the default reader. `Ok(None)` covers the ordinary reasons there
+  /// is nothing to verify against - no fprintd, no reader, no enrolled prints -
+  /// so callers can treat fingerprint support as simply absent.
+  pub async fn find(connection: &zbus::Connection) -> Result<Option<Self>> {
+    let Some(proxy) = Self::default_device(connection).await? else {
+      return Ok(None);
+    };
 
     match proxy.list_enrolled_fingers(CURRENT_USER).await {
       // fprintd answers with `NoEnrolledPrints` rather than an empty list, but
