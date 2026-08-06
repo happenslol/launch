@@ -143,21 +143,6 @@ fn rejection(phase: &Phase, source: AuthSource) -> Rejection {
   }
 }
 
-/// The line shown under the field while the reader is armed.
-///
-/// Written here rather than passed through from `pam_fprintd`, whose own wording
-/// ("Swipe your finger across the fingerprint reader") reads as the next thing to
-/// do when it is really an alternative to the field above it. Phrased as an aside
-/// for that reason.
-fn fingerprint_hint(state: FingerprintState) -> Option<SharedString> {
-  match state {
-    FingerprintState::Off => None,
-    FingerprintState::Starting => None,
-    FingerprintState::Waiting => Some("or use your fingerprint".into()),
-    FingerprintState::Reading => Some("Reading your fingerprint".into()),
-  }
-}
-
 /// Shared state of the login screen, rendered by a [`GreetScreen`] per output.
 pub struct Greeter {
   client: Option<GreetClient>,
@@ -175,9 +160,9 @@ pub struct Greeter {
   primary_output: Option<SharedString>,
   /// Why the last attempt failed, if it did.
   error: Option<SharedString>,
-  /// Whatever the password stack had to say during an attempt. The fingerprint
-  /// line is not here - it comes from [`fingerprint_hint`], so it cannot outlive
-  /// the reader that prompted it.
+  /// Whatever the password stack had to say during an attempt, which is the only
+  /// thing this row ever carries - the same as the lock screen. The reader is
+  /// offered and its progress shown by the indicator in the field alone.
   hint: Option<SharedString>,
   /// Whether an attempt was turned down just now, which the field is outlined
   /// for.
@@ -671,14 +656,8 @@ impl Greeter {
     self.error.clone()
   }
 
-  /// A word from the password stack wins the single hint row over the standing
-  /// fingerprint line: it is something the user has to read, where the reader
-  /// being armed is also visible from the indicator in the field.
   pub fn hint(&self) -> Option<SharedString> {
-    self
-      .hint
-      .clone()
-      .or_else(|| fingerprint_hint(self.fingerprint))
+    self.hint.clone()
   }
 
   pub fn rejected(&self) -> bool {
@@ -1239,14 +1218,6 @@ mod tests {
       rejection(&Phase::Ready, AuthSource::Password),
       Rejection::NewAttempt
     );
-  }
-
-  /// The reader going away has to take its line with it, or the screen offers a
-  /// fingerprint nothing is listening for.
-  #[test]
-  fn the_fingerprint_line_only_exists_while_the_reader_does() {
-    assert_eq!(fingerprint_hint(FingerprintState::Off), None);
-    assert!(fingerprint_hint(FingerprintState::Waiting).is_some());
   }
 
   /// The losing worker's failure can arrive after the winner authenticated.
