@@ -64,6 +64,14 @@
         hide-when-typing
     }
 
+    // Black, because this is what shows in the gap between the login screen's
+    // surfaces going away and niri itself exiting - and the screen has just
+    // faded to black to hand over. Left at niri's default it would flash its
+    // backdrop colour on the way out.
+    layout {
+        background-color "#000000"
+    }
+
     hotkey-overlay {
         skip-at-startup
     }

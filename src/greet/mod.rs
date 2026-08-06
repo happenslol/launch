@@ -18,10 +18,10 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
-  App, Bounds, Context, DisplayId, Entity, EventEmitter, FocusHandle, Focusable, Global,
-  IntoElement, KeyBinding, MouseButton, Render, SharedString, Size, Styled, Subscription, Task,
-  Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
-  actions, div,
+  Animation, AnimationExt, App, Bounds, Context, DisplayId, Entity, EventEmitter, FocusHandle,
+  Focusable, Global, IntoElement, KeyBinding, MouseButton, Render, SharedString, Size, Styled,
+  Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+  WindowOptions, actions, div,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -73,6 +73,15 @@ const SWITCHER_CONTEXT: &str = "greeter_switcher";
 /// Avatars in the list are chips beside a name rather than the portrait the
 /// prompt leads with, so they get their own size through the same renderer.
 const SWITCHER_AVATAR_SIZE: gpui::Pixels = px(40.);
+
+/// How long the screen takes to fade out once the session has been scheduled.
+///
+/// Spent on nothing else: the daemon does not start the session until this
+/// process dies, and it waits `EVICTION_PATIENCE` seconds for that, so this comes
+/// out of an allowance that already exists rather than delaying the login. It
+/// ends on black because that is what the console underneath is cleared to, which
+/// is what makes the handover read as one movement instead of a flicker.
+const FADE_OUT: Duration = Duration::from_millis(300);
 
 pub fn start(cx: &mut App) {
   // Bound once here rather than per surface: `bind_keys` is global, and a
@@ -177,6 +186,10 @@ pub struct Greeter {
   /// almost always wants the same one, and a list would make every login two
   /// steps.
   switching: bool,
+  /// Whether the screen is on its way out, which every surface fades to black
+  /// for. Set once and never cleared: past this point the session is scheduled
+  /// and there is nothing to come back to.
+  leaving: bool,
   fingerprint: FingerprintState,
   /// Surfaces, in the order the displays were enumerated.
   screens: Vec<WindowHandle<GreetScreen>>,
@@ -188,6 +201,8 @@ pub struct Greeter {
   _events: Option<Task<()>>,
   _rejection: Option<Task<()>>,
   _retry: Option<Task<()>>,
+  /// Holds the quit back until the fade has played.
+  _leaving: Option<Task<()>>,
   /// Follows the sensor so the field can spin while a finger is actually on it.
   _finger_present: Option<Task<()>>,
   _subscriptions: Vec<Subscription>,
@@ -230,11 +245,13 @@ impl Greeter {
       rejected: false,
       authenticating: None,
       switching: false,
+      leaving: false,
       fingerprint: FingerprintState::Off,
       screens: Vec::new(),
       displays: Vec::new(),
       retry_delay: RETRY_INITIAL,
       _events: None,
+      _leaving: None,
       _finger_present: None,
       _rejection: None,
       _retry: None,
@@ -413,7 +430,7 @@ impl Greeter {
 
       Event::SessionStarted => {
         info!("Session starting, closing the login screen");
-        cx.quit();
+        self.leave(cx);
         false
       }
 
@@ -646,6 +663,10 @@ impl Greeter {
     self.switching
   }
 
+  pub fn leaving(&self) -> bool {
+    self.leaving
+  }
+
   /// Whether there is anywhere to switch to. With one account the button is not
   /// drawn at all, so the common machine never sees it.
   pub fn can_switch(&self) -> bool {
@@ -708,6 +729,26 @@ impl Greeter {
       true => self.request(Request::Password { value: secret }),
       false => self.pending_password = Some(secret),
     }
+  }
+
+  /// Fades every surface to black over [`FADE_OUT`] and then quits.
+  ///
+  /// Quitting is what hands over: the daemon starts the session on this process
+  /// dying, so the fade has to finish before the exit rather than alongside it.
+  /// Should the timer never fire, the daemon's eviction path ends the screen
+  /// anyway - the login cannot be lost here, only made slower.
+  fn leave(&mut self, cx: &mut Context<Self>) {
+    if self.leaving {
+      return;
+    }
+
+    self.leaving = true;
+    cx.notify();
+
+    self._leaving = Some(cx.spawn(async move |_this, cx| {
+      cx.background_executor().timer(FADE_OUT).await;
+      cx.update(|cx| cx.quit());
+    }));
   }
 
   /// Outlines the field for [`REJECTION_HIGHLIGHT`]. That is the whole of what
@@ -1118,7 +1159,20 @@ impl GreetScreen {
 }
 
 impl Render for GreetScreen {
-  fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let leaving = self.greeter.read(cx).leaving();
+
+    // Last child and on every branch, so it covers whatever this surface happens
+    // to be showing - prompt, account list or bare backdrop - and every output
+    // goes out together rather than only the one with the field on it.
+    self
+      .contents(window, cx)
+      .when(leaving, |this| this.child(fade_to_black()))
+  }
+}
+
+impl GreetScreen {
+  fn contents(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
     let greeter = self.greeter.read(cx);
 
     // Outputs without a field draw the backdrop alone, so the compositor's
@@ -1182,6 +1236,28 @@ impl Render for GreetScreen {
     )
     .when(self.clock, |this| this.child(self.render_clock(cx)))
   }
+}
+
+/// The screen going out: a black sheet drawn over everything, faded in rather
+/// than cut to.
+///
+/// Black rather than the backdrop's near-black because of what comes next - the
+/// compositor's own background, then a cleared console, then the session's first
+/// frame. Ending here means the two steps in between are black on black and stop
+/// being visible at all.
+fn fade_to_black() -> gpui::AnyElement {
+  div()
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .bg(rgb(0x000000))
+    .with_animation(
+      "greeter-fade-out",
+      Animation::new(FADE_OUT).with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+      |this, delta| this.opacity(delta),
+    )
+    .into_any_element()
 }
 
 /// The frame both states share, so switching does not move the background.
