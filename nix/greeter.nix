@@ -46,17 +46,42 @@
 
   configFile = format.generate "launch-greetd.toml" settings;
 
+  # Nix re-indents only the literal parts of an indented string, so anything
+  # interpolated into a nested position has to carry its own indentation or the
+  # generated config comes out ragged. KDL does not care, but somebody debugging a
+  # login screen that will not start does.
+  indentBy = spaces: text:
+    lib.concatMapStringsSep "\n" (
+      line:
+        if line == ""
+        then ""
+        else "${spaces}${line}"
+    ) (lib.splitString "\n" text);
+
+  # A precompiled keymap is taken over the RMLVO names because those are resolved
+  # against libxkbcommon's include path, which for the greeter is its own empty
+  # home - so any option defined in a custom xkb tree is *silently* dropped
+  # ("Unrecognized RMLVO option ... was ignored") and the login screen ends up
+  # with a subtly different keyboard from the session. Compiling the keymap at
+  # build time settles it where the tree is still reachable.
+  xkbConfig =
+    if cfg.niri.keymap != null
+    then ''file "${cfg.niri.keymap}"''
+    else ''
+      layout "${config.services.xserver.xkb.layout}"
+      variant "${config.services.xserver.xkb.variant}"
+      options "${config.services.xserver.xkb.options}"
+      model "${config.services.xserver.xkb.model}"'';
+
   # No binds at all. There must be no way out of the login screen into a shell,
   # and the compositor hosting it needs nothing but the ability to draw.
   niriConfig = pkgs.writeText "launch-greeter.kdl" ''
     input {
         keyboard {
             xkb {
-                layout "${config.services.xserver.xkb.layout}"
-                variant "${config.services.xserver.xkb.variant}"
-                options "${config.services.xserver.xkb.options}"
-                model "${config.services.xserver.xkb.model}"
+    ${indentBy "            " xkbConfig}
             }
+    ${indentBy "        " cfg.niri.keyboard}
         }
     }
 
@@ -82,6 +107,8 @@
       ${cfg.package}/bin/launch greet
       ${cfg.niri.package}/bin/niri msg action quit --skip-confirmation
     ''}"
+
+    ${cfg.niri.extraConfig}
   '';
 in {
   options.programs.launch.greeter = {
@@ -169,6 +196,63 @@ in {
         default = pkgs.niri;
         defaultText = lib.literalExpression "pkgs.niri";
         description = "Compositor used to host the login screen.";
+      };
+
+      keymap = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        example = lib.literalExpression ''
+          pkgs.runCommand "greeter-keymap.xkb" {
+            nativeBuildInputs = [pkgs.libxkbcommon];
+          } "xkbcli compile-keymap --include ''${./xkb} --include-defaults --layout us > $out"
+        '';
+        description = ''
+          A precompiled xkb keymap for the login screen, used instead of the
+          layout names from {option}`services.xserver.xkb`.
+
+          Set this if the session's keyboard relies on anything from a custom xkb
+          tree. Those trees normally live in a user's `~/.config/xkb`, which the
+          greeter cannot read, and libxkbcommon does not treat an option it
+          cannot resolve as an error - it logs that the option was ignored and
+          carries on, so the login screen quietly gets a different keyboard from
+          the session. Compiling the keymap while the tree is still reachable is
+          what avoids that.
+        '';
+      };
+
+      keyboard = lib.mkOption {
+        type = lib.types.lines;
+        default = "";
+        example = ''
+          repeat-delay 170
+          repeat-rate 60
+          numlock
+        '';
+        description = ''
+          Extra KDL placed inside niri's `input { keyboard { ... } }` block, for
+          the settings that are not part of the keymap - repeat rate, numlock and
+          so on.
+        '';
+      };
+
+      extraConfig = lib.mkOption {
+        type = lib.types.lines;
+        default = "";
+        example = ''
+          include "/etc/greeter/outputs.kdl"
+        '';
+        description = ''
+          Extra top-level KDL appended to the generated niri config, for output
+          layout and scaling in particular - a login screen at the wrong scale on
+          a HiDPI panel is the usual reason to need this.
+
+          niri accepts `include`, so pointing at a shared file is the tidiest way
+          to keep this in step with the session's own config. It must be readable
+          by {option}`user`, which rules out anything under a home directory; a
+          nix store path or {file}`/etc` both work. Note that a second top-level
+          `input` node here is a parse error, since niri allows only one - use
+          {option}`niri.keyboard` for that, or put it in an included file.
+        '';
       };
     };
 
