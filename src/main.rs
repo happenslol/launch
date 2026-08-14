@@ -32,6 +32,7 @@ mod power;
 mod scrollbar;
 mod status;
 mod submenu;
+mod system;
 mod tokio;
 mod tray_menu;
 mod util;
@@ -308,6 +309,7 @@ fn run_app(startup: Startup, no_keyboard_capture: bool, receiver: Receiver<Messa
       workspace_osd::init(cx);
       notification_osd::init(cx);
       status::init(cx);
+      system::init(cx);
       polkit::init(cx);
       lock::init(cx);
       InputState::init(cx);

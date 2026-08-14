@@ -41,7 +41,7 @@ use crate::{
   matcher::MatcherPool,
   network, niri,
   picker::{Picker, PickerDelegate, PickerEvent, picker_input, picker_results},
-  power,
+  power, system,
   tray_menu::{self, MENU_WIDTH, TrayMenu, estimate_menu_height},
   util::{ResultExt, h_flex, v_flex},
   xdg::{self, XdgIconCache, open_url},
@@ -170,6 +170,7 @@ impl Launcher {
     items.extend(llm::get_items());
     items.extend(niri::get_items(cx));
     items.extend(power::get_items());
+    items.extend(system::get_items());
     items.extend(search_providers());
 
     let items = Arc::new(items);

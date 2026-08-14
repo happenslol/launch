@@ -119,7 +119,7 @@ fn show_confirmation(
         launcher.action_overlay = None;
         cx.notify();
       }
-      ConfirmationEvent::Confirm => {
+      ConfirmationEvent::Confirm(_) => {
         launcher.action_overlay = None;
         on_confirm(window, cx);
         cx.notify();
