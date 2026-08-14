@@ -4,7 +4,7 @@ cargo-features = ["codegen-backend"]
 members = ["greet-ipc", "greetd"]
 # A workspace root that is itself a package makes bare `cargo build` build only
 # that package, which would leave the daemon silently uncompiled and unlinted.
-default-members = [".", "greet-ipc", "greetd"]
+default-members = ["."]
 
 [workspace.package]
 version = "0.1.0"
