@@ -374,7 +374,7 @@ impl LlmPanel {
             cx.focus_view(&picker.read(cx).search_input.clone(), window);
           }
         }
-        ConfirmationEvent::Confirm => {
+        ConfirmationEvent::Confirm(_) => {
           conversation_picker.update(cx, |picker, cx| {
             picker.remove_selected_item(window, cx);
           });

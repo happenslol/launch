@@ -24,6 +24,7 @@ pub struct Config {
   pub notifications: NotificationsConfig,
   pub status: StatusConfig,
   pub lock: LockConfig,
+  pub system: SystemConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -78,6 +79,57 @@ impl Default for LockConfig {
     Self {
       pam_service: "launch".to_owned(),
       fingerprint: true,
+    }
+  }
+}
+
+/// Which column the process list is ordered by. Lives here rather than next to
+/// the panel so that `config` stays a leaf module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortKey {
+  Cpu,
+  Memory,
+  Name,
+  Pid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SystemConfig {
+  /// How often the system panel resamples while it is open. This is the
+  /// expensive tier: it walks every entry in `/proc`.
+  pub interval_ms: u64,
+  /// How often CPU, memory and network are sampled while no panel is open.
+  /// Processes are skipped in this tier, which leaves three small file reads, so
+  /// it can run continuously to keep the graphs populated for the next time the
+  /// panel is opened.
+  pub idle_interval_ms: u64,
+  /// How many samples the graphs keep. At the default interval this is a little
+  /// under four minutes of idle history.
+  pub history_samples: usize,
+  /// Whether to list kernel threads next to real processes. They are numerous
+  /// and rarely what someone opening a process list is looking for.
+  pub show_kernel_threads: bool,
+  /// Whether process CPU usage is divided across all cores. When off (the
+  /// default, matching htop and btop) a thread saturating one core reads 100%;
+  /// when on the same thread reads `100 / core_count`.
+  pub normalize_cpu: bool,
+  /// Whether processes sharing a name are collapsed into one expandable row.
+  pub group_processes: bool,
+  pub default_sort: SortKey,
+}
+
+impl Default for SystemConfig {
+  fn default() -> Self {
+    Self {
+      interval_ms: 1000,
+      idle_interval_ms: 2000,
+      history_samples: 120,
+      show_kernel_threads: false,
+      normalize_cpu: false,
+      group_processes: true,
+      default_sort: SortKey::Cpu,
     }
   }
 }
@@ -260,6 +312,31 @@ mod tests {
     assert_eq!(config.notifications.display, None);
     assert_eq!(config.status, StatusConfig::default());
     assert_eq!(config.lock, LockConfig::default());
+    assert_eq!(config.system, SystemConfig::default());
+  }
+
+  #[test]
+  fn reads_system_section() {
+    let config = parse(
+      "[system]\ninterval_ms = 500\nidle_interval_ms = 5000\nhistory_samples = 60\nshow_kernel_threads = true\nnormalize_cpu = true\ngroup_processes = false\ndefault_sort = \"memory\"\n",
+    );
+    assert_eq!(config.system.interval_ms, 500);
+    assert_eq!(config.system.idle_interval_ms, 5000);
+    assert_eq!(config.system.history_samples, 60);
+    assert!(config.system.show_kernel_threads);
+    assert!(config.system.normalize_cpu);
+    assert!(!config.system.group_processes);
+    assert_eq!(config.system.default_sort, SortKey::Memory);
+  }
+
+  #[test]
+  fn partial_system_section_keeps_other_defaults() {
+    let defaults = SystemConfig::default();
+    let config = parse("[system]\ninterval_ms = 250\n");
+    assert_eq!(config.system.interval_ms, 250);
+    assert_eq!(config.system.idle_interval_ms, defaults.idle_interval_ms);
+    assert_eq!(config.system.default_sort, defaults.default_sort);
+    assert_eq!(config.system.group_processes, defaults.group_processes);
   }
 
   #[test]

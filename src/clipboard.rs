@@ -243,7 +243,7 @@ impl ClipboardPanel {
         ConfirmationEvent::Closing => {
           cx.focus_view(&this.picker.read(cx).search_input.clone(), window);
         }
-        ConfirmationEvent::Confirm => {
+        ConfirmationEvent::Confirm(_) => {
           picker.update(cx, |picker, cx| {
             picker.remove_selected_item(window, cx);
           });

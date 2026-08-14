@@ -198,7 +198,10 @@ impl<D: PickerDelegate> Picker<D> {
   fn resolve_item_index(&self, selected_index: usize) -> Option<usize> {
     if let Some(selectable_items) = &self.selectable_items {
       let match_index = selectable_items.get(selected_index)?.match_index;
-      self.matches.as_ref().map(|matches| matches[match_index].0)
+      self
+        .matches
+        .as_ref()
+        .and_then(|matches| matches.get(match_index).map(|(ix, _)| *ix))
     } else {
       self
         .matches
@@ -224,6 +227,46 @@ impl<D: PickerDelegate> Picker<D> {
     let selected_index = self.selected_index?;
     let resolved_ix = self.resolve_item_index(selected_index)?;
     self.items.get(resolved_ix)
+  }
+
+  /// Moves the selection to a position in the visible list.
+  ///
+  /// Lists that are rebuilt on a timer use this to keep the selection on the
+  /// same thing across a reorder, by looking up where that thing ended up.
+  pub fn set_selected_index(&mut self, index: usize, cx: &mut Context<Self>) {
+    let item_count = if self.selectable_items.is_some() {
+      self.visible_item_count()
+    } else {
+      // `set_items` swaps the items in right away while the search that rebuilds
+      // `matches` finishes later, so the match count can still be the previous
+      // list's. The item count is the bound that will hold once it lands, and
+      // `complete_search` clamps against the real count then anyway.
+      self.items.len()
+    };
+
+    if item_count == 0 {
+      self.selected_index = None;
+      return;
+    }
+
+    let index = index.min(item_count - 1);
+    self.selected_index = Some(index);
+
+    if let Some(selectable_items) = &self.selectable_items {
+      if let Some(item) = selectable_items.get(index) {
+        self
+          .category_list_state
+          .scroll_to_reveal_item(item.list_index);
+      }
+    } else {
+      // Non-strict, so this only moves the list when the row has actually gone
+      // out of view rather than fighting the scroll position every tick.
+      self
+        .list_scroll_handle
+        .scroll_to_item(index, ScrollStrategy::Top);
+    }
+
+    cx.notify();
   }
 
   pub fn remove_selected_item(
@@ -480,18 +523,31 @@ impl<D: PickerDelegate> Picker<D> {
     }
   }
 
+  /// Renders one row, given an index into `items`.
+  ///
+  /// The index can be stale: `set_items` swaps the item list in immediately
+  /// while the matches that index into it are only replaced once the search
+  /// task completes. A list that is rebuilt on a timer will render at least one
+  /// frame in between, so a missing item is left blank for that frame rather
+  /// than panicking.
   fn render_list_item(
     &self,
     window: &mut Window,
     cx: &mut Context<Self>,
     ix: usize,
     is_selected: bool,
-  ) -> impl IntoElement + use<D> {
+  ) -> AnyElement {
+    let Some(item) = self.items.get(ix) else {
+      return div().into_any_element();
+    };
+
     div()
       .id(("item", ix))
       .cursor_pointer()
       .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-        cx.emit(PickerEvent::Picked(this.items[ix].clone()));
+        if let Some(item) = this.items.get(ix) {
+          cx.emit(PickerEvent::Picked(item.clone()));
+        }
 
         // Maintain focus on the search input
         cx.stop_propagation();
@@ -499,8 +555,9 @@ impl<D: PickerDelegate> Picker<D> {
       .child(
         self
           .delegate
-          .render_list_item(window, cx, &self.items[ix], is_selected),
+          .render_list_item(window, cx, item, is_selected),
       )
+      .into_any_element()
   }
 }
 
@@ -512,10 +569,12 @@ impl<D: PickerDelegate> Focusable for Picker<D> {
 
 impl<D: PickerDelegate> Picker<D> {
   fn render_flat(&mut self, cx: &mut Context<Self>) -> AnyElement {
-    let count = self
-      .matches
-      .as_ref()
-      .map_or_else(|| self.items.len(), |matches| matches.len());
+    // Capped at the item count so that matches left over from a previous, longer
+    // item list do not ask for rows there is nothing to put in.
+    let count = self.matches.as_ref().map_or_else(
+      || self.items.len(),
+      |matches| matches.len().min(self.items.len()),
+    );
 
     uniform_list(
       "matches",
@@ -524,12 +583,15 @@ impl<D: PickerDelegate> Picker<D> {
         range
           .map(|ix| {
             let is_selected = this.selected_index.is_some_and(|selected| selected == ix);
-            let resolved_ix = this.matches.as_ref().map_or(ix, |matches| {
-              let (resolved_ix, _) = matches[ix];
-              resolved_ix
-            });
+            let resolved_ix = this
+              .matches
+              .as_ref()
+              .map_or(Some(ix), |matches| matches.get(ix).map(|(ix, _)| *ix));
 
-            this.render_list_item(window, cx, resolved_ix, is_selected)
+            match resolved_ix {
+              Some(resolved_ix) => this.render_list_item(window, cx, resolved_ix, is_selected),
+              None => div().into_any_element(),
+            }
           })
           .collect()
       }),
@@ -559,10 +621,12 @@ impl<D: PickerDelegate> Picker<D> {
             )
             .into_any_element(),
           VisualEntry::Item(match_index) => {
-            let item_index = this
-              .matches
-              .as_ref()
-              .map_or(*match_index, |m| m[*match_index].0);
+            let item_index = this.matches.as_ref().map_or(Some(*match_index), |m| {
+              m.get(*match_index).map(|(ix, _)| *ix)
+            });
+            let Some(item_index) = item_index else {
+              return div().into_any_element();
+            };
             let selected_list_ix = this
               .selected_index
               .and_then(|si| this.selectable_items.as_ref()?.get(si))
