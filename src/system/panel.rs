@@ -41,7 +41,7 @@ const CONTEXT: &str = "system";
 /// that it doesn't linger over a list that keeps moving underneath it.
 const ERROR_TIMEOUT: Duration = Duration::from_secs(5);
 
-actions!(system, [KillProcess, CycleSort, ReverseSort]);
+actions!(system, [KillProcess, CycleSort, ReverseSort, ToggleTree]);
 
 /// Column widths, shared by the header and the rows so the two line up. The name
 /// column takes whatever is left.
@@ -67,58 +67,60 @@ struct GroupKey {
   executable: SharedString,
 }
 
-/// What a row stands for, which is also what a kill acting on it would target.
-#[derive(Clone, PartialEq, Eq)]
+/// Which shape the list is in.
+///
+/// The two answer different questions and neither subsumes the other: grouping
+/// says how much of the machine a program is using in total, the tree says what
+/// spawned what. Processes sharing a name are frequently unrelated - this
+/// machine has nineteen `node` processes under thirteen different parents - so
+/// collapsing them is an aggregate, not a hierarchy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+  Grouped,
+  Tree,
+}
+
+/// What a row stands for. Doubles as the identity that the selection and the
+/// set of unfolded rows are tracked by, in both modes.
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum RowKey {
   Group(GroupKey),
   Process(Pid),
 }
 
 #[derive(Clone)]
-enum RowKind {
-  /// Several processes sharing a name, collapsed into one row.
-  Group {
-    count: usize,
-    expanded: bool,
-    pids: Arc<[Pid]>,
-  },
-  /// One of a group's processes, shown because the group is expanded.
-  Child,
-  /// A process that shares its name with no other, so there is nothing to
-  /// expand.
-  Single,
-}
-
-#[derive(Clone)]
 pub struct ProcessRow {
   key: RowKey,
-  kind: RowKind,
   name: SharedString,
   /// Kept raw; it is shortened for display when the row is rendered, which
   /// happens only for the handful of rows actually on screen.
   executable: SharedString,
   pid: Option<Pid>,
+  /// What a kill on this row signals: the whole group in grouped mode, and just
+  /// the process itself in tree mode, where reaching the descendants is what the
+  /// tree options in the prompt are for.
+  targets: Arc<[Pid]>,
+  /// How many processes this row stands for, when that is more than itself.
+  count: Option<usize>,
+  expanded: bool,
+  /// How deep in the tree, which is only ever more than zero in tree mode and in
+  /// an unfolded group.
+  depth: usize,
   user: SharedString,
   cpu_percent: f32,
   memory_bytes: u64,
 }
 
 impl ProcessRow {
-  /// The processes a kill on this row would signal.
-  fn targets(&self) -> Vec<Pid> {
-    match &self.kind {
-      RowKind::Group { pids, .. } => pids.to_vec(),
-      RowKind::Child | RowKind::Single => self.pid.into_iter().collect(),
-    }
+  fn is_expandable(&self) -> bool {
+    self.count.is_some()
   }
 
   fn describe(&self) -> String {
-    match &self.kind {
-      RowKind::Group { count, .. } => format!("{} ({count} processes)", self.name),
-      RowKind::Child | RowKind::Single => match self.pid {
-        Some(pid) => format!("{} (pid {pid})", self.name),
-        None => self.name.to_string(),
-      },
+    match (self.pid, self.count) {
+      (Some(pid), _) => format!("{} (pid {pid})", self.name),
+      (None, Some(count)) => format!("{} ({count} processes)", self.name),
+      (None, None) => self.name.to_string(),
     }
   }
 }
@@ -129,7 +131,8 @@ pub struct SystemPanel {
   query: String,
   sort: SortKey,
   reversed: bool,
-  expanded: HashSet<GroupKey>,
+  mode: ViewMode,
+  expanded: HashSet<RowKey>,
   error: Option<SharedString>,
   confirmation_prompt: Option<Entity<ConfirmationPrompt>>,
   _rebuild: Option<Task<()>>,
@@ -143,6 +146,7 @@ impl SystemPanel {
       KeyBinding::new("ctrl-x", KillProcess, Some(CONTEXT)),
       KeyBinding::new("ctrl-s", CycleSort, Some(CONTEXT)),
       KeyBinding::new("alt-s", ReverseSort, Some(CONTEXT)),
+      KeyBinding::new("ctrl-t", ToggleTree, Some(CONTEXT)),
     ]);
 
     let sort = ConfigState::get(cx).system.default_sort;
@@ -188,6 +192,7 @@ impl SystemPanel {
       query: String::new(),
       sort,
       reversed: false,
+      mode: ViewMode::Grouped,
       expanded: HashSet::new(),
       error: None,
       confirmation_prompt: None,
@@ -222,6 +227,7 @@ impl SystemPanel {
     let expanded = self.expanded.clone();
     let sort = self.sort;
     let reversed = self.reversed;
+    let mode = self.mode;
 
     self._rebuild = Some(cx.spawn_in(window, async move |this, cx| {
       let rows = cx
@@ -233,6 +239,7 @@ impl SystemPanel {
             sort,
             reversed,
             grouping,
+            mode,
             &expanded,
             matcher.as_deref_mut(),
           )
@@ -266,19 +273,19 @@ impl SystemPanel {
     cx.notify();
   }
 
-  /// Enter on a group opens it up; on a process it offers to signal it.
+  /// Enter unfolds a row that stands for more than itself, and offers to signal
+  /// one that does not.
   fn activate_row(&mut self, row: ProcessRow, window: &mut Window, cx: &mut Context<Self>) {
-    match row.kind {
-      RowKind::Group { .. } => {
-        if let RowKey::Group(key) = &row.key {
-          if !self.expanded.remove(key) {
-            self.expanded.insert(key.clone());
-          }
-          self.rebuild(window, cx);
-        }
-      }
-      RowKind::Child | RowKind::Single => self.prompt_kill(row, window, cx),
+    if !row.is_expandable() {
+      self.prompt_kill(row, window, cx);
+      return;
     }
+
+    if !self.expanded.remove(&row.key) {
+      self.expanded.insert(row.key.clone());
+    }
+
+    self.rebuild(window, cx);
   }
 
   fn kill_selected(&mut self, _: &KillProcess, window: &mut Window, cx: &mut Context<Self>) {
@@ -290,7 +297,7 @@ impl SystemPanel {
   }
 
   fn prompt_kill(&mut self, row: ProcessRow, window: &mut Window, cx: &mut Context<Self>) {
-    let targets = row.targets();
+    let targets = row.targets.to_vec();
     if targets.is_empty() {
       return;
     }
@@ -398,6 +405,18 @@ impl SystemPanel {
 
   fn reverse_sort(&mut self, _: &ReverseSort, window: &mut Window, cx: &mut Context<Self>) {
     self.reversed = !self.reversed;
+    self.rebuild(window, cx);
+  }
+
+  fn toggle_tree(&mut self, _: &ToggleTree, window: &mut Window, cx: &mut Context<Self>) {
+    self.mode = match self.mode {
+      ViewMode::Grouped => ViewMode::Tree,
+      ViewMode::Tree => ViewMode::Grouped,
+    };
+
+    // The two modes key their unfolded rows differently, and a row unfolded in
+    // one has no counterpart in the other.
+    self.expanded.clear();
     self.rebuild(window, cx);
   }
 
@@ -564,12 +583,14 @@ impl Render for SystemPanel {
       .on_action(cx.listener(Self::kill_selected))
       .on_action(cx.listener(Self::cycle_sort))
       .on_action(cx.listener(Self::reverse_sort))
+      .on_action(cx.listener(Self::toggle_tree))
       .child(
         picker_input(&self.picker).show_back_button(true).suffix(
           h_flex()
             .gap_1()
             .text_xs()
             .text_color(rgb(0x888888))
+            .when(self.mode == ViewMode::Tree, |this| this.child("tree ·"))
             .child(format!("sort: {sort_label}"))
             .child(
               Icon::new(if self.reversed {
@@ -614,7 +635,10 @@ impl PickerDelegate for ProcessDelegate {
     item: &Self::ListItem,
     is_selected: bool,
   ) -> impl IntoElement {
-    let is_child = matches!(item.kind, RowKind::Child);
+    let is_child = item.depth > 0;
+    // Deep chains exist - a shell inside a terminal inside a session - but past
+    // a few levels the indent costs more room than it explains.
+    let indent = px(12. * item.depth.min(5) as f32);
 
     h_flex()
       .w_full()
@@ -628,16 +652,17 @@ impl PickerDelegate for ProcessDelegate {
         div()
           .w(EXPANDER_WIDTH)
           .flex_shrink_0()
-          .child(match &item.kind {
-            RowKind::Group { expanded, .. } => Icon::new(if *expanded {
+          .child(if item.is_expandable() {
+            Icon::new(if item.expanded {
               IconName::ChevronDown
             } else {
               IconName::ChevronRight
             })
             .size(rems(0.75))
             .text_color(rgb(0x888888))
-            .into_any_element(),
-            RowKind::Child | RowKind::Single => div().into_any_element(),
+            .into_any_element()
+          } else {
+            div().into_any_element()
           }),
       )
       .child(
@@ -645,14 +670,14 @@ impl PickerDelegate for ProcessDelegate {
           .flex_1()
           .min_w_0()
           .gap_2()
+          .pl(indent)
           .child(
             div()
               .flex_shrink_0()
               .truncate()
-              // Children sit under a group heading that already names them, so
-              // they are indented and dimmed rather than repeating it at full
-              // strength.
-              .when(is_child, |this| this.pl_3().text_color(rgba(0xFFFFFFAA)))
+              // Anything nested sits under a row that gives it context, so it is
+              // dimmed rather than competing with its parent.
+              .when(is_child, |this| this.text_color(rgba(0xFFFFFFAA)))
               .child(item.name.clone()),
           )
           // Takes whatever the name leaves, and is the first thing to be cut
@@ -675,9 +700,9 @@ impl PickerDelegate for ProcessDelegate {
           .flex_shrink_0()
           .text_xs()
           .text_color(rgb(0x888888))
-          .child(match &item.kind {
-            RowKind::Group { count, .. } => SharedString::from(format!("({count})")),
-            RowKind::Child | RowKind::Single => SharedString::default(),
+          .child(match item.count {
+            Some(count) => SharedString::from(format!("({count})")),
+            None => SharedString::default(),
           }),
       )
       .child(numeric_cell(
@@ -749,23 +774,56 @@ struct ProcessGroup<'a> {
   memory_bytes: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_rows(
   snapshot: &Snapshot,
   query: &str,
   sort: SortKey,
   reversed: bool,
   grouping: bool,
-  expanded: &HashSet<GroupKey>,
+  mode: ViewMode,
+  expanded: &HashSet<RowKey>,
   matcher: Option<&mut nucleo_matcher::Matcher>,
 ) -> Vec<ProcessRow> {
-  let mut groups = group_processes(&snapshot.processes, grouping);
+  match mode {
+    ViewMode::Grouped => build_grouped_rows(
+      &snapshot.processes,
+      query,
+      sort,
+      reversed,
+      grouping,
+      expanded,
+      matcher,
+    ),
+    ViewMode::Tree => build_tree_rows(
+      &snapshot.processes,
+      query,
+      sort,
+      reversed,
+      expanded,
+      matcher,
+    ),
+  }
+}
+
+fn build_grouped_rows(
+  processes: &[ProcessInfo],
+  query: &str,
+  sort: SortKey,
+  reversed: bool,
+  grouping: bool,
+  expanded: &HashSet<RowKey>,
+  matcher: Option<&mut nucleo_matcher::Matcher>,
+) -> Vec<ProcessRow> {
+  let mut groups = group_processes(processes, grouping);
   filter_groups(&mut groups, query, matcher);
   sort_groups(&mut groups, sort, reversed);
 
   let mut rows = Vec::with_capacity(groups.len());
   for group in groups {
     let is_group = group.members.len() > 1;
-    let is_expanded = is_group && expanded.contains(&group.key);
+    let key = RowKey::Group(group.key.clone());
+    let is_expanded = is_group && expanded.contains(&key);
 
     if !is_group {
       let Some(process) = group.members.first() else {
@@ -774,10 +832,13 @@ fn build_rows(
 
       rows.push(ProcessRow {
         key: RowKey::Process(process.pid),
-        kind: RowKind::Single,
         name: group.key.name,
         executable: group.key.executable,
         pid: Some(process.pid),
+        targets: Arc::from([process.pid]),
+        count: None,
+        expanded: false,
+        depth: 0,
         user: process.user.clone(),
         cpu_percent: process.cpu_percent,
         memory_bytes: process.memory_bytes,
@@ -792,20 +853,19 @@ fn build_rows(
       .unwrap_or_default();
 
     rows.push(ProcessRow {
-      key: RowKey::Group(group.key.clone()),
-      kind: RowKind::Group {
-        count: group.members.len(),
-        expanded: is_expanded,
-        pids: group
-          .members
-          .iter()
-          .map(|process| process.pid)
-          .collect::<Vec<_>>()
-          .into(),
-      },
+      key,
       name: group.key.name.clone(),
       executable: group.key.executable.clone(),
       pid: None,
+      targets: group
+        .members
+        .iter()
+        .map(|process| process.pid)
+        .collect::<Vec<_>>()
+        .into(),
+      count: Some(group.members.len()),
+      expanded: is_expanded,
+      depth: 0,
       user,
       cpu_percent: group.cpu_percent,
       memory_bytes: group.memory_bytes,
@@ -820,12 +880,15 @@ fn build_rows(
 
     rows.extend(members.into_iter().map(|process| ProcessRow {
       key: RowKey::Process(process.pid),
-      kind: RowKind::Child,
       name: group.key.name.clone(),
       // Every member shares the group's binary, so the children repeating it
       // would be noise; their pid is what tells them apart.
       executable: SharedString::default(),
       pid: Some(process.pid),
+      targets: Arc::from([process.pid]),
+      count: None,
+      expanded: false,
+      depth: 1,
       user: process.user.clone(),
       cpu_percent: process.cpu_percent,
       memory_bytes: process.memory_bytes,
@@ -833,6 +896,299 @@ fn build_rows(
   }
 
   rows
+}
+
+/// What a process and everything under it add up to.
+#[derive(Clone, Copy, Default)]
+struct Subtree {
+  count: usize,
+  cpu_percent: f32,
+  cpu_lifetime_percent: f32,
+  memory_bytes: u64,
+}
+
+/// The parent/child structure of a snapshot, worked out once so that building
+/// rows from it is just walking.
+struct Forest<'a> {
+  by_pid: HashMap<Pid, &'a ProcessInfo>,
+  children: HashMap<Pid, Vec<Pid>>,
+  roots: Vec<Pid>,
+  totals: HashMap<Pid, Subtree>,
+}
+
+impl<'a> Forest<'a> {
+  fn new(processes: &'a [ProcessInfo]) -> Self {
+    let by_pid: HashMap<Pid, &ProcessInfo> = processes
+      .iter()
+      .map(|process| (process.pid, process))
+      .collect();
+
+    let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
+    for process in processes {
+      if by_pid.contains_key(&process.parent_pid) && process.parent_pid != process.pid {
+        children
+          .entry(process.parent_pid)
+          .or_default()
+          .push(process.pid);
+      }
+    }
+
+    // Anything whose parent is not in the snapshot stands on its own. Kernel
+    // threads are usually filtered out, so their children surface here rather
+    // than being lost.
+    let mut roots: Vec<Pid> = processes
+      .iter()
+      .filter(|process| !by_pid.contains_key(&process.parent_pid))
+      .map(|process| process.pid)
+      .collect();
+
+    // Pre-order from the roots, which also tells us who is reachable.
+    let mut order = Vec::with_capacity(processes.len());
+    let mut seen = HashSet::with_capacity(processes.len());
+    let mut stack: Vec<Pid> = roots.clone();
+
+    while let Some(pid) = stack.pop() {
+      if !seen.insert(pid) {
+        continue;
+      }
+      order.push(pid);
+      if let Some(descendants) = children.get(&pid) {
+        stack.extend(descendants.iter().copied());
+      }
+    }
+
+    // Parent ids come from a sweep taken over time, so they can describe a cycle
+    // that no root reaches. Those processes would otherwise vanish from the
+    // list entirely, so each becomes a root of its own.
+    for process in processes {
+      if seen.contains(&process.pid) {
+        continue;
+      }
+
+      roots.push(process.pid);
+      let mut stack = vec![process.pid];
+      while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+          continue;
+        }
+        order.push(pid);
+        if let Some(descendants) = children.get(&pid) {
+          stack.extend(descendants.iter().copied());
+        }
+      }
+    }
+
+    // Children come after their parents in pre-order, so walking it backwards
+    // means a subtree is complete before it is folded into its parent.
+    let mut totals: HashMap<Pid, Subtree> = processes
+      .iter()
+      .map(|process| {
+        (
+          process.pid,
+          Subtree {
+            count: 1,
+            cpu_percent: process.cpu_percent,
+            cpu_lifetime_percent: process.cpu_lifetime_percent,
+            memory_bytes: process.memory_bytes,
+          },
+        )
+      })
+      .collect();
+
+    for pid in order.iter().rev() {
+      let Some(total) = totals.get(pid).copied() else {
+        continue;
+      };
+      let Some(parent) = by_pid.get(pid).map(|process| process.parent_pid) else {
+        continue;
+      };
+      if parent == *pid {
+        continue;
+      }
+
+      if let Some(parent_total) = totals.get_mut(&parent) {
+        parent_total.count += total.count;
+        parent_total.cpu_percent += total.cpu_percent;
+        parent_total.cpu_lifetime_percent += total.cpu_lifetime_percent;
+        parent_total.memory_bytes += total.memory_bytes;
+      }
+    }
+
+    Self {
+      by_pid,
+      children,
+      roots,
+      totals,
+    }
+  }
+
+  fn total(&self, pid: Pid) -> Subtree {
+    self.totals.get(&pid).copied().unwrap_or_default()
+  }
+}
+
+fn build_tree_rows(
+  processes: &[ProcessInfo],
+  query: &str,
+  sort: SortKey,
+  reversed: bool,
+  expanded: &HashSet<RowKey>,
+  matcher: Option<&mut nucleo_matcher::Matcher>,
+) -> Vec<ProcessRow> {
+  let forest = Forest::new(processes);
+
+  // A match deep in the tree is only findable if the branch leading to it is
+  // shown too, so the visible set is the matches plus all of their ancestors.
+  let visible =
+    (!query.is_empty()).then(|| visible_with_ancestors(&forest, processes, query, matcher));
+
+  let mut rows = Vec::with_capacity(processes.len().min(256));
+  let mut level = forest.roots.clone();
+  if let Some(visible) = &visible {
+    level.retain(|pid| visible.contains(pid));
+  }
+  sort_tree_level(&mut level, &forest, sort, reversed);
+
+  // An explicit stack rather than recursion: a snapshot can describe a chain
+  // thousands of processes deep, and this runs on a background thread.
+  let mut stack: Vec<(Pid, usize)> = level.into_iter().rev().map(|pid| (pid, 0)).collect();
+
+  while let Some((pid, depth)) = stack.pop() {
+    let Some(process) = forest.by_pid.get(&pid) else {
+      continue;
+    };
+
+    let total = forest.total(pid);
+    let descendants = total.count.saturating_sub(1);
+    let key = RowKey::Process(pid);
+    // While searching, everything on the way to a match is unfolded; leaving it
+    // closed would hide the very thing that was found.
+    let is_expanded = descendants > 0 && (visible.is_some() || expanded.contains(&key));
+
+    rows.push(ProcessRow {
+      key,
+      name: process.name.clone(),
+      executable: process.executable.clone(),
+      pid: Some(pid),
+      targets: Arc::from([pid]),
+      count: (descendants > 0).then_some(total.count),
+      expanded: is_expanded,
+      depth,
+      user: process.user.clone(),
+      // A row that stands for a subtree reports what the subtree adds up to,
+      // the same way a group row reports its members' total.
+      cpu_percent: if descendants > 0 {
+        total.cpu_percent
+      } else {
+        process.cpu_percent
+      },
+      memory_bytes: if descendants > 0 {
+        total.memory_bytes
+      } else {
+        process.memory_bytes
+      },
+    });
+
+    if !is_expanded {
+      continue;
+    }
+
+    let Some(children) = forest.children.get(&pid) else {
+      continue;
+    };
+
+    let mut children = children.clone();
+    if let Some(visible) = &visible {
+      children.retain(|pid| visible.contains(pid));
+    }
+    sort_tree_level(&mut children, &forest, sort, reversed);
+
+    stack.extend(children.into_iter().rev().map(|pid| (pid, depth + 1)));
+  }
+
+  rows
+}
+
+/// The processes whose name matches, plus every ancestor of theirs.
+fn visible_with_ancestors(
+  forest: &Forest<'_>,
+  processes: &[ProcessInfo],
+  query: &str,
+  matcher: Option<&mut nucleo_matcher::Matcher>,
+) -> HashSet<Pid> {
+  let mut visible = HashSet::new();
+
+  let matched: Vec<Pid> = match matcher {
+    Some(matcher) => {
+      let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+      let mut buffer = Vec::new();
+      processes
+        .iter()
+        .filter(|process| {
+          pattern
+            .score(Utf32Str::new(&process.name, &mut buffer), matcher)
+            .is_some()
+        })
+        .map(|process| process.pid)
+        .collect()
+    }
+    None => {
+      let needle = query.to_lowercase();
+      processes
+        .iter()
+        .filter(|process| process.name.to_lowercase().contains(&needle))
+        .map(|process| process.pid)
+        .collect()
+    }
+  };
+
+  for pid in matched {
+    let mut current = pid;
+    // Guarded by the visited set, since a cyclic parent chain would otherwise
+    // walk forever.
+    while visible.insert(current) {
+      let Some(process) = forest.by_pid.get(&current) else {
+        break;
+      };
+      if process.parent_pid == current {
+        break;
+      }
+      current = process.parent_pid;
+    }
+  }
+
+  visible
+}
+
+/// Orders one set of siblings, by what each of their subtrees adds up to so that
+/// a busy branch sorts high even when the process at its head is idle.
+fn sort_tree_level(level: &mut Vec<Pid>, forest: &Forest<'_>, sort: SortKey, reversed: bool) {
+  match sort {
+    SortKey::Cpu if !reversed => sort_lazy_cpu(
+      level,
+      |pid| forest.total(*pid).cpu_percent,
+      |pid| forest.total(*pid).cpu_lifetime_percent,
+    ),
+    SortKey::Cpu => level.sort_by(|a, b| {
+      compare_desc(
+        forest.total(*b).cpu_percent,
+        forest.total(*a).cpu_percent,
+        reversed,
+      )
+    }),
+    SortKey::Memory => level.sort_by(|a, b| {
+      compare_desc(
+        forest.total(*b).memory_bytes,
+        forest.total(*a).memory_bytes,
+        reversed,
+      )
+    }),
+    SortKey::Name => level.sort_by(|a, b| {
+      let name = |pid: &Pid| forest.by_pid.get(pid).map(|process| process.name.clone());
+      flip(name(a).cmp(&name(b)), reversed)
+    }),
+    SortKey::Pid => level.sort_by_key(|pid| if reversed { -*pid } else { *pid }),
+  }
 }
 
 /// Every process in the tree below `roots`, the roots included, ordered parents
@@ -1392,13 +1748,71 @@ mod tests {
   fn rows(sort: SortKey, reversed: bool, expanded: &[&str], query: &str) -> Vec<ProcessRow> {
     let expanded = expanded
       .iter()
-      .map(|name| GroupKey {
-        name: SharedString::from((*name).to_owned()),
-        executable: SharedString::from(format!("/usr/bin/{name}")),
+      .map(|name| {
+        RowKey::Group(GroupKey {
+          name: SharedString::from((*name).to_owned()),
+          executable: SharedString::from(format!("/usr/bin/{name}")),
+        })
       })
       .collect::<HashSet<_>>();
 
-    build_rows(&sample(), query, sort, reversed, true, &expanded, None)
+    build_rows(
+      &sample(),
+      query,
+      sort,
+      reversed,
+      true,
+      ViewMode::Grouped,
+      &expanded,
+      None,
+    )
+  }
+
+  fn grouped(snapshot: &Snapshot, query: &str, sort: SortKey) -> Vec<ProcessRow> {
+    build_rows(
+      snapshot,
+      query,
+      sort,
+      false,
+      true,
+      ViewMode::Grouped,
+      &HashSet::new(),
+      None,
+    )
+  }
+
+  fn tree(snapshot: &Snapshot, query: &str, expanded: &[Pid]) -> Vec<ProcessRow> {
+    let expanded = expanded
+      .iter()
+      .map(|pid| RowKey::Process(*pid))
+      .collect::<HashSet<_>>();
+
+    build_rows(
+      snapshot,
+      query,
+      SortKey::Pid,
+      false,
+      true,
+      ViewMode::Tree,
+      &expanded,
+      None,
+    )
+  }
+
+  /// Renders the shape of a tree the way `pstree` would, so the assertions read
+  /// like the thing they describe.
+  fn shape(rows: &[ProcessRow]) -> Vec<String> {
+    rows
+      .iter()
+      .map(|row| {
+        format!(
+          "{}{}:{}",
+          "  ".repeat(row.depth),
+          row.name,
+          row.pid.unwrap_or(0)
+        )
+      })
+      .collect()
   }
 
   fn names(rows: &[ProcessRow]) -> Vec<String> {
@@ -1426,7 +1840,7 @@ mod tests {
       firefox.pid.is_none(),
       "a group row stands for no single pid"
     );
-    assert_eq!(firefox.targets(), vec![10, 11, 12]);
+    assert_eq!(firefox.targets.to_vec(), vec![10, 11, 12]);
   }
 
   #[test]
@@ -1437,9 +1851,9 @@ mod tests {
       .find(|row| row.name == "hyprland")
       .expect("hyprland should be listed");
 
-    assert!(matches!(hyprland.kind, RowKind::Single));
+    assert!(!hyprland.is_expandable());
     assert_eq!(hyprland.pid, Some(20));
-    assert_eq!(hyprland.targets(), vec![20]);
+    assert_eq!(hyprland.targets.to_vec(), vec![20]);
   }
 
   #[test]
@@ -1488,7 +1902,7 @@ mod tests {
       process(40, "sleep", 0.0, 0.0, 10),
     ]);
 
-    let rows = build_rows(&busy, "", SortKey::Cpu, false, true, &HashSet::new(), None);
+    let rows = grouped(&busy, "", SortKey::Cpu);
 
     assert_eq!(
       names(&rows),
@@ -1511,15 +1925,7 @@ mod tests {
       process(7, "eta", 15.0, 30.0, 10),
     ]);
 
-    let rows = build_rows(
-      &loaded,
-      "",
-      SortKey::Cpu,
-      false,
-      true,
-      &HashSet::new(),
-      None,
-    );
+    let rows = grouped(&loaded, "", SortKey::Cpu);
 
     assert_eq!(
       names(&rows),
@@ -1595,21 +2001,13 @@ mod tests {
       executable_process(4, "electron", "/apps/discord/electron", 1.0, 1.0, 100),
     ]);
 
-    let rows = build_rows(
-      &electron,
-      "",
-      SortKey::Cpu,
-      false,
-      true,
-      &HashSet::new(),
-      None,
-    );
+    let rows = grouped(&electron, "", SortKey::Cpu);
 
     assert_eq!(rows.len(), 2, "one group per binary, not one per name");
     assert_eq!(rows[0].executable, "/apps/slack/electron");
-    assert_eq!(rows[0].targets(), vec![1, 2]);
+    assert_eq!(rows[0].targets.to_vec(), vec![1, 2]);
     assert_eq!(rows[1].executable, "/apps/discord/electron");
-    assert_eq!(rows[1].targets(), vec![3, 4]);
+    assert_eq!(rows[1].targets.to_vec(), vec![3, 4]);
   }
 
   #[test]
@@ -1621,12 +2019,21 @@ mod tests {
       executable_process(4, "electron", "/apps/discord/electron", 1.0, 1.0, 100),
     ]);
 
-    let expanded = HashSet::from([GroupKey {
+    let expanded = HashSet::from([RowKey::Group(GroupKey {
       name: SharedString::from("electron"),
       executable: SharedString::from("/apps/slack/electron"),
-    }]);
+    })]);
 
-    let rows = build_rows(&electron, "", SortKey::Cpu, false, true, &expanded, None);
+    let rows = build_rows(
+      &electron,
+      "",
+      SortKey::Cpu,
+      false,
+      true,
+      ViewMode::Grouped,
+      &expanded,
+      None,
+    );
 
     assert_eq!(
       rows.iter().map(|row| row.pid).collect::<Vec<_>>(),
@@ -1638,10 +2045,7 @@ mod tests {
   #[test]
   fn children_do_not_repeat_the_group_path() {
     let rows = rows(SortKey::Cpu, false, &["firefox"], "");
-    let children = rows
-      .iter()
-      .filter(|row| matches!(row.kind, RowKind::Child))
-      .collect::<Vec<_>>();
+    let children = rows.iter().filter(|row| row.depth > 0).collect::<Vec<_>>();
 
     assert!(!children.is_empty());
     assert!(children.iter().all(|row| row.executable.is_empty()));
@@ -1651,6 +2055,104 @@ mod tests {
     let mut process = process(pid, name, 0.0, 0.0, 10);
     process.parent_pid = parent;
     process
+  }
+
+  /// A session laid out the way a real one is: a supervisor at the top, a
+  /// terminal under it, and unrelated processes that merely share a name.
+  fn session() -> Snapshot {
+    snapshot(vec![
+      child(1, 0, "systemd"),
+      child(10, 1, "ghostty"),
+      child(11, 10, "zsh"),
+      child(12, 11, "node"),
+      child(20, 1, "slack"),
+      child(21, 20, "node"),
+    ])
+  }
+
+  #[test]
+  fn tree_mode_nests_by_parent() {
+    assert_eq!(
+      shape(&tree(&session(), "", &[1, 10, 11, 20])),
+      vec![
+        "systemd:1",
+        "  ghostty:10",
+        "    zsh:11",
+        "      node:12",
+        "  slack:20",
+        "    node:21",
+      ]
+    );
+  }
+
+  #[test]
+  fn tree_mode_folds_at_the_rows_that_are_closed() {
+    // Only the root is unfolded, so its children show but their children do not.
+    assert_eq!(
+      shape(&tree(&session(), "", &[1])),
+      vec!["systemd:1", "  ghostty:10", "  slack:20"]
+    );
+  }
+
+  #[test]
+  fn a_tree_row_counts_and_sums_its_whole_subtree() {
+    let rows = tree(&session(), "", &[]);
+    let root = rows.first().expect("the root should be listed");
+
+    assert_eq!(root.name, "systemd");
+    assert_eq!(root.count, Some(6), "itself and everything under it");
+    // A tree row stands for its subtree, but only signals itself; reaching the
+    // descendants is what the prompt's tree options are for.
+    assert_eq!(root.targets.to_vec(), vec![1]);
+  }
+
+  /// The two `node` processes are unrelated, so unlike grouped mode the tree
+  /// keeps them where they actually live.
+  #[test]
+  fn tree_mode_does_not_collapse_unrelated_namesakes() {
+    let rows = tree(&session(), "", &[1, 10, 11, 20]);
+    let nodes = rows
+      .iter()
+      .filter(|row| row.name == "node")
+      .collect::<Vec<_>>();
+
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0].depth, 3, "under ghostty's shell");
+    assert_eq!(nodes[1].depth, 2, "under slack");
+  }
+
+  #[test]
+  fn searching_a_tree_reveals_the_branch_leading_to_a_match() {
+    // `zsh` is three levels down and nothing else matches, so its ancestors come
+    // along to give it context, and nothing needs unfolding by hand.
+    assert_eq!(
+      shape(&tree(&session(), "zsh", &[])),
+      vec!["systemd:1", "  ghostty:10", "    zsh:11"]
+    );
+  }
+
+  #[test]
+  fn searching_a_tree_keeps_every_branch_that_matches() {
+    assert_eq!(
+      shape(&tree(&session(), "node", &[])),
+      vec![
+        "systemd:1",
+        "  ghostty:10",
+        "    zsh:11",
+        "      node:12",
+        "  slack:20",
+        "    node:21",
+      ]
+    );
+  }
+
+  #[test]
+  fn a_parent_loop_still_lists_everyone_in_tree_mode() {
+    // No root reaches these, so without the orphan sweep they would vanish.
+    let looped = snapshot(vec![child(10, 11, "a"), child(11, 10, "b")]);
+    let rows = tree(&looped, "", &[10, 11]);
+
+    assert_eq!(rows.len(), 2, "every process should be listed exactly once");
   }
 
   #[test]
