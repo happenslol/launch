@@ -7,6 +7,13 @@
 //! being replaced by a newer build while the screen is locked (see
 //! [`crate::instance`]).
 //!
+//! The prompt is drawn on one output alone - the configured primary display, or
+//! the first one attached - and the rest show a bare backdrop. Each of those
+//! still holds a field of its own, out of sight: which lock surface has the
+//! keyboard is the compositor's to decide, and niri gives it to the output under
+//! the pointer, so typing has to be caught wherever it lands and mirrored onto
+//! the screen that shows it.
+//!
 //! Two ways of unlocking run side by side: a password verified through PAM, and,
 //! when the machine has a reader with enrolled prints, a fingerprint verified
 //! through fprintd. Either one unlocks, and neither blocks the other.
@@ -39,13 +46,13 @@ use std::time::Duration;
 use futures::{FutureExt as _, StreamExt as _, select_biased};
 use gpui::{
   App, AsyncApp, Context, Div, Entity, EntityId, EventEmitter, Focusable, Global, IntoElement,
-  MouseButton, Render, SharedString, Subscription, Task, WeakEntity, Window, prelude::*,
+  MouseButton, Render, SharedString, Subscription, Task, WeakEntity, Window, div, prelude::*, rgb,
 };
 use tracing::{debug, error, info, warn};
 
 use crate::auth_screen::{
-  AuthPrompt, AuthUser, FingerprintState, PasswordMirror, REJECTION_HIGHLIGHT,
-  apply_password_mirror, current_user, render_auth_screen,
+  AuthPrompt, AuthUser, BACKDROP, FingerprintState, PasswordMirror, REJECTION_HIGHLIGHT,
+  apply_password_mirror, current_user, render_auth_screen, render_offscreen_password,
 };
 use crate::config::{ConfigState, LockConfig};
 use crate::dbus::GlobalDbusConnection;
@@ -121,13 +128,14 @@ pub fn lock(cx: &mut App) {
   close_launcher_windows(cx);
 
   // `lock_session` creates one surface per display, walking the same list
-  // `clock_display` just read, in the same order. Nothing can reorder or resize
-  // it in between - both run on this thread without yielding - so counting the
-  // callbacks is what tells a surface which display it belongs to. The window
-  // itself can't say: it learns its output from a Wayland event that hasn't
-  // arrived yet while it is being built.
+  // `clock_display` and `prompt_display` just read, in the same order. Nothing
+  // can reorder or resize it in between - all of them run on this thread without
+  // yielding - so counting the callbacks is what tells a surface which display it
+  // belongs to. The window itself can't say: it learns its output from a Wayland
+  // event that hasn't arrived yet while it is being built.
   let clock_display = clock_display(cx);
   let clock_enabled = ConfigState::get(cx).status.enabled;
+  let prompt_display = prompt_display(cx);
   let screen = Cell::new(0usize);
 
   let result = cx.lock_session({
@@ -135,8 +143,9 @@ pub fn lock(cx: &mut App) {
     move |window, cx| {
       let index = screen.replace(screen.get() + 1);
       let clock = clock_enabled && clock_display.is_none_or(|display| display == index);
+      let prompt = index == prompt_display;
       let lock = lock.clone();
-      cx.new(move |cx| LockScreen::new(lock, clock, window, cx))
+      cx.new(move |cx| LockScreen::new(lock, prompt, clock, window, cx))
     }
   });
 
@@ -158,6 +167,32 @@ pub fn lock(cx: &mut App) {
   set_locked_hint(true, cx);
 
   info!("Session locked");
+}
+
+/// Which display the prompt goes on, as an index into [`App::displays`]: the
+/// configured primary display, else the first one attached.
+///
+/// Always names exactly one output, unlike [`clock_display`], which is allowed
+/// to answer "all of them". There is one prompt, and a lock screen that puts it
+/// nowhere is a session nobody can get back into.
+fn prompt_display(cx: &App) -> usize {
+  let Some(configured) = ConfigState::get(cx).primary_display else {
+    return 0;
+  };
+
+  let index = cx
+    .displays()
+    .iter()
+    .position(|display| display.name() == Some(configured.as_str()));
+
+  if index.is_none() {
+    warn!(
+      display = %configured,
+      "Configured primary display not attached, prompting on the first one"
+    );
+  }
+
+  index.unwrap_or(0)
 }
 
 /// Unlocks the session without asking for anything, for use by logind's unlock
@@ -866,7 +901,14 @@ async fn verify_once(
 /// The lock surface of a single output.
 pub struct LockScreen {
   lock: Entity<Lock>,
+  /// The field this surface takes typing into, which every one of them has -
+  /// the screens that draw no prompt keep theirs out of sight. Whichever the
+  /// compositor gives the keyboard to is the one being typed on, and the rest
+  /// are kept in step with it.
   password: Entity<InputState>,
+  /// Whether this is the screen the prompt goes on. Decided when the surface is
+  /// created, like `clock`.
+  prompt: bool,
   /// Whether this is the screen the clock goes on. Decided when the surface is
   /// created: the lock surfaces are made in one go, and outputs attached later
   /// get none.
@@ -875,7 +917,13 @@ pub struct LockScreen {
 }
 
 impl LockScreen {
-  fn new(lock: Entity<Lock>, clock: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+  fn new(
+    lock: Entity<Lock>,
+    prompt: bool,
+    clock: bool,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Self {
     let password = cx.new(|cx| {
       InputState::new(window, cx)
         .masked(true)
@@ -914,6 +962,7 @@ impl LockScreen {
     Self {
       lock,
       password,
+      prompt,
       clock,
       _subscriptions: subscriptions,
     }
@@ -935,6 +984,28 @@ impl LockScreen {
 
 impl Render for LockScreen {
   fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let screen = match self.prompt {
+      true => self.render_prompt(cx),
+      false => self.render_backdrop(cx),
+    };
+
+    screen
+      .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|this, _event, window, cx| {
+          // Clicking anywhere puts the keyboard back on the password field, on
+          // this screen as much as on the one that shows it: a click is what
+          // moves the keyboard between outputs while locked.
+          window.focus(&this.password.focus_handle(cx), cx);
+        }),
+      )
+      .when(self.clock, |this| this.child(self.render_clock(cx)))
+  }
+}
+
+impl LockScreen {
+  /// The prompt, on the one screen that carries it.
+  fn render_prompt(&self, cx: &App) -> Div {
     let lock = self.lock.read(cx);
 
     render_auth_screen(AuthPrompt {
@@ -951,18 +1022,24 @@ impl Render for LockScreen {
       // There is one user and no way to change it.
       below: None,
     })
-    .on_mouse_down(
-      MouseButton::Left,
-      cx.listener(|this, _event, window, cx| {
-        // Clicking anywhere puts the keyboard back on the password field.
-        window.focus(&this.password.focus_handle(cx), cx);
-      }),
-    )
-    .when(self.clock, |this| this.child(self.render_clock(cx)))
   }
-}
 
-impl LockScreen {
+  /// What the other screens get: the backdrop the prompt would sit on, with
+  /// nothing on it, and the field they take typing into drawn nowhere.
+  fn render_backdrop(&self, cx: &App) -> Div {
+    let lock = self.lock.read(cx);
+
+    div()
+      .size_full()
+      .relative()
+      .bg(rgb(BACKDROP))
+      .child(render_offscreen_password(
+        &self.password,
+        lock.authenticating,
+        lock.fingerprint_state,
+      ))
+  }
+
   /// The desktop clock, which the lock surfaces cover up, drawn in the same
   /// corner it would be in if they didn't.
   fn render_clock(&self, cx: &App) -> Div {

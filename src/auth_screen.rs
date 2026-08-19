@@ -43,6 +43,11 @@ const FIELD_DISABLED_OPACITY: f32 = 0.6;
 /// outline of the field it came from.
 const ERROR_COLOR: u32 = 0xE07070;
 
+/// The near-black the prompt is drawn on. The lock screen paints the outputs
+/// that carry no prompt with it too, so the desktop is covered everywhere rather
+/// than showing next to the screen that hides it.
+pub const BACKDROP: u32 = 0x0D0D0D;
+
 /// How long the field stays outlined after an attempt is turned down. Long
 /// enough to be noticed, short enough to be gone by the time the next one is
 /// typed.
@@ -126,8 +131,10 @@ impl From<greet_ipc::FingerprintState> for FingerprintState {
 /// Keeps the surfaces of one screen in step with each other.
 ///
 /// Emitted by the state entity and applied by every surface except the one it
-/// came from. Only the lock screen needs this: it puts a prompt on every
-/// output, whereas the greeter has exactly one.
+/// came from. Mostly for the lock screen: every one of its surfaces takes
+/// typing, wherever the compositor happened to put the keyboard, while only one
+/// of them shows what is being typed. The greeter has a single field and uses
+/// this only to have it emptied.
 pub struct PasswordMirror {
   /// The value every other surface should show.
   pub value: SharedString,
@@ -190,7 +197,7 @@ pub fn render_auth_screen(prompt: AuthPrompt<'_>) -> Div {
     .flex_col()
     .items_center()
     .justify_center()
-    .bg(rgb(0x0D0D0D))
+    .bg(rgb(BACKDROP))
     .text_color(rgb(0xFFFFFF))
     .child(
       v_flex()
@@ -268,7 +275,7 @@ fn render_password(
       .into_any_element()
   };
 
-  let disabled = busy || fingerprint == FingerprintState::Reading;
+  let disabled = field_disabled(busy, fingerprint);
 
   h_flex()
     .w_full()
@@ -289,6 +296,36 @@ fn render_password(
     .when_some(render_fingerprint(fingerprint), |this, indicator| {
       this.child(indicator)
     })
+}
+
+/// Whether the field takes typing, which the copies out of sight follow too so
+/// that none of them can slip something in past the one on show.
+fn field_disabled(busy: bool, fingerprint: FingerprintState) -> bool {
+  busy || fingerprint == FingerprintState::Reading
+}
+
+/// The same field with nothing drawn: clipped away to no height in the corner of
+/// whatever it is put on.
+///
+/// For the lock screen's other outputs. Which lock surface holds the keyboard is
+/// the compositor's to decide - niri gives it to the output under the pointer -
+/// so every one of them has to be able to take a password, while only one shows
+/// it. Clipped rather than left out or hidden: an element outside the tree gets
+/// no keys, and `visibility` stops the paint that registers the listeners, so
+/// either way there would be nothing to type into.
+pub fn render_offscreen_password(
+  password: &Entity<InputState>,
+  busy: bool,
+  fingerprint: FingerprintState,
+) -> Div {
+  div()
+    .absolute()
+    .top_0()
+    .left_0()
+    .w_full()
+    .h_0()
+    .overflow_hidden()
+    .child(input(password).disabled(field_disabled(busy, fingerprint)))
 }
 
 /// The circular portrait, or the initial when there is no picture. `size` is a
