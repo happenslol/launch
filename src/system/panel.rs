@@ -995,7 +995,17 @@ impl<'a> Forest<'a> {
       })
       .collect();
 
+    // A root stands on its own, whether it was promoted out of a cycle or simply
+    // had no parent in the snapshot. The promoted kind does have a parent here -
+    // one of its own descendants, which is what made it a cycle - and folding
+    // into that would count the loop a second time.
+    let promoted: HashSet<Pid> = roots.iter().copied().collect();
+
     for pid in order.iter().rev() {
+      if promoted.contains(pid) {
+        continue;
+      }
+
       let Some(total) = totals.get(pid).copied() else {
         continue;
       };
@@ -1053,10 +1063,18 @@ fn build_tree_rows(
   // thousands of processes deep, and this runs on a background thread.
   let mut stack: Vec<(Pid, usize)> = level.into_iter().rev().map(|pid| (pid, 0)).collect();
 
+  // The cycle a root was promoted out of is still there in the child lists, and
+  // a row for every lap around it would go on until there is no memory left.
+  let mut seen: HashSet<Pid> = HashSet::with_capacity(processes.len());
+
   while let Some((pid, depth)) = stack.pop() {
     let Some(process) = forest.by_pid.get(&pid) else {
       continue;
     };
+
+    if !seen.insert(pid) {
+      continue;
+    }
 
     let total = forest.total(pid);
     let descendants = total.count.saturating_sub(1);
@@ -2153,6 +2171,20 @@ mod tests {
     let rows = tree(&looped, "", &[10, 11]);
 
     assert_eq!(rows.len(), 2, "every process should be listed exactly once");
+  }
+
+  #[test]
+  fn a_parent_loop_hanging_off_a_subtree_still_ends() {
+    // The loop closes back onto a process that has a child of its own, so the
+    // rows only run out if the walk refuses to go round a second time.
+    let looped = snapshot(vec![
+      child(10, 11, "a"),
+      child(11, 10, "b"),
+      child(12, 11, "c"),
+    ]);
+    let rows = tree(&looped, "", &[10, 11, 12]);
+
+    assert_eq!(rows.len(), 3, "every process should be listed exactly once");
   }
 
   #[test]
