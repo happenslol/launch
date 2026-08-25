@@ -9,6 +9,7 @@ use std::{
 
 use crate::wayland::{self, WaylandConnection};
 
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
@@ -28,12 +29,13 @@ use nucleo_matcher::{
   pattern::{CaseMatching, Normalization, Pattern},
 };
 use smallvec::SmallVec;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
   audio, bluetooth, clipboard,
   db::DB,
   dbus::status_notifier::{Systray, SystrayEvent, TrayItem},
+  dbus::{self, GlobalDbusConnection},
   icon::{Icon, IconName},
   llm,
   matcher::MatcherPool,
@@ -279,11 +281,11 @@ impl Launcher {
         &picker,
         window,
         move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
-          // Both picks start the app the same way. Trying to be clever here -
-          // D-Bus activation, or raising an existing window of the same app - gave
-          // no feedback when it did not work out, so picking an app would close
-          // the launcher and appear to do nothing. Existing windows are reachable
-          // through the "Windows" panel, which is explicit about what it does.
+          // Both picks start the app the same way. Guessing at an existing window
+          // by matching the entry's app id against the compositor's used to happen
+          // here, and it silently swallowed the launch whenever the guess was
+          // wrong. Open windows are reachable through the "Windows" panel, which
+          // is explicit about what it does.
           PickerEvent::Picked(item) | PickerEvent::SecondaryPicked(item) => {
             this.launch(item.clone(), window, cx)
           }
@@ -658,15 +660,7 @@ impl Launcher {
     DB.record_launch(&item.id());
 
     match &item {
-      RootItem::App { entry, .. } => {
-        let locales = self.picker.read(cx).delegate.xdg_locales.clone();
-        // The window stays open when the launch fails, so a failure is at least
-        // visible as "nothing happened and the launcher is still here".
-        match xdg::launch(entry, &locales, cx) {
-          Ok(_) => window.remove_window(),
-          Err(err) => error!(?err, app_id = entry.appid.as_str(), "Failed to launch app"),
-        }
-      }
+      RootItem::App { entry, .. } => self.launch_app(entry.clone(), window, cx),
       RootItem::Panel { view, .. } => {
         let panel = view(window, cx);
         self.active_panel = Some(panel);
@@ -691,6 +685,73 @@ impl Launcher {
         action(self, window, cx);
       }
     }
+  }
+
+  /// Starts an app, over D-Bus when its entry asks for that and by running its
+  /// `Exec` otherwise.
+  ///
+  /// Activation is worth preferring because it hands the decision to the app:
+  /// whether launching means a fresh window or raising the one already open is
+  /// the app's to make, and it is started as its own service rather than as a
+  /// child of the launcher. Every way activation can fail arrives as an error, so
+  /// `Exec` is always there to fall back on, resolved before the bus is touched
+  /// so that the fallback is ready the moment it is needed.
+  ///
+  /// Either way the window is closed only once something has actually started.
+  /// A failed launch leaves it up, so the miss is visible instead of looking like
+  /// the launcher shrugged.
+  fn launch_app(&self, entry: DesktopEntry, window: &mut Window, cx: &mut Context<Self>) {
+    let locales = self.picker.read(cx).delegate.xdg_locales.clone();
+    let app_id = entry.appid.clone();
+
+    let working_directory = entry.path().map(str::to_string);
+
+    // Resolved up front so the activation path has its fallback in hand. Kept as
+    // a `Result` rather than unwrapped here because a malformed `Exec` is not on
+    // its own fatal: the entry may still activate, and `Exec` is only ever the
+    // fallback the spec asks such entries to carry.
+    let command = xdg::command_for(&entry, &locales, cx);
+    let spawn = move |command: Result<Vec<String>>| {
+      command.and_then(|command| xdg::spawn_detached(&command, working_directory.as_deref()))
+    };
+
+    if !entry.dbus_activatable() {
+      match spawn(command) {
+        Ok(()) => window.remove_window(),
+        Err(err) => error!(?err, app_id, "Failed to launch app"),
+      }
+      return;
+    }
+
+    let connection = GlobalDbusConnection::session(cx);
+    cx.spawn_in(window, async move |_, cx| {
+      let activated = match connection.await {
+        Some(connection) => {
+          dbus::application::activate(&connection, &app_id, cx.background_executor()).await
+        }
+        None => Err(anyhow!("No session bus")),
+      };
+
+      match activated {
+        Ok(()) => {
+          debug!(app_id, "Activated app over D-Bus");
+          cx.update(|window, _| window.remove_window()).log_err();
+          return;
+        }
+        Err(err) => debug!(
+          ?err,
+          app_id, "D-Bus activation failed, falling back to Exec"
+        ),
+      }
+
+      match spawn(command) {
+        Ok(()) => {
+          cx.update(|window, _| window.remove_window()).log_err();
+        }
+        Err(err) => error!(?err, app_id, "Failed to launch app"),
+      }
+    })
+    .detach();
   }
 }
 

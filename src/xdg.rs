@@ -504,8 +504,9 @@ fn command_line(
 /// launcher is a long-lived daemon: `async_process` keeps a single reaper thread
 /// that collects each child once it exits, so dropping the handle here does not
 /// leave a zombie behind for the rest of the session.
-fn spawn_detached(command: &[String], working_directory: Option<&str>) -> Result<()> {
+pub fn spawn_detached(command: &[String], working_directory: Option<&str>) -> Result<()> {
   let (program, arguments) = command.split_first().context("Empty command line")?;
+  debug!(?command, ?working_directory, "Spawning");
 
   // The program is passed by name, not as the path it resolves to, so that it
   // reaches the app as its own `argv[0]` - which is what some of them derive
@@ -533,14 +534,13 @@ pub fn open_url(url: &str) -> Result<()> {
   spawn_detached(&["xdg-open".to_string(), url.to_string()], None)
 }
 
-/// Starts the app a desktop entry describes.
-pub fn launch(entry: &DesktopEntry, locales: &[String], cx: &App) -> Result<()> {
-  let command = command_line(entry, locales, ConfigState::get(cx).apps.terminal)?;
-  debug!(app_id = entry.appid.as_str(), ?command, "Launching app");
-
-  // `entry.path()` is the `Path` key, the working directory the entry asks to be
-  // started in.
-  spawn_detached(&command, entry.path())
+/// The argument list a desktop entry starts as, terminal wrapping and all.
+///
+/// This is resolved separately from spawning so that an entry which cannot be
+/// turned into a command at all is reported before anything else is attempted,
+/// and so that the D-Bus activation path has the fallback ready in hand.
+pub fn command_for(entry: &DesktopEntry, locales: &[String], cx: &App) -> Result<Vec<String>> {
+  command_line(entry, locales, ConfigState::get(cx).apps.terminal)
 }
 
 #[cfg(test)]
