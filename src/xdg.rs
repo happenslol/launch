@@ -754,19 +754,19 @@ mod tests {
     panic!("children were left unreaped: {:?}", zombie_children());
   }
 
-  /// The process group of the running test process, from `/proc/self/stat`.
+  /// The process group named by a `/proc/<pid>/stat` line.
+  fn process_group(stat: &str) -> Option<u32> {
+    // The command name is parenthesised and may itself contain spaces and
+    // parentheses, so the numbered fields start after its closing bracket.
+    let fields = stat.rsplit_once(") ")?.1;
+    // After the command name come the state, the parent, and then the group.
+    fields.split(' ').nth(2)?.parse().ok()
+  }
+
+  /// The process group of the running test process.
   fn our_process_group() -> u32 {
     let stat = std::fs::read_to_string("/proc/self/stat").expect("/proc/self/stat");
-    let fields = stat
-      .rsplit_once(") ")
-      .expect("stat should have a comm field")
-      .1;
-    // After the command name come the state, the parent, and then the group.
-    fields
-      .split(' ')
-      .nth(2)
-      .and_then(|group| group.parse().ok())
-      .expect("stat should have a process group")
+    process_group(&stat).expect("stat should have a process group")
   }
 
   #[test]
@@ -780,8 +780,10 @@ mod tests {
         "sh".to_string(),
         "-c".to_string(),
         // Written relative to the working directory, so landing in the right
-        // place is itself part of what is being checked.
-        "ps -o pgid= -p $$ > group".to_string(),
+        // place is itself part of what is being checked. The group is read out
+        // of `/proc` rather than with `ps`, which is absent from the sandbox
+        // the tests are also run in.
+        "cp /proc/$$/stat group".to_string(),
       ],
       Some(&directory.to_string_lossy()),
     )
@@ -790,7 +792,7 @@ mod tests {
     let mut written = None;
     for _ in 0..200 {
       if let Ok(contents) = std::fs::read_to_string(&marker)
-        && let Ok(group) = contents.trim().parse::<u32>()
+        && let Some(group) = process_group(&contents)
       {
         written = Some(group);
         break;
