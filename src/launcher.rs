@@ -28,13 +28,11 @@ use nucleo_matcher::{
   pattern::{CaseMatching, Normalization, Pattern},
 };
 use smallvec::SmallVec;
-use tracing::{debug, error, warn};
+use tracing::{error, warn};
 
 use crate::{
   audio, bluetooth, clipboard,
   db::DB,
-  dbus,
-  dbus::GlobalDbusConnection,
   dbus::status_notifier::{Systray, SystrayEvent, TrayItem},
   icon::{Icon, IconName},
   llm,
@@ -281,49 +279,14 @@ impl Launcher {
         &picker,
         window,
         move |this, _, ev: &PickerEvent<RootDelegate>, window, cx| match ev {
-          PickerEvent::Picked(item) => {
-            if let RootItem::App { entry, .. } = &item {
-              if entry.dbus_activatable() {
-                DB.record_launch(&item.id());
-                let app_id = entry.appid.clone();
-                let conn_task = GlobalDbusConnection::session(cx);
-                let window_id = niri::find_window_by_app_id(&entry.appid, cx);
-                let entry = entry.clone();
-                cx.spawn_in(window, async move |_, cx| {
-                  if let Some(conn) = conn_task.await
-                    && dbus::application::activate(&conn, &app_id).await.is_ok()
-                  {
-                    debug!(app_id, "Launched via dbus activation");
-                    let _ = cx.update(|window, _| window.remove_window());
-                    return;
-                  }
-                  if let Some(window_id) = window_id {
-                    debug!(app_id = entry.appid.as_str(), "Falling back to niri focus");
-                    let _ = cx.update(|window, cx| niri::focus_niri_window(window_id, window, cx));
-                    return;
-                  }
-                  debug!(app_id = entry.appid.as_str(), "Falling back to fork/exec");
-                  match xdg::start(&entry) {
-                    Ok(_) => {
-                      let _ = cx.update(|window, _| window.remove_window());
-                    }
-                    Err(err) => error!(?err, "Failed to start process"),
-                  }
-                })
-                .detach();
-                return;
-              }
-
-              if let Some(window_id) = niri::find_window_by_app_id(&entry.appid, cx) {
-                DB.record_launch(&item.id());
-                debug!(app_id = entry.appid.as_str(), "Launching via niri focus");
-                niri::focus_niri_window(window_id, window, cx);
-                return;
-              }
-            }
-            this.launch(item.clone(), window, cx);
+          // Both picks start the app the same way. Trying to be clever here -
+          // D-Bus activation, or raising an existing window of the same app - gave
+          // no feedback when it did not work out, so picking an app would close
+          // the launcher and appear to do nothing. Existing windows are reachable
+          // through the "Windows" panel, which is explicit about what it does.
+          PickerEvent::Picked(item) | PickerEvent::SecondaryPicked(item) => {
+            this.launch(item.clone(), window, cx)
           }
-          PickerEvent::SecondaryPicked(item) => this.launch(item.clone(), window, cx),
           PickerEvent::QueryChanged(query) => {
             this.update_inline_results(query.clone(), window, cx);
           }
@@ -696,10 +659,12 @@ impl Launcher {
 
     match &item {
       RootItem::App { entry, .. } => {
-        debug!(app_id = entry.appid.as_str(), "Launching via fork/exec");
-        match xdg::start(entry) {
+        let locales = self.picker.read(cx).delegate.xdg_locales.clone();
+        // The window stays open when the launch fails, so a failure is at least
+        // visible as "nothing happened and the launcher is still here".
+        match xdg::launch(entry, &locales, cx) {
           Ok(_) => window.remove_window(),
-          Err(err) => error!(?err, "Failed to start process"),
+          Err(err) => error!(?err, app_id = entry.appid.as_str(), "Failed to launch app"),
         }
       }
       RootItem::Panel { view, .. } => {

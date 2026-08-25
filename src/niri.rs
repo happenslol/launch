@@ -62,19 +62,6 @@ impl NiriState {
       .and_then(|workspace| workspace.output.as_deref())
   }
 
-  pub fn find_window_by_app_id(&self, app_id: &str) -> Option<u64> {
-    self
-      .windows
-      .iter()
-      .filter(|w| {
-        w.app_id
-          .as_deref()
-          .is_some_and(|id| id.eq_ignore_ascii_case(app_id))
-      })
-      .max_by_key(|w| w.focus_timestamp.map(|t| (t.secs, t.nanos)))
-      .map(|w| w.id)
-  }
-
   fn apply_event(&mut self, event: niri_ipc::Event) -> Option<NiriEvent> {
     match event {
       niri_ipc::Event::WindowsChanged { windows } => {
@@ -219,11 +206,6 @@ fn run_event_stream(event_tx: flume::Sender<niri_ipc::Event>) -> anyhow::Result<
   }
 
   Ok(())
-}
-
-pub fn find_window_by_app_id(app_id: &str, cx: &App) -> Option<u64> {
-  let state = cx.try_global::<GlobalNiriState>()?;
-  state.0.read(cx).find_window_by_app_id(app_id)
 }
 
 fn focus_niri_window_sync(window_id: u64) -> anyhow::Result<()> {

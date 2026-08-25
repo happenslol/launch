@@ -21,10 +21,21 @@ pub struct Config {
   /// back to this when they name no output of their own. Being a plain key, it
   /// has to appear above the first `[section]` in the file.
   pub primary_display: Option<String>,
+  pub apps: AppsConfig,
   pub notifications: NotificationsConfig,
   pub status: StatusConfig,
   pub lock: LockConfig,
   pub system: SystemConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct AppsConfig {
+  /// Command used to run desktop entries that ask for a terminal
+  /// (`Terminal=true`), given as the program followed by whatever arguments have
+  /// to precede the command, e.g. `["ghostty", "-e"]`. When unset, `$TERMINAL`
+  /// and then a handful of known terminal emulators are looked for on `PATH`.
+  pub terminal: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

@@ -53,7 +53,6 @@ rustix = { version = "1.1.2", features = ["pipe", "fs", "process", "param"] }
 futures = "0.3"
 async-process = "2.5.0"
 fork = "0.6.0"
-exec = "0.3.1"
 ropey = { version = "=2.0.0-beta.1", features = [
   "metric_lines_lf",
   "metric_utf16",
