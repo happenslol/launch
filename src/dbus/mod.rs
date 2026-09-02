@@ -6,6 +6,7 @@ pub mod networkmanager;
 pub mod notifications;
 pub mod polkit;
 pub mod status_notifier;
+pub mod systemd;
 pub mod upower;
 
 use futures::FutureExt;

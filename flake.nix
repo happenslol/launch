@@ -63,6 +63,14 @@
           after = ["graphical-session.target"];
           wantedBy = ["graphical-session.target"];
 
+          # Desktop entries name their program without a path (`Exec=Discord`),
+          # so every launch is resolved against the daemon's PATH. The NixOS
+          # default puts a minimal one (coreutils, findutils, grep, sed,
+          # systemd) on the unit, and that Environment= overrides the session
+          # PATH the compositor imported into the user manager, leaving nothing
+          # to find any app under. Same reason niri's own module turns it off.
+          enableDefaultPath = false;
+
           serviceConfig = {
             Type = "simple";
             # systemd service has to be a foreground process

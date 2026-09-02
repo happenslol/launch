@@ -11,7 +11,7 @@ use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths};
 use gpui::{App, Entity, Global, Resource, Task, prelude::*};
 use tracing::debug;
 
-use crate::{config::ConfigState, db::DB, launcher::RootItem, util::ResultExt};
+use crate::{config::ConfigState, db::DB, dbus, launcher::RootItem, util::ResultExt};
 
 pub struct XdgIconCache {
   cache: HashMap<String, Resource>,
@@ -530,8 +530,56 @@ pub fn spawn_detached(command: &[String], working_directory: Option<&str>) -> Re
   Ok(())
 }
 
-pub fn open_url(url: &str) -> Result<()> {
-  spawn_detached(&["xdg-open".to_string(), url.to_string()], None)
+/// Starts a command, as a transient systemd user service where there is a user
+/// manager to ask and as a child of the launcher where there is not.
+///
+/// The transient unit is what keeps a launched app from being tied to the
+/// launcher's own lifetime - see [`dbus::systemd::start_app`] for what that
+/// buys. Falling back covers the sessions that have no user manager to ask, the
+/// greeter among them, where a child process is the only way to start anything
+/// and the question of whose cgroup it lands in does not come up.
+pub async fn launch_command(
+  connection: Option<&zbus::Connection>,
+  app_id: &str,
+  command: &[String],
+  working_directory: Option<&str>,
+) -> Result<()> {
+  if let Some(connection) = connection {
+    match start_transient_unit(connection, app_id, command, working_directory).await {
+      Ok(()) => return Ok(()),
+      // Not an error worth showing: the fallback below starts the app just as
+      // well, only inside the launcher's own unit.
+      Err(err) => debug!(
+        ?err,
+        app_id, "Could not start a transient unit, spawning directly"
+      ),
+    }
+  }
+
+  spawn_detached(command, working_directory)
+}
+
+async fn start_transient_unit(
+  connection: &zbus::Connection,
+  app_id: &str,
+  command: &[String],
+  working_directory: Option<&str>,
+) -> Result<()> {
+  let program = command.first().context("Empty command line")?;
+
+  // Resolved here because systemd searches no `PATH` of its own, and because a
+  // program that is not there at all is worth finding out about before a unit
+  // is built around it: this is the one failure the call itself cannot report,
+  // since it is answered as soon as the job is queued.
+  let path =
+    find_executable(program).with_context(|| format!("`{program}` was not found on PATH"))?;
+
+  dbus::systemd::start_app(connection, app_id, &path, command, working_directory).await
+}
+
+pub async fn open_url(connection: Option<&zbus::Connection>, url: &str) -> Result<()> {
+  let command = ["xdg-open".to_string(), url.to_string()];
+  launch_command(connection, "xdg-open", &command, None).await
 }
 
 /// The argument list a desktop entry starts as, terminal wrapping and all.

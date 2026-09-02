@@ -9,7 +9,7 @@ use std::{
 
 use crate::wayland::{self, WaylandConnection};
 
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use chrono::{DateTime, Local, TimeZone};
 
 use freedesktop_desktop_entry::DesktopEntry;
@@ -676,10 +676,17 @@ impl Launcher {
         let query = self.picker.read(cx).search_input.read(cx).value();
         let encoded = urlencoding::encode(&query);
         let url = url_template.replace("{}", &encoded);
-        match open_url(&url) {
-          Ok(_) => window.remove_window(),
-          Err(err) => error!(?err, "Failed to open search URL"),
-        }
+
+        let connection = GlobalDbusConnection::session(cx);
+        cx.spawn_in(window, async move |_, cx| {
+          match open_url(connection.await.as_ref(), &url).await {
+            Ok(()) => {
+              cx.update(|window, _| window.remove_window()).log_err();
+            }
+            Err(err) => error!(?err, "Failed to open search URL"),
+          }
+        })
+        .detach();
       }
       RootItem::Action { action, .. } => {
         action(self, window, cx);
@@ -692,17 +699,23 @@ impl Launcher {
   ///
   /// Activation is worth preferring because it hands the decision to the app:
   /// whether launching means a fresh window or raising the one already open is
-  /// the app's to make, and it is started as its own service rather than as a
-  /// child of the launcher. Every way activation can fail arrives as an error, so
+  /// the app's to make. Every way activation can fail arrives as an error, so
   /// `Exec` is always there to fall back on, resolved before the bus is touched
   /// so that the fallback is ready the moment it is needed.
   ///
-  /// Either way the window is closed only once something has actually started.
-  /// A failed launch leaves it up, so the miss is visible instead of looking like
-  /// the launcher shrugged.
+  /// Neither path leaves the app sitting inside the launcher's own unit: an
+  /// activated app is started by the bus and an `Exec` one by the user manager,
+  /// for which see [`xdg::launch_command`].
+  ///
+  /// Either way the window is closed only once the launch has been accepted, and
+  /// a failed one leaves it up so the miss is visible instead of looking like the
+  /// launcher shrugged. The one thing acceptance cannot speak for is a program
+  /// that is there but cannot be executed: both paths hand that off to something
+  /// that reports it long after the call has returned.
   fn launch_app(&self, entry: DesktopEntry, window: &mut Window, cx: &mut Context<Self>) {
     let locales = self.picker.read(cx).delegate.xdg_locales.clone();
     let app_id = entry.appid.clone();
+    let dbus_activatable = entry.dbus_activatable();
 
     let working_directory = entry.path().map(str::to_string);
 
@@ -711,40 +724,46 @@ impl Launcher {
     // its own fatal: the entry may still activate, and `Exec` is only ever the
     // fallback the spec asks such entries to carry.
     let command = xdg::command_for(&entry, &locales, cx);
-    let spawn = move |command: Result<Vec<String>>| {
-      command.and_then(|command| xdg::spawn_detached(&command, working_directory.as_deref()))
-    };
-
-    if !entry.dbus_activatable() {
-      match spawn(command) {
-        Ok(()) => window.remove_window(),
-        Err(err) => error!(?err, app_id, "Failed to launch app"),
-      }
-      return;
-    }
 
     let connection = GlobalDbusConnection::session(cx);
     cx.spawn_in(window, async move |_, cx| {
-      let activated = match connection.await {
-        Some(connection) => {
-          dbus::application::activate(&connection, &app_id, cx.background_executor()).await
-        }
-        None => Err(anyhow!("No session bus")),
-      };
+      let connection = connection.await;
 
-      match activated {
-        Ok(()) => {
-          debug!(app_id, "Activated app over D-Bus");
-          cx.update(|window, _| window.remove_window()).log_err();
-          return;
+      if dbus_activatable {
+        let activated = match &connection {
+          Some(connection) => {
+            dbus::application::activate(connection, &app_id, cx.background_executor()).await
+          }
+          None => Err(anyhow!("No session bus")),
+        };
+
+        match activated {
+          Ok(()) => {
+            debug!(app_id, "Activated app over D-Bus");
+            cx.update(|window, _| window.remove_window()).log_err();
+            return;
+          }
+          Err(err) => debug!(
+            ?err,
+            app_id, "D-Bus activation failed, falling back to Exec"
+          ),
         }
-        Err(err) => debug!(
-          ?err,
-          app_id, "D-Bus activation failed, falling back to Exec"
-        ),
       }
 
-      match spawn(command) {
+      let started = match command {
+        Ok(command) => {
+          xdg::launch_command(
+            connection.as_ref(),
+            &app_id,
+            &command,
+            working_directory.as_deref(),
+          )
+          .await
+        }
+        Err(err) => Err(err),
+      };
+
+      match started {
         Ok(()) => {
           cx.update(|window, _| window.remove_window()).log_err();
         }
