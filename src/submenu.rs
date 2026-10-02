@@ -162,7 +162,7 @@ impl<D: PickerDelegate> Render for SubMenu<D> {
               .overflow_hidden()
               .flex()
               .flex_col()
-              .child(picker_results(&self.picker).flex_grow().min_h_0())
+              .child(picker_results(&self.picker).flex_grow(1.).min_h_0())
               .child(picker_input(&self.picker).border_b_0().border_t_1()),
           )
           .with_animation(

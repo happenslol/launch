@@ -597,7 +597,7 @@ impl<D: PickerDelegate> Picker<D> {
       }),
     )
     .track_scroll(&self.list_scroll_handle)
-    .flex_grow()
+    .flex_grow(1.)
     .p_2()
     .into_any_element()
   }
@@ -640,7 +640,7 @@ impl<D: PickerDelegate> Picker<D> {
         }
       }),
     )
-    .flex_grow()
+    .flex_grow(1.)
     .pb_2()
     .into_any_element()
   }
@@ -745,7 +745,7 @@ impl<D: PickerDelegate> RenderOnce for PickerInput<D> {
               .child(Icon::new(IconName::ArrowLeft).text_color(rgb(0xCCCCCC))),
           )
         })
-        .child(input(&search_input).flex_grow())
+        .child(input(&search_input).flex_grow(1.))
         .when(self.is_loading, |this| {
           this.child(Spinner::new().color(rgb(0x888888).into()))
         })

@@ -616,7 +616,7 @@ impl Render for TrayMenu {
           })
           .child(
             div()
-              .flex_grow()
+              .flex_grow(1.)
               .min_w_0()
               .truncate()
               .child(item.label.clone()),

@@ -533,7 +533,7 @@ impl PolkitDialog {
           .size(rems(0.95))
           .text_color(rgba(0xFFFFFF66)),
       )
-      .child(input(&self.password).flex_grow())
+      .child(input(&self.password).flex_grow(1.))
       .when(self.fingerprint, |this| this.child(fingerprint_indicator()))
       .into_any_element()
   }

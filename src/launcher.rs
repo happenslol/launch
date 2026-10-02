@@ -600,6 +600,7 @@ impl Launcher {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
+    let parent = window.window_handle();
     cx.spawn_in(window, async move |_, cx| {
       let proxy = match item.menu_proxy().await {
         Ok(Some(proxy)) => proxy,
@@ -636,7 +637,8 @@ impl Launcher {
             size: Size::new(MENU_WIDTH, height),
           })),
           window_background: WindowBackgroundAppearance::Transparent,
-          kind: WindowKind::XdgPopup(PopupOptions {
+          kind: WindowKind::AnchoredPopup(PopupOptions {
+            parent,
             anchor_rect,
             anchor: PopupAnchor::TopRight,
             gravity: PopupGravity::TopLeft,
@@ -644,7 +646,8 @@ impl Launcher {
               | PopupConstraintAdjustment::FLIP_Y
               | PopupConstraintAdjustment::SLIDE_X
               | PopupConstraintAdjustment::SLIDE_Y,
-            offset: None,
+            offset: point(px(0.), px(0.)),
+            grab: true,
             reactive: true,
           }),
           ..Default::default()

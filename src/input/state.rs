@@ -1705,7 +1705,7 @@ impl Render for InputState {
       .id("input-state")
       .flex_1()
       .when(self.mode.is_multi_line(), |this| this.h_full())
-      .flex_grow()
+      .flex_grow(1.)
       .overflow_x_hidden()
       .child(text_element(cx.entity().clone()).placeholder(self.placeholder.clone()))
   }

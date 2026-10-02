@@ -233,7 +233,7 @@ impl StatusOverlay {
 
     let window = cx.open_window(window_options(display), |window, cx| {
       // The clock is decoration, so clicks belong to whatever is behind it.
-      window.set_input_passthrough();
+      window.set_input_region(Some(&[]));
       cx.new(|cx| StatusView::new(clock, cx))
     });
 

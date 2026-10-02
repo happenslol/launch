@@ -292,7 +292,7 @@ fn render_password(
     })
     .when(disabled, |this| this.opacity(FIELD_DISABLED_OPACITY))
     .child(leading)
-    .child(input(password).flex_grow().disabled(disabled))
+    .child(input(password).flex_grow(1.).disabled(disabled))
     .when_some(render_fingerprint(fingerprint), |this, indicator| {
       this.child(indicator)
     })

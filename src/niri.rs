@@ -389,7 +389,7 @@ impl PickerDelegate for WindowsDelegate {
       })
       .child(
         h_flex()
-          .flex_grow()
+          .flex_grow(1.)
           .overflow_x_hidden()
           .justify_between()
           .gap_2()

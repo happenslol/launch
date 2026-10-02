@@ -1493,7 +1493,7 @@ impl PickerDelegate for WifiDelegate {
           )
           .child(
             v_flex()
-              .flex_grow()
+              .flex_grow(1.)
               .overflow_x_hidden()
               .child(
                 div()

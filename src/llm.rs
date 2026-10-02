@@ -579,7 +579,7 @@ impl LlmPanel {
       .child(
         div()
           .relative()
-          .flex_grow()
+          .flex_grow(1.)
           .overflow_hidden()
           .child(
             div()

@@ -348,7 +348,7 @@ impl Render for ClipboardPanel {
       .child(picker_input(&self.picker).show_back_button(true))
       .child(
         h_flex()
-          .flex_grow()
+          .flex_grow(1.)
           .overflow_hidden()
           .child(
             v_flex()
@@ -360,7 +360,7 @@ impl Render for ClipboardPanel {
           )
           .child(
             gpui::div()
-              .flex_grow()
+              .flex_grow(1.)
               .min_w_0()
               .h_full()
               .overflow_hidden()
@@ -438,7 +438,7 @@ impl PickerDelegate for ClipboardDelegate {
       )
       .child(
         h_flex()
-          .flex_grow()
+          .flex_grow(1.)
           .overflow_x_hidden()
           .justify_between()
           .gap_2()

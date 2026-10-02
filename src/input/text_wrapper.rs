@@ -1,7 +1,8 @@
 use std::ops::Range;
 
 use gpui::{
-  App, Font, LineFragment, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px, size,
+  App, Font, IndentAdjustment, LineFragment, Pixels, Point, ShapedLine, Size, TextAlign, Window,
+  point, px, size,
 };
 use ropey::Rope;
 use smallvec::SmallVec;
@@ -149,7 +150,11 @@ impl TextWrapper {
       new_text,
       &mut |line_str, wrap_width| {
         line_wrapper
-          .wrap_line(&[LineFragment::text(line_str)], wrap_width)
+          .wrap_line(
+            &[LineFragment::text(line_str)],
+            wrap_width,
+            IndentAdjustment::SameIndent,
+          )
           .collect()
       },
     );

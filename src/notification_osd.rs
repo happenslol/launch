@@ -215,7 +215,9 @@ impl NotificationOsd {
         };
         // Drop a stale handle if the surface is gone, so the next `sync` reopens.
         if handle
-          .update(cx, |_view, window, _cx| window.set_input_region(region))
+          .update(cx, |_view, window, _cx| {
+            window.set_input_region(Some(&[region]))
+          })
           .is_err()
         {
           self.window = None;
