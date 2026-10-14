@@ -10,9 +10,9 @@ use std::{
 use gpui::{
   Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, DisplayId, Div, ElementId,
   Entity, FontStyle, FontWeight, Global, HighlightStyle, ImageSource, IntoElement, MouseButton,
-  ObjectFit, Pixels, Render, Resource, SharedString, Size, Stateful, Styled, StyledText,
-  Subscription, Task, UnderlineStyle, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-  WindowHandle, WindowKind, WindowOptions, div, img,
+  MouseMoveEvent, ObjectFit, Pixels, Render, Resource, SharedString, Size, Stateful, Styled,
+  StyledText, Subscription, Task, UnderlineStyle, WeakEntity, Window, WindowBackgroundAppearance,
+  WindowBounds, WindowHandle, WindowKind, WindowOptions, div, img,
   layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions},
   point,
   prelude::*,
@@ -653,7 +653,6 @@ impl NotificationsView {
       .border_1()
       .border_color(border_color)
       .shadow_lg()
-      .cursor_pointer()
       .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
         this.notifications.update(cx, |notifications, cx| {
           if has_default {
@@ -671,9 +670,15 @@ impl NotificationsView {
           });
         }),
       )
-      .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+      .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+        let hovered = *hovered && window.is_window_hovered();
         this.notifications.update(cx, |notifications, cx| {
-          notifications.set_hovered(id, *hovered, cx)
+          notifications.set_hovered(id, hovered, cx)
+        });
+      }))
+      .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _window, cx| {
+        this.notifications.update(cx, |notifications, cx| {
+          notifications.set_hovered(id, true, cx)
         });
       }))
   }
@@ -687,11 +692,9 @@ impl NotificationsView {
     cx: &mut Context<Self>,
   ) -> Stateful<Div> {
     let key = action.key.clone();
-    let element = div()
-      .id(SharedString::from(format!(
-        "notif-{notification_id}-action-{index}"
-      )))
-      .cursor_pointer();
+    let element = div().id(SharedString::from(format!(
+      "notif-{notification_id}-action-{index}"
+    )));
 
     let element = match variant {
       ButtonVariant::Compact => element
