@@ -56,7 +56,7 @@ use crate::auth_screen::{
 };
 use crate::config::{ConfigState, LockConfig};
 use crate::dbus::GlobalDbusConnection;
-use crate::dbus::fprintd::{FingerprintReader, VerifyStatus};
+use crate::dbus::fprintd::{self, FingerprintReader, VerifyStatus};
 use crate::dbus::logind::{Logind, Session, SessionRequest};
 use crate::input::state::{InputEvent, InputState};
 use crate::launcher::Launcher;
@@ -74,6 +74,13 @@ const MAX_FINGERPRINT_FAILURES: u32 = 5;
 /// indefinitely. The lock screen falls back to password-only rather than
 /// promising a finger prompt that will never arrive.
 const FINGERPRINT_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often claiming the reader is tried before giving up on it, and how long
+/// to wait in between. fprintd lets go of a disconnected client's claim only
+/// once it has closed the device, so a claim sent right after closing the
+/// previous connection - on wake, say - can still find the reader taken.
+const CLAIM_ATTEMPTS: u32 = 3;
+const CLAIM_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Why the screen is holding sleep up, as `systemd-inhibit --list` shows it.
 const INHIBIT_REASON: &str = "Lock the screen before sleeping";
@@ -123,7 +130,7 @@ pub fn lock(cx: &mut App) {
   };
 
   let config = ConfigState::get(cx).lock;
-  let lock = cx.new(|_cx| Lock::new(user, config));
+  let lock = cx.new(|cx| Lock::new(user, config, cx));
 
   close_launcher_windows(cx);
 
@@ -389,6 +396,9 @@ pub struct Lock {
   fingerprint_state: FingerprintState,
   /// The claimed reader, while fingerprint verification is running.
   fingerprint: Option<FingerprintReader>,
+  /// The private connection the reader is claimed through, held from just
+  /// before the claim is sent. Closing it is what hands the reader back.
+  fingerprint_connection: Option<zbus::Connection>,
   _auth: Option<Task<()>>,
   _rejection: Option<Task<()>>,
   /// Never cleared from within the task itself: dropping a task from its own
@@ -400,9 +410,20 @@ pub struct Lock {
 impl EventEmitter<PasswordMirror> for Lock {}
 
 impl Lock {
-  fn new(user: AuthUser, config: LockConfig) -> Self {
+  fn new(user: AuthUser, config: LockConfig, cx: &mut Context<Self>) -> Self {
     let pam_service = pam::resolve_service(&config.pam_service);
     debug!(service = %pam_service, "Authenticating against PAM service");
+
+    // A lock that ends without unlocking - the compositor taking the surfaces
+    // away, say - still has to let go of the reader. Its tasks are cancelled
+    // along with it, so none of them can.
+    cx.on_release(|lock, cx| {
+      if let Some(connection) = lock.fingerprint_connection.take() {
+        cx.background_spawn(close_fprintd_connection(connection))
+          .detach();
+      }
+    })
+    .detach();
 
     Self {
       user,
@@ -414,6 +435,7 @@ impl Lock {
       hint: None,
       fingerprint_state: FingerprintState::Off,
       fingerprint: None,
+      fingerprint_connection: None,
       _auth: None,
       _rejection: None,
       _fingerprint: None,
@@ -534,8 +556,9 @@ impl Lock {
   }
 
   /// Starts over with the fingerprint reader, for when the one we were using is
-  /// no longer good - after a suspend, say. Whatever is held is handed back
-  /// first, in the same task, so the release can't land on top of the new claim.
+  /// no longer good - after a suspend, say. The old connection is closed first,
+  /// in the same task, so its claim is on its way out before the new one is
+  /// sent.
   fn restart_fingerprint(&mut self, cx: &mut Context<Self>) {
     if !self.fingerprint_enabled {
       return;
@@ -544,7 +567,8 @@ impl Lock {
     // Nothing that was said about the old reader still applies.
     self.error = None;
 
-    let previous = self.fingerprint.take();
+    self.fingerprint = None;
+    let previous = self.fingerprint_connection.take();
     self.start_fingerprint_after(previous, cx);
   }
 
@@ -554,11 +578,9 @@ impl Lock {
 
   fn start_fingerprint_after(
     &mut self,
-    previous: Option<FingerprintReader>,
+    previous: Option<zbus::Connection>,
     cx: &mut Context<Self>,
   ) {
-    let connection = GlobalDbusConnection::system(cx);
-
     // Claiming a reader takes a moment - fprintd is activated on demand and the
     // device has to be opened - and it may not pan out at all, so nothing is
     // shown until it does.
@@ -566,39 +588,57 @@ impl Lock {
 
     self._fingerprint = Some(cx.spawn(async move |this, cx| {
       if let Some(previous) = previous {
-        // Hand the old one back before asking for a device again: fprintd
-        // refuses a claim while one is outstanding, even one that no longer
-        // works.
-        if let Err(error) = previous.stop_verification().await {
-          debug!(?error, "No fingerprint verification left to stop");
-        }
-
-        if let Err(error) = previous.release().await {
-          debug!(?error, "Nothing left to release of the old reader");
-        }
+        close_fprintd_connection(previous).await;
       }
 
-      let setup = match connection.await {
-        Some(connection) => claim_reader(&connection, cx).await,
-        None => {
-          warn!("System bus unavailable, fingerprint unlock is off");
-          ReaderSetup::Unavailable
-        }
-      };
-
-      let reader = match setup {
-        ReaderSetup::Ready(reader) => reader,
-        ReaderSetup::Unavailable => {
+      let connection = match with_timeout(cx, fprintd::connect()).await {
+        Some(Ok(connection)) => connection,
+        Some(Err(error)) => {
+          warn!(?error, "Can't reach fprintd, fingerprint unlock is off");
           this
             .update(cx, |this, cx| {
-              this.set_fingerprint(FingerprintState::Off, cx);
+              this.set_fingerprint(FingerprintState::Off, cx)
             })
             .log_err();
           return;
         }
-        ReaderSetup::Unresponsive => {
+        None => {
+          warn!("Timed out connecting to the system bus for fprintd");
           this
             .update(cx, |this, cx| {
+              this.fingerprint_failed("The fingerprint reader isn't responding".into(), cx);
+            })
+            .log_err();
+          return;
+        }
+      };
+
+      // Stored before anything is claimed, so that whatever ends the lock or
+      // restarts the reader from here on finds the connection to close - even
+      // while a claim is still in flight and this task is dropped waiting on it.
+      let stored = this.update(cx, |this, _cx| {
+        this.fingerprint_connection = Some(connection.clone());
+      });
+
+      if stored.is_err() {
+        close_fprintd_connection(connection).await;
+        return;
+      }
+
+      let reader = match claim_reader(&connection, cx).await {
+        ReaderSetup::Ready(reader) => reader,
+        ReaderSetup::Unavailable => {
+          this
+            .update(cx, |this, cx| this.release_fingerprint(cx))
+            .log_err();
+          return;
+        }
+        ReaderSetup::Unresponsive => {
+          // A claim that lands after we gave up on it is handed back with the
+          // connection.
+          this
+            .update(cx, |this, cx| {
+              this.release_fingerprint(cx);
               this.fingerprint_failed("The fingerprint reader isn't responding".into(), cx);
             })
             .log_err();
@@ -613,9 +653,6 @@ impl Lock {
       });
 
       if claimed.is_err() {
-        // The lock screen went away between claiming and storing the reader, so
-        // nothing else will hand it back.
-        reader.release().await.log_err();
         return;
       }
 
@@ -678,27 +715,17 @@ impl Lock {
     cx.notify();
   }
 
-  /// Hands the reader back to fprintd. The claim is held for the whole process,
-  /// so keeping it would lock out `pam_fprintd` and every other user of the
-  /// reader.
+  /// Hands the reader back to fprintd. Keeping it would lock out `pam_fprintd`
+  /// and every other user of the reader.
   fn release_fingerprint(&mut self, cx: &mut Context<Self>) {
     // Nothing is listening for a finger from here on, so stop asking for one.
     self.set_fingerprint(FingerprintState::Off, cx);
+    self.fingerprint = None;
 
-    let Some(reader) = self.fingerprint.take() else {
-      return;
-    };
-
-    cx.background_spawn(async move {
-      // A verification may still be running, and fprintd wants it stopped
-      // before the release. It ending on its own first is just as fine.
-      if let Err(error) = reader.stop_verification().await {
-        debug!(?error, "No fingerprint verification to stop");
-      }
-
-      reader.release().await.log_err();
-    })
-    .detach();
+    if let Some(connection) = self.fingerprint_connection.take() {
+      cx.background_spawn(close_fprintd_connection(connection))
+        .detach();
+    }
   }
 
   fn unlock(&mut self, cx: &mut Context<Self>) {
@@ -718,6 +745,16 @@ enum ReaderSetup {
   Unresponsive,
 }
 
+/// Closes the connection a reader was claimed through. fprintd drops the claim
+/// of a client that disconnects, along with any verification it had running,
+/// which makes this the one release that works whatever state the claim was
+/// left in.
+async fn close_fprintd_connection(connection: zbus::Connection) {
+  if let Err(error) = connection.close().await {
+    warn!(?error, "Failed to close the fprintd connection");
+  }
+}
+
 /// Finds the default reader and claims it.
 async fn claim_reader(connection: &zbus::Connection, cx: &mut AsyncApp) -> ReaderSetup {
   let reader = match with_timeout(cx, FingerprintReader::find(connection)).await {
@@ -733,24 +770,23 @@ async fn claim_reader(connection: &zbus::Connection, cx: &mut AsyncApp) -> Reade
     }
   };
 
-  match with_timeout(cx, reader.claim()).await {
-    Some(Ok(())) => {}
-    Some(Err(error)) => {
-      warn!(?error, reader = %reader.name, "Failed to claim the fingerprint reader");
-      return ReaderSetup::Unavailable;
-    }
-    None => {
-      // The call is still outstanding. Should it land after we gave up, the
-      // reader would stay claimed for the rest of this process's life, so undo
-      // it in the background.
-      warn!(reader = %reader.name, "Timed out claiming the fingerprint reader");
-      cx.background_spawn(async move {
-        if let Err(error) = reader.release().await {
-          debug!(?error, "Nothing to release after the claim timed out");
-        }
-      })
-      .detach();
-      return ReaderSetup::Unresponsive;
+  let mut attempt = 1;
+  loop {
+    match with_timeout(cx, reader.claim()).await {
+      Some(Ok(())) => break,
+      Some(Err(error)) if attempt < CLAIM_ATTEMPTS => {
+        debug!(?error, attempt, reader = %reader.name, "Fingerprint reader is taken, trying again");
+        cx.background_executor().timer(CLAIM_RETRY_DELAY).await;
+        attempt += 1;
+      }
+      Some(Err(error)) => {
+        warn!(?error, reader = %reader.name, "Failed to claim the fingerprint reader");
+        return ReaderSetup::Unavailable;
+      }
+      None => {
+        warn!(reader = %reader.name, "Timed out claiming the fingerprint reader");
+        return ReaderSetup::Unresponsive;
+      }
     }
   }
 
@@ -797,11 +833,8 @@ async fn verify_fingerprints(reader: FingerprintReader, lock: WeakEntity<Lock>, 
         lock.update(cx, |lock, cx| lock.unlock(cx)).log_err();
         return;
       }
-      Attempt::Gone => {
-        // Nothing left to hand the reader back for us.
-        reader.release().await.log_err();
-        return;
-      }
+      // The lock closed the connection on its way out.
+      Attempt::Gone => return,
       Attempt::Failed => break,
       Attempt::Rejected => {
         failures += 1;

@@ -26,6 +26,23 @@ const ANY_FINGER: &str = "any";
 /// only root has by default.
 const CURRENT_USER: &str = "";
 
+/// Opens a system bus connection for one fingerprint session alone.
+///
+/// fprintd ties a claim to the bus client that made it and hands the reader back
+/// by itself once that client disconnects. Closing a connection of our own is
+/// therefore a release that can't go missing: not for a claim whose call was
+/// still in flight when the task waiting on it was dropped, and not for one
+/// fprintd refused to release because the device was busy. On the shared
+/// connection, which lives as long as the process, either would keep everyone
+/// else - `pam_fprintd` included - off the reader until a restart.
+pub async fn connect() -> Result<zbus::Connection> {
+  let connection = zbus::connection::Builder::system()?
+    .build()
+    .await
+    .context("connecting to the system bus for fprintd")?;
+  Ok(connection)
+}
+
 /// What the reader reported about a running verification.
 pub enum VerifyStatus {
   /// The finger matched one of the enrolled prints.
@@ -163,21 +180,15 @@ impl FingerprintReader {
 
   /// Takes the reader for the current user. Fails while another client holds it,
   /// which is what happens when a `pam_fprintd` conversation is running.
+  ///
+  /// There is no release: the claim belongs to the connection it was made on,
+  /// and closing that connection, see [`connect`], is what hands it back.
   pub async fn claim(&self) -> Result<()> {
     self
       .proxy
       .claim(CURRENT_USER)
       .await
       .context("claiming the fingerprint reader")?;
-    Ok(())
-  }
-
-  pub async fn release(&self) -> Result<()> {
-    self
-      .proxy
-      .release()
-      .await
-      .context("releasing the fingerprint reader")?;
     Ok(())
   }
 
